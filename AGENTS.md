@@ -2,7 +2,8 @@
 
 ## Project Structure & Module Organization
 - `main.py` is the entry point for the Blueprint-driven LangGraph runtime.
-- `Agent.bat` is the Windows launcher that forwards a prompt to `main.py`.
+- `AgentSwarm.bat` is the Windows launcher that forwards a prompt to `main.py`.
+- `AgentSwarm.sh` is the macOS/Linux launcher that forwards a prompt to `main.py`.
 - `core/` contains shared runtime code: blueprint loading, graph orchestration, LLM abstraction, models, and routing helpers.
 - `Blueprints/<name>/` contains one blueprint per folder, with a required `Blueprint.md` metadata file and `entry.py` graph implementation.
 - `docs/` stores supporting gameplay and design references used by blueprints.
@@ -11,7 +12,8 @@
 
 ## Build, Test, and Development Commands
 - `python3 main.py --prompt "Fix combat dodge cancel bug..."` runs the main graph locally.
-- `Agent.bat Fix combat dodge cancel bug...` runs the same flow from Windows.
+- `AgentSwarm.bat Fix combat dodge cancel bug...` runs the same flow from Windows.
+- `./AgentSwarm.sh Fix combat dodge cancel bug...` runs the same flow from macOS/Linux.
 - `python3 -m unittest discover -s tests -v` runs the full test suite.
 - `python3 -m py_compile main.py core/*.py Blueprints/*/entry.py tests/test_runtime.py` performs a fast syntax check.
 - `codex login` is required before Codex CLI-backed LLM flows can run successfully.

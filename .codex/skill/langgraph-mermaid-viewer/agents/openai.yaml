@@ -1,0 +1,4 @@
+interface:
+  display_name: "LangGraph Mermaid Viewer"
+  short_description: "Export LangGraph graphs to Mermaid HTML"
+  default_prompt: "Use $langgraph-mermaid-viewer to inspect a LangGraph and export an HTML Mermaid viewer."
