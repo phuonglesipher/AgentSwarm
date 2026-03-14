@@ -6,6 +6,7 @@ from pathlib import Path
 import unittest
 
 from core.blueprint_loader import load_blueprints
+from core.graph_logging import GRAPH_DEBUG_TRACE_FILE
 from core.main_graph import build_initial_state, build_main_graph
 
 
@@ -109,6 +110,7 @@ class BlueprintDrivenRuntimeTests(unittest.TestCase):
             self.assertTrue((run_dir / "summary.md").exists())
             trace_log = run_dir / "graph_traversal.log"
             self.assertTrue(trace_log.exists())
+            self.assertTrue((run_dir / GRAPH_DEBUG_TRACE_FILE).exists())
 
             artifact_dir = (
                 run_dir
@@ -123,9 +125,12 @@ class BlueprintDrivenRuntimeTests(unittest.TestCase):
             trace_output = trace_log.read_text(encoding="utf-8")
             self.assertIn("[main_graph] [analyze_prompt] ENTER", trace_output)
             self.assertIn("[main_graph] [dispatch_active_task] ROUTE", trace_output)
-            self.assertIn("input=", trace_output)
-            self.assertIn("output=", trace_output)
+            self.assertIn("input_keys=", trace_output)
+            self.assertIn("output_keys=", trace_output)
+            self.assertIn(f"details={GRAPH_DEBUG_TRACE_FILE}#", trace_output)
             self.assertIn("next=gameplay-engineer-blueprint", trace_output)
+            self.assertIn("[gameplay-engineer-blueprint] [gameplay-reviewer-blueprint] SUBGRAPH_ENTER", trace_output)
+            self.assertIn("[gameplay-engineer-blueprint] [gameplay-reviewer-blueprint] SUBGRAPH_EXIT", trace_output)
             self.assertIn("[gameplay-engineer-blueprint] [request_review] ENTER", trace_output)
             self.assertIn("[gameplay-reviewer-blueprint] [review_plan] ENTER", trace_output)
             self.assertIn("[main_graph] [finalize] EXIT", trace_output)

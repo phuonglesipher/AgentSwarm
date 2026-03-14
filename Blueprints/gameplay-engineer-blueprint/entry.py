@@ -11,7 +11,7 @@ import unittest
 from langgraph.graph import END, START, StateGraph
 from typing_extensions import NotRequired, TypedDict
 
-from core.graph_logging import trace_graph_node, trace_route_decision
+from core.graph_logging import log_graph_payload_event, trace_graph_node, trace_route_decision
 from core.llm import LLMError
 from core.models import BlueprintContext, BlueprintMetadata
 from core.text_utils import normalize_text, slugify, tokenize
@@ -420,7 +420,40 @@ def build_graph(context: BlueprintContext, metadata: BlueprintMetadata):
         review_round = state["review_round"] + 1
         return {"review_round": review_round}
 
+    def enter_review_subgraph(state: EngineerState) -> dict[str, Any]:
+        review_request = {
+            "task_prompt": state["task_prompt"],
+            "plan_doc": state["plan_doc"],
+            "review_round": state["review_round"],
+            "task_id": state["task_id"],
+            "run_dir": state["run_dir"],
+        }
+        log_graph_payload_event(
+            state=state,
+            graph_name=graph_name,
+            node_name="gameplay-reviewer-blueprint",
+            phase="SUBGRAPH_ENTER",
+            payload_label="input",
+            payload=review_request,
+        )
+        return {}
+
     def capture_review_result(state: EngineerState) -> dict[str, Any]:
+        review_result = {
+            "score": state["score"],
+            "feedback": state["feedback"],
+            "missing_sections": state["missing_sections"],
+            "approved": state["approved"],
+            "summary": state["summary"],
+        }
+        log_graph_payload_event(
+            state=state,
+            graph_name=graph_name,
+            node_name="gameplay-reviewer-blueprint",
+            phase="SUBGRAPH_EXIT",
+            payload_label="output",
+            payload=review_result,
+        )
         artifact_dir = Path(state["artifact_dir"])
         feedback_lines = [
             f"# Review Round {state['review_round']}",
@@ -626,6 +659,10 @@ def build_graph(context: BlueprintContext, metadata: BlueprintMetadata):
         "request_review",
         trace_graph_node(graph_name=graph_name, node_name="request_review", node_fn=request_review),
     )
+    graph.add_node(
+        "enter_review_subgraph",
+        trace_graph_node(graph_name=graph_name, node_name="enter_review_subgraph", node_fn=enter_review_subgraph),
+    )
     graph.add_node("gameplay-reviewer-blueprint", reviewer_graph)
     graph.add_node(
         "capture_review_result",
@@ -657,7 +694,8 @@ def build_graph(context: BlueprintContext, metadata: BlueprintMetadata):
     graph.add_edge("inspect_docs", "build_design_doc")
     graph.add_edge("build_design_doc", "plan_work")
     graph.add_edge("plan_work", "request_review")
-    graph.add_edge("request_review", "gameplay-reviewer-blueprint")
+    graph.add_edge("request_review", "enter_review_subgraph")
+    graph.add_edge("enter_review_subgraph", "gameplay-reviewer-blueprint")
     graph.add_edge("gameplay-reviewer-blueprint", "capture_review_result")
     graph.add_conditional_edges(
         "capture_review_result",

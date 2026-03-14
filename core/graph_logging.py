@@ -10,11 +10,14 @@ import sys
 
 
 GRAPH_TRACE_FILE = "graph_traversal.log"
+GRAPH_DEBUG_TRACE_FILE = "graph_state_debug.jsonl"
 _TRACE_LOCK = Lock()
 _DEBUG_VALUE_CHAR_LIMIT = 240
 _DEBUG_COLLECTION_ITEM_LIMIT = 8
 _DEBUG_MAPPING_KEY_LIMIT = 16
 _DEBUG_RECURSION_LIMIT = 2
+_DEBUG_KEY_SUMMARY_LIMIT = 8
+_TRACE_EVENT_ID = 0
 
 
 def _resolve_run_dir(state: Mapping[str, Any] | None) -> Path | None:
@@ -102,6 +105,85 @@ def _serialize_debug_payload(payload: Mapping[str, Any] | None) -> str:
     return json.dumps(normalized, ensure_ascii=True, sort_keys=True)
 
 
+def _summarize_payload_keys(payload: Mapping[str, Any] | None) -> str:
+    if not payload:
+        return "(none)"
+    keys = [str(key) for key in payload]
+    visible = keys[:_DEBUG_KEY_SUMMARY_LIMIT]
+    summary = ", ".join(visible)
+    if len(keys) > _DEBUG_KEY_SUMMARY_LIMIT:
+        summary = f"{summary}, ... ({len(keys)} total)"
+    return summary
+
+
+def _write_debug_trace_record(
+    *,
+    state: Mapping[str, Any] | None,
+    graph_name: str,
+    node_name: str,
+    phase: str,
+    payload_label: str,
+    payload: Mapping[str, Any] | None,
+) -> int | None:
+    run_dir = _resolve_run_dir(state)
+    if run_dir is None:
+        return None
+
+    record = {
+        "graph": graph_name,
+        "node": node_name,
+        "phase": phase,
+        "payload_label": payload_label,
+        "payload": _normalize_debug_value(payload),
+        "state_context": _summarize_state(state),
+        "timestamp": datetime.now().isoformat(timespec="seconds"),
+    }
+
+    with _TRACE_LOCK:
+        global _TRACE_EVENT_ID
+        _TRACE_EVENT_ID += 1
+        event_id = _TRACE_EVENT_ID
+        record["event_id"] = event_id
+        debug_path = run_dir / GRAPH_DEBUG_TRACE_FILE
+        debug_path.parent.mkdir(parents=True, exist_ok=True)
+        with debug_path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(record, ensure_ascii=True, sort_keys=True) + "\n")
+    return event_id
+
+
+def log_graph_payload_event(
+    *,
+    state: Mapping[str, Any] | None,
+    graph_name: str,
+    node_name: str,
+    phase: str,
+    payload_label: str,
+    payload: Mapping[str, Any] | None,
+    message: str = "",
+) -> None:
+    event_id = _write_debug_trace_record(
+        state=state,
+        graph_name=graph_name,
+        node_name=node_name,
+        phase=phase,
+        payload_label=payload_label,
+        payload=payload,
+    )
+    details: list[str] = []
+    if message:
+        details.append(message)
+    details.append(f"{payload_label}_keys={_summarize_payload_keys(payload)}")
+    if event_id is not None:
+        details.append(f"details={GRAPH_DEBUG_TRACE_FILE}#{event_id}")
+    log_graph_event(
+        state=state,
+        graph_name=graph_name,
+        node_name=node_name,
+        phase=phase,
+        message=" ".join(details),
+    )
+
+
 def log_graph_event(
     *,
     state: Mapping[str, Any] | None,
@@ -144,32 +226,37 @@ def trace_graph_node(
     node_fn: Callable[[dict[str, Any]], dict[str, Any]],
 ) -> Callable[[dict[str, Any]], dict[str, Any]]:
     def wrapper(state: dict[str, Any]) -> dict[str, Any]:
-        log_graph_event(
+        log_graph_payload_event(
             state=state,
             graph_name=graph_name,
             node_name=node_name,
             phase="ENTER",
-            message=f"input={_serialize_debug_payload(state)}",
+            payload_label="input",
+            payload=state,
         )
         try:
             result = node_fn(state)
         except Exception as exc:
-            log_graph_event(
+            log_graph_payload_event(
                 state=state,
                 graph_name=graph_name,
                 node_name=node_name,
                 phase="ERROR",
-                message=f"{type(exc).__name__}: {exc} input={_serialize_debug_payload(state)}",
+                payload_label="input",
+                payload=state,
+                message=f"{type(exc).__name__}: {exc}",
             )
             raise
 
         updated_keys = ", ".join(sorted(result)) if result else "no_state_updates"
-        log_graph_event(
+        log_graph_payload_event(
             state=state,
             graph_name=graph_name,
             node_name=node_name,
             phase="EXIT",
-            message=f"updated_keys={updated_keys} output={_serialize_debug_payload(result)}",
+            payload_label="output",
+            payload=result,
+            message=f"updated_keys={updated_keys}",
         )
         return result
 
