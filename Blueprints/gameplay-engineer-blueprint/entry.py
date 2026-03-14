@@ -1,0 +1,586 @@
+from __future__ import annotations
+
+from pathlib import Path
+import sys
+import types
+from typing import Any
+
+from langgraph.graph import END, START, StateGraph
+from typing_extensions import TypedDict
+
+from core.llm import LLMError
+from core.models import BlueprintContext, BlueprintMetadata
+from core.text_utils import normalize_text, slugify, tokenize
+
+
+class EngineerState(TypedDict):
+    prompt: str
+    task_prompt: str
+    task_id: str
+    run_dir: str
+    task_type: str
+    task_type_reason: str
+    doc_hits: list[str]
+    doc_context: str
+    design_doc: str
+    plan_doc: str
+    review_round: int
+    review_score: int
+    review_feedback: str
+    missing_sections: list[str]
+    code_attempt: int
+    generated_code: str
+    generated_tests: str
+    implementation_notes: str
+    compile_ok: bool
+    tests_ok: bool
+    test_output: str
+    artifact_dir: str
+    final_report: dict[str, Any]
+    summary: str
+
+
+REQUIRED_PLAN_SECTIONS = {
+    "Task Type": "Describe whether this is a bug-fix or a new feature.",
+    "Existing Docs": "Reference gameplay and design docs that informed the work.",
+    "Implementation Steps": "Describe the implementation sequence and system touch points.",
+    "Unit Tests": "List the unit tests that must exist before code is considered done.",
+    "Risks": "Record the likely implementation risks and fallback plans.",
+    "Acceptance Criteria": "State the observable gameplay outcome when the task is complete.",
+}
+
+
+def _find_relevant_docs(project_root: Path, task_prompt: str) -> list[str]:
+    search_roots = [
+        project_root / "docs" / "engineer" / "gameplay",
+        project_root / "docs" / "designer",
+    ]
+    prompt_tokens = tokenize(task_prompt)
+    scored: list[tuple[int, Path]] = []
+
+    for root in search_roots:
+        if not root.exists():
+            continue
+        for path in root.rglob("*.md"):
+            content = path.read_text(encoding="utf-8")
+            score = len(prompt_tokens & tokenize(f"{path.name} {content}"))
+            if score:
+                scored.append((score, path))
+
+    scored.sort(key=lambda item: (-item[0], item[1].name))
+    return [str(path.relative_to(project_root)) for _, path in scored[:3]]
+
+
+def _load_doc_context(project_root: Path, doc_hits: list[str]) -> str:
+    blocks: list[str] = []
+    for relative_path in doc_hits:
+        path = project_root / relative_path
+        if not path.exists():
+            continue
+        snippet = path.read_text(encoding="utf-8")[:2000].strip()
+        blocks.append(f"# {relative_path}\n{snippet}")
+    return "\n\n".join(blocks)
+
+
+def _fallback_task_classification(task_prompt: str) -> tuple[str, str]:
+    bugfix_keywords = {"fix", "bug", "issue", "error", "crash"}
+    normalized = normalize_text(task_prompt)
+    task_type = "bugfix" if bugfix_keywords & tokenize(normalized) else "feature"
+    reason = "Detected bug-fix vocabulary in the task prompt." if task_type == "bugfix" else "Defaulted to feature flow."
+    return task_type, reason
+
+
+def _compose_design_doc(task_prompt: str, task_type: str, doc_hits: list[str], doc_context: str) -> str:
+    lines = [
+        "# Gameplay Design Context",
+        "",
+        f"Task Prompt: {task_prompt}",
+        f"Task Type: {task_type}",
+        "",
+        "## Existing References",
+    ]
+    if doc_hits:
+        lines.extend([f"- {item}" for item in doc_hits])
+    else:
+        lines.extend(
+            [
+                "- No existing gameplay or design doc matched the task closely enough.",
+                "- A fresh design baseline was created from the incoming prompt.",
+            ]
+        )
+
+    lines.extend(
+        [
+            "",
+            "## Design Intent",
+            "- Keep the gameplay change readable for engineering and design partners.",
+            "- Describe expected player-facing behavior first, then implementation notes.",
+        ]
+    )
+    if doc_context:
+        lines.extend(["", "## Reference Snippets", doc_context])
+    return "\n".join(lines)
+
+
+def _compose_initial_plan(task_prompt: str, task_type: str, doc_hits: list[str]) -> str:
+    references = "\n".join(f"- {item}" for item in doc_hits) or "- No matching docs found."
+    return "\n".join(
+        [
+            "# Gameplay Implementation Plan",
+            "",
+            "## Overview",
+            f"- Deliver work for: {task_prompt}",
+            "",
+            "## Task Type",
+            f"- {task_type}",
+            "",
+            "## Existing Docs",
+            references,
+            "",
+            "## Implementation Steps",
+            "- Inspect related gameplay systems and identify touch points.",
+            "- Update the gameplay behavior and preserve predictable state transitions.",
+            "- Capture expected debug signals for fast regression checks.",
+        ]
+    )
+
+
+def _revise_plan(plan_doc: str, missing_sections: list[str], task_prompt: str, review_feedback: str) -> str:
+    additions: list[str] = []
+    for section in missing_sections:
+        guidance = REQUIRED_PLAN_SECTIONS.get(section, "Add the missing section with concrete details.")
+        additions.extend(
+            [
+                "",
+                f"## {section}",
+                f"- {guidance}",
+                f"- Task context: {task_prompt}",
+                f"- Reviewer note: {review_feedback}",
+            ]
+        )
+    return plan_doc + "\n" + "\n".join(additions)
+
+
+def _fallback_code_bundle(task_prompt: str, task_type: str, attempt: int) -> dict[str, str]:
+    normalized_prompt = normalize_text(task_prompt)
+    task_slug = slugify(task_prompt, fallback="gameplay-task").replace("-", "_")
+    expected_unit_tests = ["compiles", "returns_task_metadata", "captures_task_type", "records_review_score"]
+
+    if attempt == 1:
+        source_code = "\n".join(
+            [
+                "from __future__ import annotations",
+                "",
+                "def build_gameplay_change_summary() -> dict:",
+                "    return {",
+                f'        "task_id": "{task_slug}",',
+                f'        "task_type": "{task_type}",',
+                f'        "prompt": "{normalized_prompt}",',
+                '        "implementation_status": "draft",',
+                "    }",
+            ]
+        )
+    else:
+        source_code = "\n".join(
+            [
+                "from __future__ import annotations",
+                "",
+                "def build_gameplay_change_summary() -> dict:",
+                "    return {",
+                f'        "task_id": "{task_slug}",',
+                f'        "task_type": "{task_type}",',
+                f'        "prompt": "{normalized_prompt}",',
+                '        "implementation_status": "ready-for-review",',
+                f'        "unit_tests": {expected_unit_tests},',
+                "    }",
+            ]
+        )
+
+    test_code = "\n".join(
+        [
+            "from gameplay_change import build_gameplay_change_summary",
+            "",
+            "def test_build_gameplay_change_summary():",
+            "    summary = build_gameplay_change_summary()",
+            '    assert summary["task_type"] in {"bugfix", "feature"}',
+            '    assert summary["implementation_status"] == "ready-for-review"',
+            '    assert "unit_tests" in summary',
+        ]
+    )
+    notes = "Deterministic fallback code bundle was generated."
+    return {
+        "source_code": source_code,
+        "test_code": test_code,
+        "implementation_notes": notes,
+    }
+
+
+def _run_compile_and_tests(source_code: str, test_code: str) -> tuple[bool, bool, str]:
+    try:
+        compiled_source = compile(source_code, "gameplay_change.py", "exec")
+    except SyntaxError as exc:
+        return False, False, f"Compile error in gameplay_change.py: {exc}"
+
+    module = types.ModuleType("gameplay_change")
+    previous_module = sys.modules.get("gameplay_change")
+    try:
+        exec(compiled_source, module.__dict__, module.__dict__)
+        sys.modules["gameplay_change"] = module
+        compiled_tests = compile(test_code, "test_gameplay_change.py", "exec")
+        test_namespace: dict[str, Any] = {}
+        exec(compiled_tests, test_namespace, test_namespace)
+        test_functions = [
+            value for name, value in test_namespace.items() if name.startswith("test_") and callable(value)
+        ]
+        if not test_functions:
+            return True, False, "No generated test functions were found."
+        for test_func in test_functions:
+            test_func()
+    except SyntaxError as exc:
+        return False, False, f"Compile error in test_gameplay_change.py: {exc}"
+    except AssertionError as exc:
+        message = str(exc) or "Generated assertion failed."
+        return True, False, f"Unit test failed: {message}"
+    except Exception as exc:
+        return True, False, f"Unit test execution failed: {exc}"
+    finally:
+        if previous_module is None:
+            sys.modules.pop("gameplay_change", None)
+        else:
+            sys.modules["gameplay_change"] = previous_module
+
+    return True, True, f"Compile and {len(test_functions)} generated test(s) passed."
+
+
+def build_graph(context: BlueprintContext, metadata: BlueprintMetadata):
+    project_root = context.project_root
+    default_llm = context.llm
+
+    def classify_request(state: EngineerState) -> dict[str, Any]:
+        artifact_dir = Path(state["run_dir"]) / "tasks" / state["task_id"] / metadata.name
+        artifact_dir.mkdir(parents=True, exist_ok=True)
+        task_type, task_type_reason = _fallback_task_classification(state["task_prompt"])
+
+        if default_llm.is_enabled():
+            schema = {
+                "type": "object",
+                "properties": {
+                    "task_type": {"type": "string", "enum": ["bugfix", "feature"]},
+                    "reason": {"type": "string"},
+                },
+                "required": ["task_type", "reason"],
+                "additionalProperties": False,
+            }
+            try:
+                result = default_llm.generate_json(
+                    instructions=(
+                        "You are gameplay-engineer-blueprint. Decide whether the task is a gameplay bugfix or a new gameplay feature. "
+                        "Use bugfix only when the request is about fixing an issue, regression, crash, or unintended behavior."
+                    ),
+                    input_text=f"Task prompt:\n{state['task_prompt']}",
+                    schema_name="gameplay_task_classification",
+                    schema=schema,
+                )
+                task_type = result["task_type"]
+                task_type_reason = result["reason"]
+            except LLMError:
+                pass
+
+        return {
+            "task_type": task_type,
+            "task_type_reason": task_type_reason,
+            "review_round": 0,
+            "review_score": 0,
+            "code_attempt": 0,
+            "artifact_dir": str(artifact_dir),
+        }
+
+    def inspect_docs(state: EngineerState) -> dict[str, Any]:
+        doc_hits = _find_relevant_docs(project_root, state["task_prompt"])
+        doc_context = _load_doc_context(project_root, doc_hits)
+        return {"doc_hits": doc_hits, "doc_context": doc_context}
+
+    def build_design_doc(state: EngineerState) -> dict[str, Any]:
+        design_doc = _compose_design_doc(
+            state["task_prompt"],
+            state["task_type"],
+            state["doc_hits"],
+            state["doc_context"],
+        )
+        if default_llm.is_enabled():
+            try:
+                design_doc = default_llm.generate_text(
+                    instructions=(
+                        "You are gameplay-engineer-blueprint. Write a concise markdown design context document for a gameplay task. "
+                        "Include sections: Overview, Existing References, Player-Facing Behavior, Technical Notes, Risks. "
+                        "Ground the design in the provided docs when they exist."
+                    ),
+                    input_text=(
+                        f"Task prompt:\n{state['task_prompt']}\n\n"
+                        f"Task type: {state['task_type']}\n"
+                        f"Classification reason: {state['task_type_reason']}\n\n"
+                        f"Doc hits:\n{state['doc_hits']}\n\n"
+                        f"Doc context:\n{state['doc_context'] or 'No matching docs.'}"
+                    ),
+                )
+            except LLMError:
+                pass
+
+        artifact_dir = Path(state["artifact_dir"])
+        (artifact_dir / "design_doc.md").write_text(design_doc, encoding="utf-8")
+        return {"design_doc": design_doc}
+
+    def plan_work(state: EngineerState) -> dict[str, Any]:
+        plan_doc = _compose_initial_plan(state["task_prompt"], state["task_type"], state["doc_hits"])
+        if default_llm.is_enabled():
+            try:
+                plan_doc = default_llm.generate_text(
+                    instructions=(
+                        "You are gameplay-engineer-blueprint. Produce a markdown implementation plan for gameplay work. "
+                        "The document must contain these exact sections: Overview, Task Type, Existing Docs, Implementation Steps, "
+                        "Unit Tests, Risks, Acceptance Criteria. Each section must have concrete bullets."
+                    ),
+                    input_text=(
+                        f"Task prompt:\n{state['task_prompt']}\n\n"
+                        f"Task type: {state['task_type']}\n"
+                        f"Design doc:\n{state['design_doc']}\n\n"
+                        f"Relevant docs:\n{state['doc_context'] or 'No matching docs.'}"
+                    ),
+                )
+            except LLMError:
+                pass
+
+        artifact_dir = Path(state["artifact_dir"])
+        (artifact_dir / "plan_doc.md").write_text(plan_doc, encoding="utf-8")
+        return {"plan_doc": plan_doc}
+
+    def request_review(state: EngineerState) -> dict[str, Any]:
+        review_round = state["review_round"] + 1
+        review_result = context.invoke_blueprint(
+            "gameplay-reviewer-blueprint",
+            {
+                "task_prompt": state["task_prompt"],
+                "plan_doc": state["plan_doc"],
+                "review_round": review_round,
+            },
+        )
+        artifact_dir = Path(state["artifact_dir"])
+        feedback_lines = [
+            f"# Review Round {review_round}",
+            "",
+            f"Score: {review_result['score']}",
+            "",
+            "## Feedback",
+            review_result["feedback"],
+        ]
+        (artifact_dir / f"review_round_{review_round}.md").write_text("\n".join(feedback_lines), encoding="utf-8")
+        return {
+            "review_round": review_round,
+            "review_score": review_result["score"],
+            "review_feedback": review_result["feedback"],
+            "missing_sections": review_result["missing_sections"],
+        }
+
+    def review_gate(state: EngineerState) -> str:
+        if state["review_score"] < 100:
+            return "revise_plan"
+        return "implement_code"
+
+    def revise_plan(state: EngineerState) -> dict[str, Any]:
+        revised_plan = _revise_plan(
+            state["plan_doc"],
+            state["missing_sections"],
+            state["task_prompt"],
+            state["review_feedback"],
+        )
+        if default_llm.is_enabled():
+            try:
+                revised_plan = default_llm.generate_text(
+                    instructions=(
+                        "You are gameplay-engineer-blueprint. Rewrite the full markdown implementation plan after reviewer feedback. "
+                        "Keep the exact sections Overview, Task Type, Existing Docs, Implementation Steps, Unit Tests, Risks, "
+                        "Acceptance Criteria, and make sure all reviewer concerns are addressed."
+                    ),
+                    input_text=(
+                        f"Task prompt:\n{state['task_prompt']}\n\n"
+                        f"Current plan:\n{state['plan_doc']}\n\n"
+                        f"Missing sections:\n{state['missing_sections']}\n\n"
+                        f"Reviewer feedback:\n{state['review_feedback']}\n\n"
+                        f"Design doc:\n{state['design_doc']}"
+                    ),
+                )
+            except LLMError:
+                pass
+
+        artifact_dir = Path(state["artifact_dir"])
+        (artifact_dir / "plan_doc.md").write_text(revised_plan, encoding="utf-8")
+        return {"plan_doc": revised_plan}
+
+    def _generate_code_bundle(state: EngineerState, error_context: str = "") -> dict[str, str]:
+        fallback = _fallback_code_bundle(state["task_prompt"], state["task_type"], state["code_attempt"] + 1)
+        codegen_llm = context.get_llm("codegen")
+        if not codegen_llm.is_enabled():
+            return fallback
+
+        schema = {
+            "type": "object",
+            "properties": {
+                "source_code": {"type": "string"},
+                "test_code": {"type": "string"},
+                "implementation_notes": {"type": "string"},
+            },
+            "required": ["source_code", "test_code", "implementation_notes"],
+            "additionalProperties": False,
+        }
+        try:
+            result = codegen_llm.generate_json(
+                instructions=(
+                    "You are gameplay-engineer-blueprint code generation. Return Python source code and Python tests. "
+                    "Do not use markdown fences. The source file must define build_gameplay_change_summary() -> dict. "
+                    "The returned dict must include task_type, implementation_status set to 'ready-for-review', and unit_tests. "
+                    "The test file must be plain Python with assert statements and no external dependencies."
+                ),
+                input_text=(
+                    f"Task prompt:\n{state['task_prompt']}\n\n"
+                    f"Task type: {state['task_type']}\n\n"
+                    f"Design doc:\n{state['design_doc']}\n\n"
+                    f"Implementation plan:\n{state['plan_doc']}\n\n"
+                    f"Reviewer feedback:\n{state['review_feedback']}\n\n"
+                    f"Previous self-test output:\n{error_context or 'None'}"
+                ),
+                schema_name="gameplay_code_bundle",
+                schema=schema,
+            )
+        except LLMError:
+            return fallback
+
+        source_code = str(result["source_code"]).strip()
+        test_code = str(result["test_code"]).strip()
+        if not source_code or not test_code:
+            return fallback
+        return {
+            "source_code": source_code,
+            "test_code": test_code,
+            "implementation_notes": str(result["implementation_notes"]).strip() or "Codex generated the code bundle.",
+        }
+
+    def implement_code(state: EngineerState) -> dict[str, Any]:
+        bundle = _generate_code_bundle(state)
+        code_attempt = state["code_attempt"] + 1
+        artifact_dir = Path(state["artifact_dir"])
+        (artifact_dir / "gameplay_change.py").write_text(bundle["source_code"], encoding="utf-8")
+        (artifact_dir / "test_gameplay_change.py").write_text(bundle["test_code"], encoding="utf-8")
+        return {
+            "code_attempt": code_attempt,
+            "generated_code": bundle["source_code"],
+            "generated_tests": bundle["test_code"],
+            "implementation_notes": bundle["implementation_notes"],
+        }
+
+    def self_test(state: EngineerState) -> dict[str, Any]:
+        compile_ok, tests_ok, test_output = _run_compile_and_tests(state["generated_code"], state["generated_tests"])
+        artifact_dir = Path(state["artifact_dir"])
+        (artifact_dir / "self_test.txt").write_text(test_output, encoding="utf-8")
+        return {
+            "compile_ok": compile_ok,
+            "tests_ok": tests_ok,
+            "test_output": test_output,
+        }
+
+    def test_gate(state: EngineerState) -> str:
+        if state["compile_ok"] and state["tests_ok"]:
+            return "prepare_delivery"
+        return "repair_code"
+
+    def repair_code(state: EngineerState) -> dict[str, Any]:
+        bundle = _generate_code_bundle(state, error_context=state["test_output"])
+        code_attempt = state["code_attempt"] + 1
+        artifact_dir = Path(state["artifact_dir"])
+        (artifact_dir / "gameplay_change.py").write_text(bundle["source_code"], encoding="utf-8")
+        (artifact_dir / "test_gameplay_change.py").write_text(bundle["test_code"], encoding="utf-8")
+        return {
+            "code_attempt": code_attempt,
+            "generated_code": bundle["source_code"],
+            "generated_tests": bundle["test_code"],
+            "implementation_notes": bundle["implementation_notes"],
+        }
+
+    def prepare_delivery(state: EngineerState) -> dict[str, Any]:
+        artifact_dir = Path(state["artifact_dir"])
+        commit_message = f"feat(gameplay): deliver {state['task_id']}"
+        if state["task_type"] == "bugfix":
+            commit_message = f"fix(gameplay): resolve {state['task_id']}"
+        pr_title = f"[Gameplay] {state['task_prompt']}"
+        pr_body = "\n".join(
+            [
+                "# Pull Request Draft",
+                "",
+                f"Blueprint: {metadata.name}",
+                f"Task: {state['task_prompt']}",
+                f"Review score: {state['review_score']}",
+                f"Task type rationale: {state['task_type_reason']}",
+                f"Implementation notes: {state['implementation_notes']}",
+                "",
+                "## Validation",
+                f"- {state['test_output']}",
+            ]
+        )
+        (artifact_dir / "commit_message.txt").write_text(commit_message, encoding="utf-8")
+        (artifact_dir / "pull_request.md").write_text(pr_body, encoding="utf-8")
+
+        final_report = {
+            "task_type": state["task_type"],
+            "review_rounds": state["review_round"],
+            "review_score": state["review_score"],
+            "compile_ok": state["compile_ok"],
+            "tests_ok": state["tests_ok"],
+            "commit_message": commit_message,
+            "pr_title": pr_title,
+            "artifact_dir": str(artifact_dir),
+            "llm_profile": context.llm_manager.describe(metadata.llm_profile),
+            "codegen_profile": context.llm_manager.describe("codegen"),
+        }
+        summary = (
+            f"{metadata.name} completed {state['task_type']} flow in "
+            f"{state['review_round']} review round(s) and {state['code_attempt']} code attempt(s)."
+        )
+        return {"final_report": final_report, "summary": summary}
+
+    graph = StateGraph(EngineerState)
+    graph.add_node("classify_request", classify_request)
+    graph.add_node("inspect_docs", inspect_docs)
+    graph.add_node("build_design_doc", build_design_doc)
+    graph.add_node("plan_work", plan_work)
+    graph.add_node("request_review", request_review)
+    graph.add_node("revise_plan", revise_plan)
+    graph.add_node("implement_code", implement_code)
+    graph.add_node("self_test", self_test)
+    graph.add_node("repair_code", repair_code)
+    graph.add_node("prepare_delivery", prepare_delivery)
+
+    graph.add_edge(START, "classify_request")
+    graph.add_edge("classify_request", "inspect_docs")
+    graph.add_edge("inspect_docs", "build_design_doc")
+    graph.add_edge("build_design_doc", "plan_work")
+    graph.add_edge("plan_work", "request_review")
+    graph.add_conditional_edges(
+        "request_review",
+        review_gate,
+        {
+            "revise_plan": "revise_plan",
+            "implement_code": "implement_code",
+        },
+    )
+    graph.add_edge("revise_plan", "request_review")
+    graph.add_edge("implement_code", "self_test")
+    graph.add_conditional_edges(
+        "self_test",
+        test_gate,
+        {
+            "repair_code": "repair_code",
+            "prepare_delivery": "prepare_delivery",
+        },
+    )
+    graph.add_edge("repair_code", "self_test")
+    graph.add_edge("prepare_delivery", END)
+    return graph
