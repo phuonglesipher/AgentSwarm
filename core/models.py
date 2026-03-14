@@ -35,6 +35,7 @@ class BlueprintContext:
 class BlueprintRuntime:
     metadata: BlueprintMetadata
     invoke: Callable[[dict[str, Any]], dict[str, Any]]
+    graph: Any | None = None
 
 
 @dataclass

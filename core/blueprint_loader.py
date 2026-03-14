@@ -110,6 +110,7 @@ def load_blueprints(project_root: Path, blueprints_root: Path, llm_manager: LLMM
             BlueprintRuntime(
                 metadata=metadata,
                 invoke=lambda payload, active_runtime=runtime_object: active_runtime.invoke(payload),
+                graph=runtime_object,
             )
         )
 

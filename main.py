@@ -6,7 +6,7 @@ from pathlib import Path
 
 from core.blueprint_loader import load_blueprints
 from core.llm import LLMManager
-from core.main_graph import build_main_graph
+from core.main_graph import build_initial_state, build_main_graph
 
 
 def _build_run_dir(project_root: Path) -> Path:
@@ -39,16 +39,7 @@ def main() -> None:
     registry = load_blueprints(project_root=project_root, blueprints_root=blueprints_root, llm_manager=llm_manager)
     main_graph = build_main_graph(registry=registry, llm_manager=llm_manager)
 
-    result = main_graph.invoke(
-        {
-            "prompt": prompt,
-            "run_dir": str(run_dir),
-            "tasks": [],
-            "results": [],
-            "final_response": "",
-            "routing_notes": [],
-        }
-    )
+    result = main_graph.invoke(build_initial_state(prompt=prompt, run_dir=str(run_dir)))
 
     print(result["final_response"])
     print(f"\nArtifacts: {run_dir}")

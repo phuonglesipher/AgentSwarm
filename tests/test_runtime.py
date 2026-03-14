@@ -6,7 +6,7 @@ from pathlib import Path
 import unittest
 
 from core.blueprint_loader import load_blueprints
-from core.main_graph import build_main_graph
+from core.main_graph import build_initial_state, build_main_graph
 
 
 class DisabledLLMClient:
@@ -99,14 +99,10 @@ class BlueprintDrivenRuntimeTests(unittest.TestCase):
             run_dir.mkdir(parents=True, exist_ok=True)
 
             result = graph.invoke(
-                {
-                    "prompt": "Fix combat dodge cancel bug in melee gameplay and keep 3C responsiveness stable",
-                    "run_dir": str(run_dir),
-                    "tasks": [],
-                    "results": [],
-                    "final_response": "",
-                    "routing_notes": [],
-                }
+                build_initial_state(
+                    prompt="Fix combat dodge cancel bug in melee gameplay and keep 3C responsiveness stable",
+                    run_dir=str(run_dir),
+                )
             )
 
             self.assertIn("gameplay-engineer-blueprint", result["final_response"])
@@ -121,6 +117,20 @@ class BlueprintDrivenRuntimeTests(unittest.TestCase):
             self.assertTrue((artifact_dir / "plan_doc.md").exists())
             self.assertTrue((artifact_dir / "pull_request.md").exists())
             self.assertTrue((artifact_dir / "self_test.txt").exists())
+
+    def test_main_graph_registers_blueprint_subgraphs(self) -> None:
+        graph = build_main_graph(registry=self.registry, llm_manager=self.llm_manager)
+        subgraphs = dict(graph.get_subgraphs())
+
+        self.assertIn("gameplay-engineer-blueprint", subgraphs)
+        self.assertIn("gameplay-reviewer-blueprint", subgraphs)
+
+    def test_main_graph_xray_mermaid_includes_blueprint_subgraphs(self) -> None:
+        graph = build_main_graph(registry=self.registry, llm_manager=self.llm_manager)
+        mermaid = graph.get_graph(xray=1).draw_mermaid()
+
+        self.assertIn("subgraph gameplay-engineer-blueprint", mermaid)
+        self.assertIn("subgraph gameplay-reviewer-blueprint", mermaid)
 
     def test_self_test_harness_supports_module_aliases_and___file__(self) -> None:
         engineer_entry = self.project_root / "Blueprints" / "gameplay-engineer-blueprint" / "entry.py"

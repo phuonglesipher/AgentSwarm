@@ -29,6 +29,19 @@ class MainState(TypedDict):
     results: list[dict[str, Any]]
     final_response: str
     routing_notes: list[str]
+    active_task_index: int | None
+    active_task: MainTask | None
+    active_task_error: str
+    task_prompt: str
+    task_id: str
+    plan_doc: str
+    review_round: int
+    summary: str
+    final_report: dict[str, Any]
+    score: int
+    feedback: str
+    missing_sections: list[str]
+    approved: bool
 
 
 def _split_prompt(prompt: str) -> list[str]:
@@ -151,7 +164,81 @@ def _write_run_summary(run_dir: Path, state: MainState) -> None:
     (run_dir / "summary.md").write_text("\n".join(lines), encoding="utf-8")
 
 
+def _reset_active_task_fields() -> dict[str, Any]:
+    return {
+        "active_task_index": None,
+        "active_task": None,
+        "active_task_error": "",
+        "task_prompt": "",
+        "task_id": "",
+        "plan_doc": "",
+        "review_round": 0,
+        "summary": "",
+        "final_report": {},
+        "score": 0,
+        "feedback": "",
+        "missing_sections": [],
+        "approved": False,
+    }
+
+
+def _prepare_active_task(task: MainTask, index: int) -> dict[str, Any]:
+    task_input = task["input"]
+    return {
+        "active_task_index": index,
+        "active_task": task,
+        "active_task_error": "",
+        "task_prompt": str(task_input.get("task_prompt") or task["description"]),
+        "task_id": str(task_input.get("task_id") or task["id"]),
+        "plan_doc": str(task_input.get("plan_doc") or ""),
+        "review_round": int(task_input.get("review_round") or 0),
+        "summary": "",
+        "final_report": {},
+        "score": 0,
+        "feedback": "",
+        "missing_sections": [],
+        "approved": False,
+    }
+
+
+def _extract_blueprint_output(state: MainState, blueprint_name: str | None) -> dict[str, Any] | None:
+    if blueprint_name == "gameplay-reviewer-blueprint":
+        return {
+            "score": state["score"],
+            "feedback": state["feedback"],
+            "missing_sections": state["missing_sections"],
+            "approved": state["approved"],
+            "summary": state["summary"],
+        }
+
+    if not state["summary"] and not state["final_report"]:
+        return None
+
+    return {
+        "final_report": state["final_report"],
+        "summary": state["summary"],
+    }
+
+
+def build_initial_state(prompt: str, run_dir: str) -> MainState:
+    return {
+        "prompt": prompt,
+        "run_dir": run_dir,
+        "tasks": [],
+        "results": [],
+        "final_response": "",
+        "routing_notes": [],
+        **_reset_active_task_fields(),
+    }
+
+
 def build_main_graph(registry: BlueprintRegistry, llm_manager: LLMManager):
+    blueprint_subgraphs = {
+        metadata.name: registry.get(metadata.name).graph
+        for metadata in registry.list_metadata()
+        if registry.get(metadata.name).graph is not None
+    }
+
     def analyze_prompt(state: MainState) -> dict[str, Any]:
         return {
             "routing_notes": [
@@ -222,31 +309,65 @@ def build_main_graph(registry: BlueprintRegistry, llm_manager: LLMManager):
             routed_tasks.append(task_copy)
         return {"tasks": routed_tasks, "routing_notes": notes}
 
-    def execute_tasks(state: MainState) -> dict[str, Any]:
-        executed_tasks: list[MainTask] = []
-        results: list[dict[str, Any]] = []
-        for task in state["tasks"]:
-            task_copy = dict(task)
-            if not task_copy["blueprint_name"]:
-                executed_tasks.append(task_copy)
-                continue
-            try:
-                task_copy["status"] = "running"
-                output = registry.invoke(task_copy["blueprint_name"], task_copy["input"])
-                task_copy["status"] = "completed"
-                task_copy["output"] = output
-                results.append(
+    def select_next_task(state: MainState) -> dict[str, Any]:
+        for index, task in enumerate(state["tasks"]):
+            if task["status"] == "routed":
+                return _prepare_active_task(task, index)
+        return _reset_active_task_fields()
+
+    def dispatch_active_task(state: MainState) -> str:
+        active_task = state["active_task"]
+        if active_task is None:
+            return "finalize"
+
+        blueprint_name = active_task["blueprint_name"]
+        if blueprint_name in blueprint_subgraphs:
+            return str(blueprint_name)
+        return "mark_task_failed"
+
+    def mark_task_failed(state: MainState) -> dict[str, Any]:
+        active_task = state["active_task"]
+        if active_task is None:
+            return {}
+        blueprint_name = active_task["blueprint_name"] or "unknown-blueprint"
+        return {"active_task_error": f"Blueprint runtime unavailable: {blueprint_name}"}
+
+    def collect_task_result(state: MainState) -> dict[str, Any]:
+        active_task = state["active_task"]
+        active_task_index = state["active_task_index"]
+        if active_task is None or active_task_index is None:
+            return {}
+
+        updated_tasks = list(state["tasks"])
+        task_copy = dict(updated_tasks[active_task_index])
+        updated_results = list(state["results"])
+        notes = list(state["routing_notes"])
+
+        if state["active_task_error"]:
+            task_copy["status"] = "failed"
+            task_copy["error"] = state["active_task_error"]
+            notes.append(f"{task_copy['id']} failed: {state['active_task_error']}")
+        else:
+            task_copy["status"] = "completed"
+            task_copy["error"] = None
+            task_copy["output"] = _extract_blueprint_output(state, task_copy["blueprint_name"])
+            if task_copy["output"] is not None:
+                updated_results.append(
                     {
                         "task_id": task_copy["id"],
                         "blueprint_name": task_copy["blueprint_name"],
-                        "result": output,
+                        "result": task_copy["output"],
                     }
                 )
-            except Exception as exc:  # pragma: no cover - surfaced to the user in final output
-                task_copy["status"] = "failed"
-                task_copy["error"] = str(exc)
-            executed_tasks.append(task_copy)
-        return {"tasks": executed_tasks, "results": results}
+            notes.append(f"{task_copy['id']} completed via {task_copy['blueprint_name']}")
+
+        updated_tasks[active_task_index] = task_copy
+        return {
+            "tasks": updated_tasks,
+            "results": updated_results,
+            "routing_notes": notes,
+            **_reset_active_task_fields(),
+        }
 
     def finalize(state: MainState) -> dict[str, Any]:
         lines = [
@@ -283,14 +404,30 @@ def build_main_graph(registry: BlueprintRegistry, llm_manager: LLMManager):
     graph.add_node("analyze_prompt", analyze_prompt)
     graph.add_node("plan_tasks", plan_tasks)
     graph.add_node("route_tasks", route_tasks)
-    graph.add_node("execute_tasks", execute_tasks)
+    graph.add_node("select_next_task", select_next_task)
+    graph.add_node("mark_task_failed", mark_task_failed)
+    graph.add_node("collect_task_result", collect_task_result)
     graph.add_node("finalize", finalize)
+    for blueprint_name, subgraph in blueprint_subgraphs.items():
+        graph.add_node(blueprint_name, subgraph)
 
     graph.add_edge(START, "analyze_prompt")
     graph.add_edge("analyze_prompt", "plan_tasks")
     graph.add_edge("plan_tasks", "route_tasks")
-    graph.add_edge("route_tasks", "execute_tasks")
-    graph.add_edge("execute_tasks", "finalize")
+    graph.add_edge("route_tasks", "select_next_task")
+    graph.add_conditional_edges(
+        "select_next_task",
+        dispatch_active_task,
+        {
+            **{blueprint_name: blueprint_name for blueprint_name in blueprint_subgraphs},
+            "mark_task_failed": "mark_task_failed",
+            "finalize": "finalize",
+        },
+    )
+    for blueprint_name in blueprint_subgraphs:
+        graph.add_edge(blueprint_name, "collect_task_result")
+    graph.add_edge("mark_task_failed", "collect_task_result")
+    graph.add_edge("collect_task_result", "select_next_task")
     graph.add_edge("finalize", END)
 
     return graph.compile()
