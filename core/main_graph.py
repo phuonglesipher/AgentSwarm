@@ -7,6 +7,7 @@ from typing import Any
 from langgraph.graph import END, START, StateGraph
 from typing_extensions import TypedDict
 
+from core.graph_logging import trace_graph_node, trace_route_decision
 from core.llm import LLMError, LLMManager
 from core.registry import BlueprintRegistry
 from core.text_utils import slugify
@@ -233,6 +234,7 @@ def build_initial_state(prompt: str, run_dir: str) -> MainState:
 
 
 def build_main_graph(registry: BlueprintRegistry, llm_manager: LLMManager):
+    graph_name = "main_graph"
     blueprint_subgraphs = {
         metadata.name: registry.get(metadata.name).graph
         for metadata in registry.list_metadata()
@@ -401,13 +403,34 @@ def build_main_graph(registry: BlueprintRegistry, llm_manager: LLMManager):
         return {"final_response": final_response}
 
     graph = StateGraph(MainState)
-    graph.add_node("analyze_prompt", analyze_prompt)
-    graph.add_node("plan_tasks", plan_tasks)
-    graph.add_node("route_tasks", route_tasks)
-    graph.add_node("select_next_task", select_next_task)
-    graph.add_node("mark_task_failed", mark_task_failed)
-    graph.add_node("collect_task_result", collect_task_result)
-    graph.add_node("finalize", finalize)
+    graph.add_node(
+        "analyze_prompt",
+        trace_graph_node(graph_name=graph_name, node_name="analyze_prompt", node_fn=analyze_prompt),
+    )
+    graph.add_node(
+        "plan_tasks",
+        trace_graph_node(graph_name=graph_name, node_name="plan_tasks", node_fn=plan_tasks),
+    )
+    graph.add_node(
+        "route_tasks",
+        trace_graph_node(graph_name=graph_name, node_name="route_tasks", node_fn=route_tasks),
+    )
+    graph.add_node(
+        "select_next_task",
+        trace_graph_node(graph_name=graph_name, node_name="select_next_task", node_fn=select_next_task),
+    )
+    graph.add_node(
+        "mark_task_failed",
+        trace_graph_node(graph_name=graph_name, node_name="mark_task_failed", node_fn=mark_task_failed),
+    )
+    graph.add_node(
+        "collect_task_result",
+        trace_graph_node(graph_name=graph_name, node_name="collect_task_result", node_fn=collect_task_result),
+    )
+    graph.add_node(
+        "finalize",
+        trace_graph_node(graph_name=graph_name, node_name="finalize", node_fn=finalize),
+    )
     for blueprint_name, subgraph in blueprint_subgraphs.items():
         graph.add_node(blueprint_name, subgraph)
 
@@ -417,7 +440,11 @@ def build_main_graph(registry: BlueprintRegistry, llm_manager: LLMManager):
     graph.add_edge("route_tasks", "select_next_task")
     graph.add_conditional_edges(
         "select_next_task",
-        dispatch_active_task,
+        trace_route_decision(
+            graph_name=graph_name,
+            router_name="dispatch_active_task",
+            route_fn=dispatch_active_task,
+        ),
         {
             **{blueprint_name: blueprint_name for blueprint_name in blueprint_subgraphs},
             "mark_task_failed": "mark_task_failed",

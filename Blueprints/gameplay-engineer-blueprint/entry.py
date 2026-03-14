@@ -11,6 +11,7 @@ import unittest
 from langgraph.graph import END, START, StateGraph
 from typing_extensions import TypedDict
 
+from core.graph_logging import trace_graph_node, trace_route_decision
 from core.llm import LLMError
 from core.models import BlueprintContext, BlueprintMetadata
 from core.text_utils import normalize_text, slugify, tokenize
@@ -311,6 +312,7 @@ def _run_compile_and_tests(source_code: str, test_code: str) -> tuple[bool, bool
 def build_graph(context: BlueprintContext, metadata: BlueprintMetadata):
     project_root = context.project_root
     default_llm = context.llm
+    graph_name = metadata.name
 
     def classify_request(state: EngineerState) -> dict[str, Any]:
         artifact_dir = Path(state["run_dir"]) / "tasks" / state["task_id"] / metadata.name
@@ -418,6 +420,8 @@ def build_graph(context: BlueprintContext, metadata: BlueprintMetadata):
                 "task_prompt": state["task_prompt"],
                 "plan_doc": state["plan_doc"],
                 "review_round": review_round,
+                "run_dir": state["run_dir"],
+                "task_id": state["task_id"],
             },
         )
         artifact_dir = Path(state["artifact_dir"])
@@ -603,16 +607,46 @@ def build_graph(context: BlueprintContext, metadata: BlueprintMetadata):
         return {"final_report": final_report, "summary": summary}
 
     graph = StateGraph(EngineerState)
-    graph.add_node("classify_request", classify_request)
-    graph.add_node("inspect_docs", inspect_docs)
-    graph.add_node("build_design_doc", build_design_doc)
-    graph.add_node("plan_work", plan_work)
-    graph.add_node("request_review", request_review)
-    graph.add_node("revise_plan", revise_plan)
-    graph.add_node("implement_code", implement_code)
-    graph.add_node("self_test", self_test)
-    graph.add_node("repair_code", repair_code)
-    graph.add_node("prepare_delivery", prepare_delivery)
+    graph.add_node(
+        "classify_request",
+        trace_graph_node(graph_name=graph_name, node_name="classify_request", node_fn=classify_request),
+    )
+    graph.add_node(
+        "inspect_docs",
+        trace_graph_node(graph_name=graph_name, node_name="inspect_docs", node_fn=inspect_docs),
+    )
+    graph.add_node(
+        "build_design_doc",
+        trace_graph_node(graph_name=graph_name, node_name="build_design_doc", node_fn=build_design_doc),
+    )
+    graph.add_node(
+        "plan_work",
+        trace_graph_node(graph_name=graph_name, node_name="plan_work", node_fn=plan_work),
+    )
+    graph.add_node(
+        "request_review",
+        trace_graph_node(graph_name=graph_name, node_name="request_review", node_fn=request_review),
+    )
+    graph.add_node(
+        "revise_plan",
+        trace_graph_node(graph_name=graph_name, node_name="revise_plan", node_fn=revise_plan),
+    )
+    graph.add_node(
+        "implement_code",
+        trace_graph_node(graph_name=graph_name, node_name="implement_code", node_fn=implement_code),
+    )
+    graph.add_node(
+        "self_test",
+        trace_graph_node(graph_name=graph_name, node_name="self_test", node_fn=self_test),
+    )
+    graph.add_node(
+        "repair_code",
+        trace_graph_node(graph_name=graph_name, node_name="repair_code", node_fn=repair_code),
+    )
+    graph.add_node(
+        "prepare_delivery",
+        trace_graph_node(graph_name=graph_name, node_name="prepare_delivery", node_fn=prepare_delivery),
+    )
 
     graph.add_edge(START, "classify_request")
     graph.add_edge("classify_request", "inspect_docs")
@@ -621,7 +655,7 @@ def build_graph(context: BlueprintContext, metadata: BlueprintMetadata):
     graph.add_edge("plan_work", "request_review")
     graph.add_conditional_edges(
         "request_review",
-        review_gate,
+        trace_route_decision(graph_name=graph_name, router_name="review_gate", route_fn=review_gate),
         {
             "revise_plan": "revise_plan",
             "implement_code": "implement_code",
@@ -631,7 +665,7 @@ def build_graph(context: BlueprintContext, metadata: BlueprintMetadata):
     graph.add_edge("implement_code", "self_test")
     graph.add_conditional_edges(
         "self_test",
-        test_gate,
+        trace_route_decision(graph_name=graph_name, router_name="test_gate", route_fn=test_gate),
         {
             "repair_code": "repair_code",
             "prepare_delivery": "prepare_delivery",

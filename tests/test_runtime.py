@@ -107,6 +107,8 @@ class BlueprintDrivenRuntimeTests(unittest.TestCase):
 
             self.assertIn("gameplay-engineer-blueprint", result["final_response"])
             self.assertTrue((run_dir / "summary.md").exists())
+            trace_log = run_dir / "graph_traversal.log"
+            self.assertTrue(trace_log.exists())
 
             artifact_dir = (
                 run_dir
@@ -117,6 +119,14 @@ class BlueprintDrivenRuntimeTests(unittest.TestCase):
             self.assertTrue((artifact_dir / "plan_doc.md").exists())
             self.assertTrue((artifact_dir / "pull_request.md").exists())
             self.assertTrue((artifact_dir / "self_test.txt").exists())
+
+            trace_output = trace_log.read_text(encoding="utf-8")
+            self.assertIn("[main_graph] [analyze_prompt] ENTER", trace_output)
+            self.assertIn("[main_graph] [dispatch_active_task] ROUTE", trace_output)
+            self.assertIn("next=gameplay-engineer-blueprint", trace_output)
+            self.assertIn("[gameplay-engineer-blueprint] [request_review] ENTER", trace_output)
+            self.assertIn("[gameplay-reviewer-blueprint] [review_plan] ENTER", trace_output)
+            self.assertIn("[main_graph] [finalize] EXIT", trace_output)
 
     def test_main_graph_registers_blueprint_subgraphs(self) -> None:
         graph = build_main_graph(registry=self.registry, llm_manager=self.llm_manager)

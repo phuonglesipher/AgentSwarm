@@ -3,8 +3,9 @@ from __future__ import annotations
 from typing import Any
 
 from langgraph.graph import END, START, StateGraph
-from typing_extensions import TypedDict
+from typing_extensions import NotRequired, TypedDict
 
+from core.graph_logging import trace_graph_node
 from core.llm import LLMError
 from core.models import BlueprintContext, BlueprintMetadata
 
@@ -13,6 +14,8 @@ class ReviewerState(TypedDict):
     task_prompt: str
     plan_doc: str
     review_round: int
+    run_dir: NotRequired[str]
+    task_id: NotRequired[str]
     score: int
     feedback: str
     missing_sections: list[str]
@@ -62,6 +65,7 @@ def _fallback_review(task_prompt: str, plan_doc: str, review_round: int) -> dict
 
 
 def build_graph(context: BlueprintContext, metadata: BlueprintMetadata):
+    graph_name = metadata.name
     del metadata
 
     def review_plan(state: ReviewerState) -> dict[str, Any]:
@@ -126,7 +130,10 @@ def build_graph(context: BlueprintContext, metadata: BlueprintMetadata):
         }
 
     graph = StateGraph(ReviewerState)
-    graph.add_node("review_plan", review_plan)
+    graph.add_node(
+        "review_plan",
+        trace_graph_node(graph_name=graph_name, node_name="review_plan", node_fn=review_plan),
+    )
     graph.add_edge(START, "review_plan")
     graph.add_edge("review_plan", END)
     return graph

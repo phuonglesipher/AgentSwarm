@@ -5,6 +5,7 @@ from datetime import datetime
 from pathlib import Path
 
 from core.blueprint_loader import load_blueprints
+from core.graph_logging import GRAPH_TRACE_FILE
 from core.llm import LLMManager
 from core.main_graph import build_initial_state, build_main_graph
 
@@ -43,6 +44,7 @@ def main() -> None:
 
     print(result["final_response"])
     print(f"\nArtifacts: {run_dir}")
+    print(f"Traversal log: {run_dir / GRAPH_TRACE_FILE}")
 
 
 if __name__ == "__main__":
