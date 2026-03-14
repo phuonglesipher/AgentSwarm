@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import importlib.util
+import io
 from pathlib import Path
 import sys
-import types
+import tempfile
 from typing import Any
+import unittest
 
 from langgraph.graph import END, START, StateGraph
 from typing_extensions import TypedDict
@@ -215,41 +218,94 @@ def _fallback_code_bundle(task_prompt: str, task_type: str, attempt: int) -> dic
     }
 
 
+def _load_module_from_path(module_name: str, module_path: Path):
+    spec = importlib.util.spec_from_file_location(module_name, module_path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"Unable to load module from {module_path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
 def _run_compile_and_tests(source_code: str, test_code: str) -> tuple[bool, bool, str]:
     try:
-        compiled_source = compile(source_code, "gameplay_change.py", "exec")
+        compile(source_code, "gameplay_change.py", "exec")
     except SyntaxError as exc:
         return False, False, f"Compile error in gameplay_change.py: {exc}"
 
-    module = types.ModuleType("gameplay_change")
-    previous_module = sys.modules.get("gameplay_change")
     try:
-        exec(compiled_source, module.__dict__, module.__dict__)
-        sys.modules["gameplay_change"] = module
-        compiled_tests = compile(test_code, "test_gameplay_change.py", "exec")
-        test_namespace: dict[str, Any] = {}
-        exec(compiled_tests, test_namespace, test_namespace)
-        test_functions = [
-            value for name, value in test_namespace.items() if name.startswith("test_") and callable(value)
-        ]
-        if not test_functions:
-            return True, False, "No generated test functions were found."
-        for test_func in test_functions:
-            test_func()
+        compile(test_code, "test_gameplay_change.py", "exec")
     except SyntaxError as exc:
         return False, False, f"Compile error in test_gameplay_change.py: {exc}"
+
+    aliased_module_names = [
+        "gameplay_change",
+        "solution",
+        "main",
+        "gameplay_change_summary",
+    ]
+    previous_modules = {name: sys.modules.get(name) for name in aliased_module_names}
+    generated_test_module_name = "_generated_test_gameplay_change"
+    previous_generated_test_module = sys.modules.get(generated_test_module_name)
+    original_sys_path = list(sys.path)
+
+    try:
+        with tempfile.TemporaryDirectory(prefix="gameplay-selftest-") as temp_dir:
+            temp_path = Path(temp_dir)
+            source_path = temp_path / "gameplay_change.py"
+            test_path = temp_path / "test_gameplay_change.py"
+            source_path.write_text(source_code, encoding="utf-8")
+            test_path.write_text(test_code, encoding="utf-8")
+
+            sys.path.insert(0, str(temp_path))
+
+            source_module = _load_module_from_path("gameplay_change", source_path)
+            for alias in aliased_module_names:
+                sys.modules[alias] = source_module
+
+            test_module = _load_module_from_path(generated_test_module_name, test_path)
+            function_tests = [
+                value
+                for name, value in vars(test_module).items()
+                if name.startswith("test_") and callable(value)
+            ]
+            for test_func in function_tests:
+                test_func()
+
+            suite = unittest.defaultTestLoader.loadTestsFromModule(test_module)
+            unittest_cases = suite.countTestCases()
+            if unittest_cases:
+                stream = io.StringIO()
+                result = unittest.TextTestRunner(stream=stream, verbosity=2).run(suite)
+                if not result.wasSuccessful():
+                    return True, False, stream.getvalue().strip()
+
+            total_tests = len(function_tests) + unittest_cases
+            if total_tests == 0:
+                return True, False, "No generated test functions or unittest cases were found."
+
     except AssertionError as exc:
         message = str(exc) or "Generated assertion failed."
         return True, False, f"Unit test failed: {message}"
+    except SyntaxError as exc:
+        file_name = Path(exc.filename or "").name or "generated file"
+        return False, False, f"Compile error in {file_name}: {exc}"
     except Exception as exc:
         return True, False, f"Unit test execution failed: {exc}"
     finally:
-        if previous_module is None:
-            sys.modules.pop("gameplay_change", None)
+        sys.path[:] = original_sys_path
+        for name, previous_module in previous_modules.items():
+            if previous_module is None:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = previous_module
+        if previous_generated_test_module is None:
+            sys.modules.pop(generated_test_module_name, None)
         else:
-            sys.modules["gameplay_change"] = previous_module
+            sys.modules[generated_test_module_name] = previous_generated_test_module
 
-    return True, True, f"Compile and {len(test_functions)} generated test(s) passed."
+    return True, True, f"Compile and {total_tests} generated test(s) passed."
 
 
 def build_graph(context: BlueprintContext, metadata: BlueprintMetadata):
