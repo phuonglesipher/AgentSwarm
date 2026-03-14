@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from datetime import datetime
+import json
 from pathlib import Path
 from threading import Lock
 from typing import Any, Callable
@@ -10,6 +11,10 @@ import sys
 
 GRAPH_TRACE_FILE = "graph_traversal.log"
 _TRACE_LOCK = Lock()
+_DEBUG_VALUE_CHAR_LIMIT = 240
+_DEBUG_COLLECTION_ITEM_LIMIT = 8
+_DEBUG_MAPPING_KEY_LIMIT = 16
+_DEBUG_RECURSION_LIMIT = 2
 
 
 def _resolve_run_dir(state: Mapping[str, Any] | None) -> Path | None:
@@ -46,6 +51,55 @@ def _summarize_state(state: Mapping[str, Any] | None) -> str:
         details.append(f"review_round={review_round}")
 
     return " ".join(details)
+
+
+def _clip_debug_text(value: str, limit: int = _DEBUG_VALUE_CHAR_LIMIT) -> str:
+    if len(value) <= limit:
+        return value
+    return f"{value[: limit - 3]}..."
+
+
+def _normalize_debug_value(value: Any, *, depth: int = 0) -> Any:
+    if value is None or isinstance(value, bool | int | float):
+        return value
+
+    if isinstance(value, str):
+        return _clip_debug_text(value.replace("\n", "\\n"))
+
+    if isinstance(value, Path):
+        return str(value)
+
+    if depth >= _DEBUG_RECURSION_LIMIT:
+        return _clip_debug_text(repr(value))
+
+    if isinstance(value, Mapping):
+        normalized: dict[str, Any] = {}
+        items = list(value.items())
+        for index, (key, item) in enumerate(items):
+            if index >= _DEBUG_MAPPING_KEY_LIMIT:
+                normalized["..."] = f"{len(items) - _DEBUG_MAPPING_KEY_LIMIT} more keys"
+                break
+            normalized[str(key)] = _normalize_debug_value(item, depth=depth + 1)
+        return normalized
+
+    if isinstance(value, list | tuple | set):
+        items = list(value)
+        normalized_items = [
+            _normalize_debug_value(item, depth=depth + 1)
+            for item in items[:_DEBUG_COLLECTION_ITEM_LIMIT]
+        ]
+        if len(items) > _DEBUG_COLLECTION_ITEM_LIMIT:
+            normalized_items.append(f"... ({len(items) - _DEBUG_COLLECTION_ITEM_LIMIT} more items)")
+        return normalized_items
+
+    return _clip_debug_text(repr(value))
+
+
+def _serialize_debug_payload(payload: Mapping[str, Any] | None) -> str:
+    if not payload:
+        return "{}"
+    normalized = _normalize_debug_value(payload)
+    return json.dumps(normalized, ensure_ascii=True, sort_keys=True)
 
 
 def log_graph_event(
@@ -90,7 +144,13 @@ def trace_graph_node(
     node_fn: Callable[[dict[str, Any]], dict[str, Any]],
 ) -> Callable[[dict[str, Any]], dict[str, Any]]:
     def wrapper(state: dict[str, Any]) -> dict[str, Any]:
-        log_graph_event(state=state, graph_name=graph_name, node_name=node_name, phase="ENTER")
+        log_graph_event(
+            state=state,
+            graph_name=graph_name,
+            node_name=node_name,
+            phase="ENTER",
+            message=f"input={_serialize_debug_payload(state)}",
+        )
         try:
             result = node_fn(state)
         except Exception as exc:
@@ -99,7 +159,7 @@ def trace_graph_node(
                 graph_name=graph_name,
                 node_name=node_name,
                 phase="ERROR",
-                message=f"{type(exc).__name__}: {exc}",
+                message=f"{type(exc).__name__}: {exc} input={_serialize_debug_payload(state)}",
             )
             raise
 
@@ -109,7 +169,7 @@ def trace_graph_node(
             graph_name=graph_name,
             node_name=node_name,
             phase="EXIT",
-            message=f"updated_keys={updated_keys}",
+            message=f"updated_keys={updated_keys} output={_serialize_debug_payload(result)}",
         )
         return result
 

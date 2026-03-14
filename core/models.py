@@ -29,6 +29,7 @@ class BlueprintContext:
     llm_manager: "LLMManager"
     get_llm: Callable[[str | None], "LLMClient"]
     invoke_blueprint: Callable[[str, dict[str, Any]], dict[str, Any]]
+    get_blueprint_graph: Callable[[str], Any]
 
 
 @dataclass

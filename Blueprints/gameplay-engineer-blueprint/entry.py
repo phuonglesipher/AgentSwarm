@@ -9,7 +9,7 @@ from typing import Any
 import unittest
 
 from langgraph.graph import END, START, StateGraph
-from typing_extensions import TypedDict
+from typing_extensions import NotRequired, TypedDict
 
 from core.graph_logging import trace_graph_node, trace_route_decision
 from core.llm import LLMError
@@ -42,6 +42,9 @@ class EngineerState(TypedDict):
     artifact_dir: str
     final_report: dict[str, Any]
     summary: str
+    score: NotRequired[int]
+    feedback: NotRequired[str]
+    approved: NotRequired[bool]
 
 
 REQUIRED_PLAN_SECTIONS = {
@@ -313,6 +316,7 @@ def build_graph(context: BlueprintContext, metadata: BlueprintMetadata):
     project_root = context.project_root
     default_llm = context.llm
     graph_name = metadata.name
+    reviewer_graph = context.get_blueprint_graph("gameplay-reviewer-blueprint")
 
     def classify_request(state: EngineerState) -> dict[str, Any]:
         artifact_dir = Path(state["run_dir"]) / "tasks" / state["task_id"] / metadata.name
@@ -414,31 +418,26 @@ def build_graph(context: BlueprintContext, metadata: BlueprintMetadata):
 
     def request_review(state: EngineerState) -> dict[str, Any]:
         review_round = state["review_round"] + 1
-        review_result = context.invoke_blueprint(
-            "gameplay-reviewer-blueprint",
-            {
-                "task_prompt": state["task_prompt"],
-                "plan_doc": state["plan_doc"],
-                "review_round": review_round,
-                "run_dir": state["run_dir"],
-                "task_id": state["task_id"],
-            },
-        )
+        return {"review_round": review_round}
+
+    def capture_review_result(state: EngineerState) -> dict[str, Any]:
         artifact_dir = Path(state["artifact_dir"])
         feedback_lines = [
-            f"# Review Round {review_round}",
+            f"# Review Round {state['review_round']}",
             "",
-            f"Score: {review_result['score']}",
+            f"Score: {state['score']}",
             "",
             "## Feedback",
-            review_result["feedback"],
+            state["feedback"],
         ]
-        (artifact_dir / f"review_round_{review_round}.md").write_text("\n".join(feedback_lines), encoding="utf-8")
+        (artifact_dir / f"review_round_{state['review_round']}.md").write_text(
+            "\n".join(feedback_lines),
+            encoding="utf-8",
+        )
         return {
-            "review_round": review_round,
-            "review_score": review_result["score"],
-            "review_feedback": review_result["feedback"],
-            "missing_sections": review_result["missing_sections"],
+            "review_score": state["score"],
+            "review_feedback": state["feedback"],
+            "missing_sections": state["missing_sections"],
         }
 
     def review_gate(state: EngineerState) -> str:
@@ -627,6 +626,11 @@ def build_graph(context: BlueprintContext, metadata: BlueprintMetadata):
         "request_review",
         trace_graph_node(graph_name=graph_name, node_name="request_review", node_fn=request_review),
     )
+    graph.add_node("gameplay-reviewer-blueprint", reviewer_graph)
+    graph.add_node(
+        "capture_review_result",
+        trace_graph_node(graph_name=graph_name, node_name="capture_review_result", node_fn=capture_review_result),
+    )
     graph.add_node(
         "revise_plan",
         trace_graph_node(graph_name=graph_name, node_name="revise_plan", node_fn=revise_plan),
@@ -653,8 +657,10 @@ def build_graph(context: BlueprintContext, metadata: BlueprintMetadata):
     graph.add_edge("inspect_docs", "build_design_doc")
     graph.add_edge("build_design_doc", "plan_work")
     graph.add_edge("plan_work", "request_review")
+    graph.add_edge("request_review", "gameplay-reviewer-blueprint")
+    graph.add_edge("gameplay-reviewer-blueprint", "capture_review_result")
     graph.add_conditional_edges(
-        "request_review",
+        "capture_review_result",
         trace_route_decision(graph_name=graph_name, router_name="review_gate", route_fn=review_gate),
         {
             "revise_plan": "revise_plan",

@@ -79,39 +79,72 @@ def _load_module(module_path: Path, module_name: str) -> Any:
     return module
 
 
+def _require_graph_runtime(runtime: BlueprintRuntime) -> Any:
+    graph = runtime.graph
+    if graph is None or not hasattr(graph, "get_graph"):
+        raise TypeError(f"Blueprint {runtime.metadata.name} does not expose a graph runtime")
+    return graph
+
+
 def load_blueprints(project_root: Path, blueprints_root: Path, llm_manager: LLMManager) -> BlueprintRegistry:
     if not blueprints_root.exists():
         raise FileNotFoundError(f"Blueprint directory not found: {blueprints_root}")
 
     registry = BlueprintRegistry()
     blueprint_markdowns = sorted(blueprints_root.glob("*/Blueprint.md"))
+    blueprint_specs: dict[str, tuple[BlueprintMetadata, Any]] = {}
 
     for markdown_path in blueprint_markdowns:
         metadata = _parse_blueprint_markdown(markdown_path)
         entry_path = metadata.blueprint_dir / metadata.entry
-        module = _load_module(entry_path, f"blueprint_{metadata.name.replace('-', '_')}")
-
-        context = BlueprintContext(
-            project_root=project_root,
-            blueprints_root=blueprints_root,
-            blueprint_dir=metadata.blueprint_dir,
-            llm=llm_manager.resolve(metadata.llm_profile),
-            llm_manager=llm_manager,
-            get_llm=lambda profile=None, active_manager=llm_manager: active_manager.resolve(profile),
-            invoke_blueprint=lambda name, payload, active_registry=registry: active_registry.invoke(name, payload),
+        blueprint_specs[metadata.name] = (
+            metadata,
+            _load_module(entry_path, f"blueprint_{metadata.name.replace('-', '_')}"),
         )
 
-        graph_or_runtime = module.build_graph(context=context, metadata=metadata)
-        runtime_object = graph_or_runtime.compile() if hasattr(graph_or_runtime, "compile") else graph_or_runtime
-        if not hasattr(runtime_object, "invoke"):
-            raise TypeError(f"{entry_path} must return a graph or runtime with an invoke method")
+    runtime_cache: dict[str, BlueprintRuntime] = {}
+    building: set[str] = set()
 
-        registry.register(
-            BlueprintRuntime(
+    def build_runtime(name: str) -> BlueprintRuntime:
+        if name in runtime_cache:
+            return runtime_cache[name]
+        if name not in blueprint_specs:
+            raise KeyError(f"Unknown blueprint: {name}")
+        if name in building:
+            raise RuntimeError(f"Cyclic blueprint dependency detected while building {name}")
+
+        metadata, module = blueprint_specs[name]
+        building.add(name)
+        try:
+            context = BlueprintContext(
+                project_root=project_root,
+                blueprints_root=blueprints_root,
+                blueprint_dir=metadata.blueprint_dir,
+                llm=llm_manager.resolve(metadata.llm_profile),
+                llm_manager=llm_manager,
+                get_llm=lambda profile=None, active_manager=llm_manager: active_manager.resolve(profile),
+                invoke_blueprint=lambda target_name, payload: build_runtime(target_name).invoke(payload),
+                get_blueprint_graph=lambda target_name: _require_graph_runtime(build_runtime(target_name)),
+            )
+
+            graph_or_runtime = module.build_graph(context=context, metadata=metadata)
+            runtime_object = graph_or_runtime.compile() if hasattr(graph_or_runtime, "compile") else graph_or_runtime
+            if not hasattr(runtime_object, "invoke"):
+                entry_path = metadata.blueprint_dir / metadata.entry
+                raise TypeError(f"{entry_path} must return a graph or runtime with an invoke method")
+
+            runtime = BlueprintRuntime(
                 metadata=metadata,
                 invoke=lambda payload, active_runtime=runtime_object: active_runtime.invoke(payload),
                 graph=runtime_object,
             )
-        )
+            runtime_cache[name] = runtime
+            registry.register(runtime)
+            return runtime
+        finally:
+            building.remove(name)
+
+    for blueprint_name in sorted(blueprint_specs):
+        build_runtime(blueprint_name)
 
     return registry

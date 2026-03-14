@@ -123,6 +123,8 @@ class BlueprintDrivenRuntimeTests(unittest.TestCase):
             trace_output = trace_log.read_text(encoding="utf-8")
             self.assertIn("[main_graph] [analyze_prompt] ENTER", trace_output)
             self.assertIn("[main_graph] [dispatch_active_task] ROUTE", trace_output)
+            self.assertIn("input=", trace_output)
+            self.assertIn("output=", trace_output)
             self.assertIn("next=gameplay-engineer-blueprint", trace_output)
             self.assertIn("[gameplay-engineer-blueprint] [request_review] ENTER", trace_output)
             self.assertIn("[gameplay-reviewer-blueprint] [review_plan] ENTER", trace_output)
@@ -135,11 +137,25 @@ class BlueprintDrivenRuntimeTests(unittest.TestCase):
         self.assertIn("gameplay-engineer-blueprint", subgraphs)
         self.assertIn("gameplay-reviewer-blueprint", subgraphs)
 
+    def test_engineer_blueprint_registers_reviewer_subgraph(self) -> None:
+        engineer_graph = self.registry.get("gameplay-engineer-blueprint").graph
+        self.assertIsNotNone(engineer_graph)
+
+        subgraphs = dict(engineer_graph.get_subgraphs())
+        self.assertIn("gameplay-reviewer-blueprint", subgraphs)
+
     def test_main_graph_xray_mermaid_includes_blueprint_subgraphs(self) -> None:
         graph = build_main_graph(registry=self.registry, llm_manager=self.llm_manager)
         mermaid = graph.get_graph(xray=1).draw_mermaid()
 
         self.assertIn("subgraph gameplay-engineer-blueprint", mermaid)
+        self.assertIn("subgraph gameplay-reviewer-blueprint", mermaid)
+
+    def test_engineer_graph_xray_mermaid_includes_reviewer_subgraph(self) -> None:
+        engineer_graph = self.registry.get("gameplay-engineer-blueprint").graph
+        self.assertIsNotNone(engineer_graph)
+
+        mermaid = engineer_graph.get_graph(xray=1).draw_mermaid()
         self.assertIn("subgraph gameplay-reviewer-blueprint", mermaid)
 
     def test_self_test_harness_supports_module_aliases_and___file__(self) -> None:
