@@ -1,1 +1,1 @@
-"""Core runtime package for the blueprint-driven LangGraph agent."""
+"""Core runtime package for the AgentSwarm workflow-driven LangGraph agent."""

@@ -7,7 +7,7 @@ import unittest
 
 from langgraph.checkpoint.memory import InMemorySaver
 
-from core.blueprint_loader import load_blueprints
+from core.workflow_loader import load_workflows
 from core.graph_logging import GRAPH_DEBUG_TRACE_FILE
 from core.main_graph import build_initial_state, build_main_graph, build_runtime_config
 
@@ -51,39 +51,39 @@ class FakeLLMManager:
         return ["default"]
 
 
-class BlueprintDrivenRuntimeTests(unittest.TestCase):
+class WorkflowDrivenRuntimeTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.project_root = Path(__file__).resolve().parents[1]
-        cls.blueprints_root = cls.project_root / "Blueprints"
+        cls.workflows_root = cls.project_root / "Workflows"
         cls.llm_manager = FakeLLMManager()
-        cls.registry = load_blueprints(
+        cls.registry = load_workflows(
             project_root=cls.project_root,
-            blueprints_root=cls.blueprints_root,
+            workflows_root=cls.workflows_root,
             llm_manager=cls.llm_manager,
         )
 
-    def test_load_blueprints_and_route_gameplay_task(self) -> None:
+    def test_load_workflows_and_route_gameplay_task(self) -> None:
         metadata = self.registry.list_metadata()
         names = [item.name for item in metadata]
         self.assertEqual(
             names,
             [
-                "gameplay-engineer-blueprint",
-                "gameplay-reviewer-blueprint",
+                "gameplay-engineer-workflow",
+                "gameplay-reviewer-workflow",
             ],
         )
 
         exposed_names = [item.name for item in self.registry.list_metadata(exposed_only=True)]
-        self.assertEqual(exposed_names, ["gameplay-engineer-blueprint"])
+        self.assertEqual(exposed_names, ["gameplay-engineer-workflow"])
 
         routed = self.registry.route("Fix a combat gameplay bug affecting melee dodge timing")
         self.assertIsNotNone(routed)
-        self.assertEqual(routed.name, "gameplay-engineer-blueprint")
+        self.assertEqual(routed.name, "gameplay-engineer-workflow")
 
-    def test_reviewer_blueprint_flags_missing_sections(self) -> None:
+    def test_reviewer_workflow_flags_missing_sections(self) -> None:
         result = self.registry.invoke(
-            "gameplay-reviewer-blueprint",
+            "gameplay-reviewer-workflow",
             {
                 "task_prompt": "Fix combat dodge cancel bug",
                 "plan_doc": "# Gameplay Implementation Plan\n\n## Overview\n- A short plan.",
@@ -108,7 +108,7 @@ class BlueprintDrivenRuntimeTests(unittest.TestCase):
                 )
             )
 
-            self.assertIn("gameplay-engineer-blueprint", result["final_response"])
+            self.assertIn("gameplay-engineer-workflow", result["final_response"])
             self.assertTrue((run_dir / "summary.md").exists())
             trace_log = run_dir / "graph_traversal.log"
             self.assertTrue(trace_log.exists())
@@ -118,7 +118,7 @@ class BlueprintDrivenRuntimeTests(unittest.TestCase):
                 run_dir
                 / "tasks"
                 / "task-1-fix-combat-dodge-cancel-bug-in-melee-gameplay"
-                / "gameplay-engineer-blueprint"
+                / "gameplay-engineer-workflow"
             )
             self.assertTrue((artifact_dir / "plan_doc.md").exists())
             self.assertTrue((artifact_dir / "pull_request.md").exists())
@@ -130,40 +130,40 @@ class BlueprintDrivenRuntimeTests(unittest.TestCase):
             self.assertIn("input_keys=", trace_output)
             self.assertIn("output_keys=", trace_output)
             self.assertIn(f"details={GRAPH_DEBUG_TRACE_FILE}#", trace_output)
-            self.assertIn("next=gameplay-engineer-blueprint", trace_output)
-            self.assertIn("[gameplay-engineer-blueprint] [gameplay-reviewer-blueprint] SUBGRAPH_ENTER", trace_output)
-            self.assertIn("[gameplay-engineer-blueprint] [gameplay-reviewer-blueprint] SUBGRAPH_EXIT", trace_output)
-            self.assertIn("[gameplay-engineer-blueprint] [request_review] ENTER", trace_output)
-            self.assertIn("[gameplay-reviewer-blueprint] [review_plan] ENTER", trace_output)
+            self.assertIn("next=gameplay-engineer-workflow", trace_output)
+            self.assertIn("[gameplay-engineer-workflow] [gameplay-reviewer-workflow] SUBGRAPH_ENTER", trace_output)
+            self.assertIn("[gameplay-engineer-workflow] [gameplay-reviewer-workflow] SUBGRAPH_EXIT", trace_output)
+            self.assertIn("[gameplay-engineer-workflow] [request_review] ENTER", trace_output)
+            self.assertIn("[gameplay-reviewer-workflow] [review_plan] ENTER", trace_output)
             self.assertIn("[main_graph] [finalize] EXIT", trace_output)
 
-    def test_main_graph_registers_blueprint_subgraphs(self) -> None:
+    def test_main_graph_registers_workflow_subgraphs(self) -> None:
         graph = build_main_graph(registry=self.registry, llm_manager=self.llm_manager)
         subgraphs = dict(graph.get_subgraphs())
 
-        self.assertIn("gameplay-engineer-blueprint", subgraphs)
-        self.assertIn("gameplay-reviewer-blueprint", subgraphs)
+        self.assertIn("gameplay-engineer-workflow", subgraphs)
+        self.assertIn("gameplay-reviewer-workflow", subgraphs)
 
-    def test_engineer_blueprint_registers_reviewer_subgraph(self) -> None:
-        engineer_graph = self.registry.get("gameplay-engineer-blueprint").graph
+    def test_engineer_workflow_registers_reviewer_subgraph(self) -> None:
+        engineer_graph = self.registry.get("gameplay-engineer-workflow").graph
         self.assertIsNotNone(engineer_graph)
 
         subgraphs = dict(engineer_graph.get_subgraphs())
-        self.assertIn("gameplay-reviewer-blueprint", subgraphs)
+        self.assertIn("gameplay-reviewer-workflow", subgraphs)
 
-    def test_main_graph_xray_mermaid_includes_blueprint_subgraphs(self) -> None:
+    def test_main_graph_xray_mermaid_includes_workflow_subgraphs(self) -> None:
         graph = build_main_graph(registry=self.registry, llm_manager=self.llm_manager)
         mermaid = graph.get_graph(xray=1).draw_mermaid()
 
-        self.assertIn("subgraph gameplay-engineer-blueprint", mermaid)
-        self.assertIn("subgraph gameplay-reviewer-blueprint", mermaid)
+        self.assertIn("subgraph gameplay-engineer-workflow", mermaid)
+        self.assertIn("subgraph gameplay-reviewer-workflow", mermaid)
 
     def test_engineer_graph_xray_mermaid_includes_reviewer_subgraph(self) -> None:
-        engineer_graph = self.registry.get("gameplay-engineer-blueprint").graph
+        engineer_graph = self.registry.get("gameplay-engineer-workflow").graph
         self.assertIsNotNone(engineer_graph)
 
         mermaid = engineer_graph.get_graph(xray=1).draw_mermaid()
-        self.assertIn("subgraph gameplay-reviewer-blueprint", mermaid)
+        self.assertIn("subgraph gameplay-reviewer-workflow", mermaid)
 
     def test_main_graph_checkpointer_tracks_thread_state(self) -> None:
         graph = build_main_graph(
@@ -188,13 +188,13 @@ class BlueprintDrivenRuntimeTests(unittest.TestCase):
         snapshot = graph.get_state(config)
         history = list(graph.get_state_history(config))
 
-        self.assertIn("gameplay-engineer-blueprint", result["final_response"])
+        self.assertIn("gameplay-engineer-workflow", result["final_response"])
         self.assertEqual(snapshot.values["final_response"], result["final_response"])
         self.assertEqual(snapshot.config["configurable"]["thread_id"], "test-thread")
         self.assertGreaterEqual(len(history), 2)
 
     def test_self_test_harness_supports_module_aliases_and___file__(self) -> None:
-        engineer_entry = self.project_root / "Blueprints" / "gameplay-engineer-blueprint" / "entry.py"
+        engineer_entry = self.project_root / "Workflows" / "gameplay-engineer-workflow" / "entry.py"
         spec = importlib.util.spec_from_file_location("test_engineer_entry", engineer_entry)
         self.assertIsNotNone(spec)
         self.assertIsNotNone(spec.loader)

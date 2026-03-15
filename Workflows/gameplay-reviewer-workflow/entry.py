@@ -7,7 +7,7 @@ from typing_extensions import NotRequired, TypedDict
 
 from core.graph_logging import trace_graph_node
 from core.llm import LLMError
-from core.models import BlueprintContext, BlueprintMetadata
+from core.models import WorkflowContext, WorkflowMetadata
 
 
 class ReviewerState(TypedDict):
@@ -64,7 +64,7 @@ def _fallback_review(task_prompt: str, plan_doc: str, review_round: int) -> dict
     }
 
 
-def build_graph(context: BlueprintContext, metadata: BlueprintMetadata):
+def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
     graph_name = metadata.name
     del metadata
 
@@ -92,7 +92,7 @@ def build_graph(context: BlueprintContext, metadata: BlueprintMetadata):
         try:
             result = llm.generate_json(
                 instructions=(
-                    "You are gameplay-reviewer-blueprint. Review gameplay implementation plans. "
+                    "You are gameplay-reviewer-workflow. Review gameplay implementation plans. "
                     "Score the plan out of 100, list missing required sections, and provide direct, actionable feedback. "
                     "A plan must include Overview, Task Type, Existing Docs, Implementation Steps, Unit Tests, Risks, "
                     "and Acceptance Criteria. Do not approve if required sections are missing."

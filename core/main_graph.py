@@ -9,14 +9,14 @@ from typing_extensions import TypedDict
 
 from core.graph_logging import trace_graph_node, trace_route_decision
 from core.llm import LLMError, LLMManager
-from core.registry import BlueprintRegistry
+from core.registry import WorkflowRegistry
 from core.text_utils import slugify
 
 
 class MainTask(TypedDict):
     id: str
     description: str
-    blueprint_name: str | None
+    workflow_name: str | None
     status: str
     input: dict[str, Any]
     output: dict[str, Any] | None
@@ -54,7 +54,7 @@ def _fallback_plan_tasks(prompt: str) -> list[str]:
     return _split_prompt(prompt)
 
 
-def _fallback_route_task(registry: BlueprintRegistry, description: str) -> str | None:
+def _fallback_route_task(registry: WorkflowRegistry, description: str) -> str | None:
     match = registry.route(description)
     return match.name if match else None
 
@@ -81,9 +81,9 @@ def _llm_plan_tasks(llm, prompt: str) -> list[str]:
     }
     result = llm.generate_json(
         instructions=(
-            "You are the planning step of a Blueprint-driven software agent. "
+            "You are the planning step of a workflow-driven software agent called AgentSwarm. "
             "Break the user's request into 1 to 5 implementation tasks. "
-            "Return concise task descriptions that can each be routed to one blueprint."
+            "Return concise task descriptions that can each be routed to one workflow."
         ),
         input_text=f"User prompt:\n{prompt}",
         schema_name="main_graph_task_plan",
@@ -95,7 +95,7 @@ def _llm_plan_tasks(llm, prompt: str) -> list[str]:
 
 def _llm_route_tasks(
     llm,
-    registry: BlueprintRegistry,
+    registry: WorkflowRegistry,
     tasks: list[MainTask],
 ) -> dict[str, str | None]:
     candidates = registry.list_metadata(exposed_only=True)
@@ -105,7 +105,7 @@ def _llm_route_tasks(
     candidate_names = [item.name for item in candidates]
     candidate_descriptions = "\n\n".join(
         [
-            f"Blueprint: {item.name}\nCapabilities: {', '.join(item.capabilities)}\nDescription: {item.description}"
+            f"Workflow: {item.name}\nCapabilities: {', '.join(item.capabilities)}\nDescription: {item.description}"
             for item in candidates
         ]
     )
@@ -118,9 +118,9 @@ def _llm_route_tasks(
                     "type": "object",
                     "properties": {
                         "task_id": {"type": "string"},
-                        "blueprint_name": {"type": "string", "enum": candidate_names},
+                        "workflow_name": {"type": "string", "enum": candidate_names},
                     },
-                    "required": ["task_id", "blueprint_name"],
+                    "required": ["task_id", "workflow_name"],
                     "additionalProperties": False,
                 },
                 "minItems": 1,
@@ -132,14 +132,14 @@ def _llm_route_tasks(
     task_block = "\n".join([f"- {task['id']}: {task['description']}" for task in tasks])
     result = llm.generate_json(
         instructions=(
-            "You route implementation tasks to the best matching blueprint. "
-            "Use each blueprint's description and capabilities, and assign every task to exactly one blueprint."
+            "You route implementation tasks to the best matching workflow. "
+            "Use each workflow's description and capabilities, and assign every task to exactly one workflow."
         ),
-        input_text=f"Available blueprints:\n{candidate_descriptions}\n\nTasks:\n{task_block}",
+        input_text=f"Available workflows:\n{candidate_descriptions}\n\nTasks:\n{task_block}",
         schema_name="main_graph_routes",
         schema=schema,
     )
-    return {item["task_id"]: item["blueprint_name"] for item in result["assignments"]}
+    return {item["task_id"]: item["workflow_name"] for item in result["assignments"]}
 
 
 def _write_run_summary(run_dir: Path, state: MainState) -> None:
@@ -156,7 +156,7 @@ def _write_run_summary(run_dir: Path, state: MainState) -> None:
             [
                 f"- id: {task['id']}",
                 f"  description: {task['description']}",
-                f"  blueprint: {task['blueprint_name']}",
+                f"  workflow: {task['workflow_name']}",
                 f"  status: {task['status']}",
             ]
         )
@@ -202,8 +202,8 @@ def _prepare_active_task(task: MainTask, index: int) -> dict[str, Any]:
     }
 
 
-def _extract_blueprint_output(state: MainState, blueprint_name: str | None) -> dict[str, Any] | None:
-    if blueprint_name == "gameplay-reviewer-blueprint":
+def _extract_workflow_output(state: MainState, workflow_name: str | None) -> dict[str, Any] | None:
+    if workflow_name == "gameplay-reviewer-workflow":
         return {
             "score": state["score"],
             "feedback": state["feedback"],
@@ -240,9 +240,9 @@ def build_runtime_config(thread_id: str) -> dict[str, Any]:
     return {"configurable": {"thread_id": cleaned_thread_id}}
 
 
-def build_main_graph(registry: BlueprintRegistry, llm_manager: LLMManager, checkpointer: Any | None = None):
+def build_main_graph(registry: WorkflowRegistry, llm_manager: LLMManager, checkpointer: Any | None = None):
     graph_name = "main_graph"
-    blueprint_subgraphs = {
+    workflow_subgraphs = {
         metadata.name: registry.get(metadata.name).graph
         for metadata in registry.list_metadata()
         if registry.get(metadata.name).graph is not None
@@ -251,7 +251,7 @@ def build_main_graph(registry: BlueprintRegistry, llm_manager: LLMManager, check
     def analyze_prompt(state: MainState) -> dict[str, Any]:
         return {
             "routing_notes": [
-                f"Loaded {len(registry.list_metadata())} blueprints",
+                f"Loaded {len(registry.list_metadata())} workflows",
                 f"Default Codex profile is {llm_manager.describe()}",
                 f"Available LLM profiles: {', '.join(llm_manager.available_profiles())}",
                 "Prompt was normalized and ready for planning",
@@ -278,7 +278,7 @@ def build_main_graph(registry: BlueprintRegistry, llm_manager: LLMManager, check
                 {
                     "id": task_id,
                     "description": description,
-                    "blueprint_name": None,
+                    "workflow_name": None,
                     "status": "planned",
                     "input": {
                         "prompt": state["prompt"],
@@ -306,15 +306,15 @@ def build_main_graph(registry: BlueprintRegistry, llm_manager: LLMManager, check
 
         for task in state["tasks"]:
             task_copy = dict(task)
-            blueprint_name = llm_assignments.get(task["id"]) or _fallback_route_task(registry, task["description"])
-            if blueprint_name is None:
+            workflow_name = llm_assignments.get(task["id"]) or _fallback_route_task(registry, task["description"])
+            if workflow_name is None:
                 task_copy["status"] = "unroutable"
-                task_copy["error"] = "No matching blueprint was found"
+                task_copy["error"] = "No matching workflow was found"
                 notes.append(f"{task['id']} could not be routed")
             else:
-                task_copy["blueprint_name"] = blueprint_name
+                task_copy["workflow_name"] = workflow_name
                 task_copy["status"] = "routed"
-                notes.append(f"{task['id']} -> {blueprint_name}")
+                notes.append(f"{task['id']} -> {workflow_name}")
             routed_tasks.append(task_copy)
         return {"tasks": routed_tasks, "routing_notes": notes}
 
@@ -329,17 +329,17 @@ def build_main_graph(registry: BlueprintRegistry, llm_manager: LLMManager, check
         if active_task is None:
             return "finalize"
 
-        blueprint_name = active_task["blueprint_name"]
-        if blueprint_name in blueprint_subgraphs:
-            return str(blueprint_name)
+        workflow_name = active_task["workflow_name"]
+        if workflow_name in workflow_subgraphs:
+            return str(workflow_name)
         return "mark_task_failed"
 
     def mark_task_failed(state: MainState) -> dict[str, Any]:
         active_task = state["active_task"]
         if active_task is None:
             return {}
-        blueprint_name = active_task["blueprint_name"] or "unknown-blueprint"
-        return {"active_task_error": f"Blueprint runtime unavailable: {blueprint_name}"}
+        workflow_name = active_task["workflow_name"] or "unknown-workflow"
+        return {"active_task_error": f"Workflow runtime unavailable: {workflow_name}"}
 
     def collect_task_result(state: MainState) -> dict[str, Any]:
         active_task = state["active_task"]
@@ -359,16 +359,16 @@ def build_main_graph(registry: BlueprintRegistry, llm_manager: LLMManager, check
         else:
             task_copy["status"] = "completed"
             task_copy["error"] = None
-            task_copy["output"] = _extract_blueprint_output(state, task_copy["blueprint_name"])
+            task_copy["output"] = _extract_workflow_output(state, task_copy["workflow_name"])
             if task_copy["output"] is not None:
                 updated_results.append(
                     {
                         "task_id": task_copy["id"],
-                        "blueprint_name": task_copy["blueprint_name"],
+                        "workflow_name": task_copy["workflow_name"],
                         "result": task_copy["output"],
                     }
                 )
-            notes.append(f"{task_copy['id']} completed via {task_copy['blueprint_name']}")
+            notes.append(f"{task_copy['id']} completed via {task_copy['workflow_name']}")
 
         updated_tasks[active_task_index] = task_copy
         return {
@@ -380,7 +380,7 @@ def build_main_graph(registry: BlueprintRegistry, llm_manager: LLMManager, check
 
     def finalize(state: MainState) -> dict[str, Any]:
         lines = [
-            "Blueprint-driven execution finished.",
+            "AgentSwarm workflow-driven execution finished.",
             "",
             "Routing notes:",
             *[f"- {note}" for note in state["routing_notes"]],
@@ -389,7 +389,7 @@ def build_main_graph(registry: BlueprintRegistry, llm_manager: LLMManager, check
         ]
         for task in state["tasks"]:
             lines.append(
-                f"- {task['id']} [{task['status']}] via {task['blueprint_name'] or 'none'}"
+                f"- {task['id']} [{task['status']}] via {task['workflow_name'] or 'none'}"
             )
             if task["output"]:
                 summary = task["output"].get("summary") or task["output"].get("final_report", "")
@@ -438,8 +438,8 @@ def build_main_graph(registry: BlueprintRegistry, llm_manager: LLMManager, check
         "finalize",
         trace_graph_node(graph_name=graph_name, node_name="finalize", node_fn=finalize),
     )
-    for blueprint_name, subgraph in blueprint_subgraphs.items():
-        graph.add_node(blueprint_name, subgraph)
+    for workflow_name, subgraph in workflow_subgraphs.items():
+        graph.add_node(workflow_name, subgraph)
 
     graph.add_edge(START, "analyze_prompt")
     graph.add_edge("analyze_prompt", "plan_tasks")
@@ -453,13 +453,13 @@ def build_main_graph(registry: BlueprintRegistry, llm_manager: LLMManager, check
             route_fn=dispatch_active_task,
         ),
         {
-            **{blueprint_name: blueprint_name for blueprint_name in blueprint_subgraphs},
+            **{workflow_name: workflow_name for workflow_name in workflow_subgraphs},
             "mark_task_failed": "mark_task_failed",
             "finalize": "finalize",
         },
     )
-    for blueprint_name in blueprint_subgraphs:
-        graph.add_edge(blueprint_name, "collect_task_result")
+    for workflow_name in workflow_subgraphs:
+        graph.add_edge(workflow_name, "collect_task_result")
     graph.add_edge("mark_task_failed", "collect_task_result")
     graph.add_edge("collect_task_result", "select_next_task")
     graph.add_edge("finalize", END)

@@ -9,7 +9,7 @@ if TYPE_CHECKING:
 
 
 @dataclass(frozen=True)
-class BlueprintMetadata:
+class WorkflowMetadata:
     name: str
     entry: str
     version: str
@@ -17,24 +17,24 @@ class BlueprintMetadata:
     capabilities: list[str]
     exposed: bool
     llm_profile: str | None
-    blueprint_dir: Path
+    workflow_dir: Path
 
 
 @dataclass(frozen=True)
-class BlueprintContext:
+class WorkflowContext:
     project_root: Path
-    blueprints_root: Path
-    blueprint_dir: Path
+    workflows_root: Path
+    workflow_dir: Path
     llm: "LLMClient"
     llm_manager: "LLMManager"
     get_llm: Callable[[str | None], "LLMClient"]
-    invoke_blueprint: Callable[[str, dict[str, Any]], dict[str, Any]]
-    get_blueprint_graph: Callable[[str], Any]
+    invoke_workflow: Callable[[str, dict[str, Any]], dict[str, Any]]
+    get_workflow_graph: Callable[[str], Any]
 
 
 @dataclass
-class BlueprintRuntime:
-    metadata: BlueprintMetadata
+class WorkflowRuntime:
+    metadata: WorkflowMetadata
     invoke: Callable[[dict[str, Any]], dict[str, Any]]
     graph: Any | None = None
 
@@ -43,7 +43,7 @@ class BlueprintRuntime:
 class RoutedTask:
     id: str
     description: str
-    blueprint_name: str | None = None
+    workflow_name: str | None = None
     status: str = "planned"
     input: dict[str, Any] = field(default_factory=dict)
     output: dict[str, Any] | None = None

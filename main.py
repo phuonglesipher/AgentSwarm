@@ -7,7 +7,7 @@ from pathlib import Path
 
 from langgraph.checkpoint.memory import InMemorySaver
 
-from core.blueprint_loader import load_blueprints
+from core.workflow_loader import load_workflows
 from core.graph_logging import GRAPH_TRACE_FILE
 from core.llm import LLMManager
 from core.main_graph import build_initial_state, build_main_graph, build_runtime_config
@@ -23,7 +23,7 @@ def _build_run_dir(project_root: Path) -> Path:
 
 
 def _parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Blueprint-driven LangGraph agent runner")
+    parser = argparse.ArgumentParser(description="AgentSwarm workflow-driven LangGraph agent runner")
     parser.add_argument("--prompt", default="", help="Prompt that should be executed by the agent")
     parser.add_argument(
         "--thread-id",
@@ -77,14 +77,14 @@ def main() -> None:
         raise SystemExit("A prompt is required. Use --prompt \"...\" or pass a positional prompt.")
 
     project_root = Path(__file__).resolve().parent
-    blueprints_root = project_root / "Blueprints"
+    workflows_root = project_root / "Workflows"
     run_dir = _build_run_dir(project_root)
     llm_manager = LLMManager.from_env()
     thread_id = args.thread_id.strip() or run_dir.name
     runtime_config = build_runtime_config(thread_id)
     checkpointer = InMemorySaver()
 
-    registry = load_blueprints(project_root=project_root, blueprints_root=blueprints_root, llm_manager=llm_manager)
+    registry = load_workflows(project_root=project_root, workflows_root=workflows_root, llm_manager=llm_manager)
     main_graph = build_main_graph(registry=registry, llm_manager=llm_manager, checkpointer=checkpointer)
 
     result = main_graph.invoke(build_initial_state(prompt=prompt, run_dir=str(run_dir)), runtime_config)

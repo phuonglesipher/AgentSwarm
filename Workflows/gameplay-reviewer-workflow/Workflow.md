@@ -1,5 +1,5 @@
 ---
-name: gameplay-reviewer-blueprint
+name: gameplay-reviewer-workflow
 entry: entry.py
 version: 1.0.0
 exposed: false
@@ -10,6 +10,6 @@ capabilities:
   - plan scoring
   - unit test coverage review
 ---
-This blueprint reviews gameplay engineering plans. It scores the plan, verifies
+This workflow reviews gameplay engineering plans. It scores the plan, verifies
 that unit tests are included, highlights missing sections, and sends actionable
-feedback back to the gameplay-engineer-blueprint until the planning score is 100.
+feedback back to the gameplay-engineer-workflow until the planning score is 100.

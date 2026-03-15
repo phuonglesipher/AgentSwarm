@@ -26,6 +26,16 @@ class PrivateMemoryState(TypedDict):
     private_messages: Annotated[list[str], add]
 
 
+class RepoStyleWorkflowState(TypedDict):
+    task_prompt: str
+    plan_doc: str
+    review_round: int
+    review_notes: Annotated[list[str], add]
+    reviewer_seen_notes: list[str]
+    implementer_seen_notes: list[str]
+    final_report: dict[str, Any]
+
+
 def _shared_llm_a(state: SharedMemoryState) -> dict[str, Any]:
     seen = list(state["messages"])
     return {
@@ -50,6 +60,33 @@ def _private_llm_a(state: PrivateMemoryState) -> dict[str, Any]:
 def _private_llm_b(state: PrivateMemoryState) -> dict[str, Any]:
     seen = list(state["private_messages"])
     return {"private_messages": [f"private-b<{state['prompt']}> saw={len(seen)}"]}
+
+
+def _repo_plan_work(state: RepoStyleWorkflowState) -> dict[str, Any]:
+    return {
+        "plan_doc": f"Plan for {state['task_prompt']}",
+        "review_round": state["review_round"] + 1,
+        "review_notes": [f"plan<{state['task_prompt']}>"],
+    }
+
+
+def _repo_review_plan(state: RepoStyleWorkflowState) -> dict[str, Any]:
+    seen = list(state["review_notes"])
+    return {
+        "reviewer_seen_notes": seen,
+        "review_notes": [f"review<{state['task_prompt']}> saw={len(seen)}"],
+    }
+
+
+def _repo_implement_code(state: RepoStyleWorkflowState) -> dict[str, Any]:
+    seen = list(state["review_notes"])
+    return {
+        "implementer_seen_notes": seen,
+        "final_report": {
+            "seen_count": len(seen),
+            "last_note": seen[-1] if seen else "",
+        },
+    }
 
 
 def _build_shared_parent_graph():
@@ -88,6 +125,22 @@ def _build_wrapper_parent_graph(*, persist_private_subgraph: bool):
     parent.add_node("call_private_subgraph", call_private_subgraph)
     parent.add_edge(START, "call_private_subgraph")
     return parent.compile(checkpointer=InMemorySaver())
+
+
+def _build_repo_style_engineer_graph():
+    reviewer = StateGraph(RepoStyleWorkflowState)
+    reviewer.add_node("review_plan", _repo_review_plan)
+    reviewer.add_edge(START, "review_plan")
+    reviewer_graph = reviewer.compile()
+
+    engineer = StateGraph(RepoStyleWorkflowState)
+    engineer.add_node("plan_work", _repo_plan_work)
+    engineer.add_node("gameplay-reviewer-workflow", reviewer_graph)
+    engineer.add_node("implement_code", _repo_implement_code)
+    engineer.add_edge(START, "plan_work")
+    engineer.add_edge("plan_work", "gameplay-reviewer-workflow")
+    engineer.add_edge("gameplay-reviewer-workflow", "implement_code")
+    return engineer.compile(checkpointer=InMemorySaver())
 
 
 class ShortTermMemoryDemoTests(unittest.TestCase):
@@ -170,6 +223,75 @@ class ShortTermMemoryDemoTests(unittest.TestCase):
                 "private-b<turn2> saw=3",
             ],
         )
+
+    def test_repo_style_subgraph_shares_review_notes_with_implement_node(self) -> None:
+        graph = _build_repo_style_engineer_graph()
+        config = {"configurable": {"thread_id": "repo-style-one-shot"}}
+
+        result = graph.invoke(
+            {
+                "task_prompt": "fix dodge cancel timing",
+                "plan_doc": "",
+                "review_round": 0,
+                "review_notes": [],
+                "reviewer_seen_notes": [],
+                "implementer_seen_notes": [],
+                "final_report": {},
+            },
+            config,
+        )
+
+        self.assertEqual(result["reviewer_seen_notes"], ["plan<fix dodge cancel timing>"])
+        self.assertEqual(
+            result["implementer_seen_notes"],
+            [
+                "plan<fix dodge cancel timing>",
+                "plan<fix dodge cancel timing>",
+                "review<fix dodge cancel timing> saw=1",
+            ],
+        )
+        self.assertEqual(result["final_report"]["last_note"], "review<fix dodge cancel timing> saw=1")
+
+    def test_repo_style_same_thread_reuses_review_memory_across_invokes(self) -> None:
+        graph = _build_repo_style_engineer_graph()
+        config = {"configurable": {"thread_id": "repo-style-across-invokes"}}
+
+        graph.invoke(
+            {
+                "task_prompt": "fix dodge cancel timing",
+                "plan_doc": "",
+                "review_round": 0,
+                "review_notes": [],
+                "reviewer_seen_notes": [],
+                "implementer_seen_notes": [],
+                "final_report": {},
+            },
+            config,
+        )
+        result = graph.invoke(
+            {
+                "task_prompt": "tighten melee recovery windows",
+                "plan_doc": "",
+                "review_round": 0,
+                "review_notes": [],
+                "reviewer_seen_notes": [],
+                "implementer_seen_notes": [],
+                "final_report": {},
+            },
+            config,
+        )
+
+        self.assertEqual(
+            result["reviewer_seen_notes"],
+            [
+                "plan<fix dodge cancel timing>",
+                "plan<fix dodge cancel timing>",
+                "review<fix dodge cancel timing> saw=1",
+                "plan<tighten melee recovery windows>",
+            ],
+        )
+        self.assertEqual(result["final_report"]["last_note"], "review<tighten melee recovery windows> saw=4")
+        self.assertEqual(result["final_report"]["seen_count"], 9)
 
 
 if __name__ == "__main__":

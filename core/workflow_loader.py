@@ -6,8 +6,8 @@ import sys
 from typing import Any
 
 from core.llm import LLMManager
-from core.models import BlueprintContext, BlueprintMetadata, BlueprintRuntime
-from core.registry import BlueprintRegistry
+from core.models import WorkflowContext, WorkflowMetadata, WorkflowRuntime
+from core.registry import WorkflowRegistry
 
 
 def _parse_scalar(value: str) -> Any:
@@ -20,7 +20,7 @@ def _parse_scalar(value: str) -> Any:
     return cleaned
 
 
-def _parse_blueprint_markdown(markdown_path: Path) -> BlueprintMetadata:
+def _parse_workflow_markdown(markdown_path: Path) -> WorkflowMetadata:
     content = markdown_path.read_text(encoding="utf-8")
     lines = content.splitlines()
     if not lines or lines[0].strip() != "---":
@@ -57,7 +57,7 @@ def _parse_blueprint_markdown(markdown_path: Path) -> BlueprintMetadata:
         index += 1
 
     description = "\n".join(lines[index:]).strip()
-    return BlueprintMetadata(
+    return WorkflowMetadata(
         name=str(front_matter["name"]),
         entry=str(front_matter["entry"]),
         version=str(front_matter.get("version", "1.0.0")),
@@ -65,7 +65,7 @@ def _parse_blueprint_markdown(markdown_path: Path) -> BlueprintMetadata:
         capabilities=list(front_matter.get("capabilities", [])),
         exposed=bool(front_matter.get("exposed", True)),
         llm_profile=str(front_matter["llm_profile"]) if "llm_profile" in front_matter else None,
-        blueprint_dir=markdown_path.parent,
+        workflow_dir=markdown_path.parent,
     )
 
 
@@ -79,61 +79,61 @@ def _load_module(module_path: Path, module_name: str) -> Any:
     return module
 
 
-def _require_graph_runtime(runtime: BlueprintRuntime) -> Any:
+def _require_graph_runtime(runtime: WorkflowRuntime) -> Any:
     graph = runtime.graph
     if graph is None or not hasattr(graph, "get_graph"):
-        raise TypeError(f"Blueprint {runtime.metadata.name} does not expose a graph runtime")
+        raise TypeError(f"Workflow {runtime.metadata.name} does not expose a graph runtime")
     return graph
 
 
-def load_blueprints(project_root: Path, blueprints_root: Path, llm_manager: LLMManager) -> BlueprintRegistry:
-    if not blueprints_root.exists():
-        raise FileNotFoundError(f"Blueprint directory not found: {blueprints_root}")
+def load_workflows(project_root: Path, workflows_root: Path, llm_manager: LLMManager) -> WorkflowRegistry:
+    if not workflows_root.exists():
+        raise FileNotFoundError(f"Workflow directory not found: {workflows_root}")
 
-    registry = BlueprintRegistry()
-    blueprint_markdowns = sorted(blueprints_root.glob("*/Blueprint.md"))
-    blueprint_specs: dict[str, tuple[BlueprintMetadata, Any]] = {}
+    registry = WorkflowRegistry()
+    workflow_markdowns = sorted(workflows_root.glob("*/Workflow.md"))
+    workflow_specs: dict[str, tuple[WorkflowMetadata, Any]] = {}
 
-    for markdown_path in blueprint_markdowns:
-        metadata = _parse_blueprint_markdown(markdown_path)
-        entry_path = metadata.blueprint_dir / metadata.entry
-        blueprint_specs[metadata.name] = (
+    for markdown_path in workflow_markdowns:
+        metadata = _parse_workflow_markdown(markdown_path)
+        entry_path = metadata.workflow_dir / metadata.entry
+        workflow_specs[metadata.name] = (
             metadata,
-            _load_module(entry_path, f"blueprint_{metadata.name.replace('-', '_')}"),
+            _load_module(entry_path, f"workflow_{metadata.name.replace('-', '_')}"),
         )
 
-    runtime_cache: dict[str, BlueprintRuntime] = {}
+    runtime_cache: dict[str, WorkflowRuntime] = {}
     building: set[str] = set()
 
-    def build_runtime(name: str) -> BlueprintRuntime:
+    def build_runtime(name: str) -> WorkflowRuntime:
         if name in runtime_cache:
             return runtime_cache[name]
-        if name not in blueprint_specs:
-            raise KeyError(f"Unknown blueprint: {name}")
+        if name not in workflow_specs:
+            raise KeyError(f"Unknown workflow: {name}")
         if name in building:
-            raise RuntimeError(f"Cyclic blueprint dependency detected while building {name}")
+            raise RuntimeError(f"Cyclic workflow dependency detected while building {name}")
 
-        metadata, module = blueprint_specs[name]
+        metadata, module = workflow_specs[name]
         building.add(name)
         try:
-            context = BlueprintContext(
+            context = WorkflowContext(
                 project_root=project_root,
-                blueprints_root=blueprints_root,
-                blueprint_dir=metadata.blueprint_dir,
+                workflows_root=workflows_root,
+                workflow_dir=metadata.workflow_dir,
                 llm=llm_manager.resolve(metadata.llm_profile),
                 llm_manager=llm_manager,
                 get_llm=lambda profile=None, active_manager=llm_manager: active_manager.resolve(profile),
-                invoke_blueprint=lambda target_name, payload: build_runtime(target_name).invoke(payload),
-                get_blueprint_graph=lambda target_name: _require_graph_runtime(build_runtime(target_name)),
+                invoke_workflow=lambda target_name, payload: build_runtime(target_name).invoke(payload),
+                get_workflow_graph=lambda target_name: _require_graph_runtime(build_runtime(target_name)),
             )
 
             graph_or_runtime = module.build_graph(context=context, metadata=metadata)
             runtime_object = graph_or_runtime.compile() if hasattr(graph_or_runtime, "compile") else graph_or_runtime
             if not hasattr(runtime_object, "invoke"):
-                entry_path = metadata.blueprint_dir / metadata.entry
+                entry_path = metadata.workflow_dir / metadata.entry
                 raise TypeError(f"{entry_path} must return a graph or runtime with an invoke method")
 
-            runtime = BlueprintRuntime(
+            runtime = WorkflowRuntime(
                 metadata=metadata,
                 invoke=lambda payload, active_runtime=runtime_object: active_runtime.invoke(payload),
                 graph=runtime_object,
@@ -144,7 +144,7 @@ def load_blueprints(project_root: Path, blueprints_root: Path, llm_manager: LLMM
         finally:
             building.remove(name)
 
-    for blueprint_name in sorted(blueprint_specs):
-        build_runtime(blueprint_name)
+    for workflow_name in sorted(workflow_specs):
+        build_runtime(workflow_name)
 
     return registry

@@ -13,7 +13,7 @@ from typing_extensions import NotRequired, TypedDict
 
 from core.graph_logging import log_graph_payload_event, trace_graph_node, trace_route_decision
 from core.llm import LLMError
-from core.models import BlueprintContext, BlueprintMetadata
+from core.models import WorkflowContext, WorkflowMetadata
 from core.text_utils import normalize_text, slugify, tokenize
 
 
@@ -312,11 +312,11 @@ def _run_compile_and_tests(source_code: str, test_code: str) -> tuple[bool, bool
     return True, True, f"Compile and {total_tests} generated test(s) passed."
 
 
-def build_graph(context: BlueprintContext, metadata: BlueprintMetadata):
+def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
     project_root = context.project_root
     default_llm = context.llm
     graph_name = metadata.name
-    reviewer_graph = context.get_blueprint_graph("gameplay-reviewer-blueprint")
+    reviewer_graph = context.get_workflow_graph("gameplay-reviewer-workflow")
 
     def classify_request(state: EngineerState) -> dict[str, Any]:
         artifact_dir = Path(state["run_dir"]) / "tasks" / state["task_id"] / metadata.name
@@ -336,7 +336,7 @@ def build_graph(context: BlueprintContext, metadata: BlueprintMetadata):
             try:
                 result = default_llm.generate_json(
                     instructions=(
-                        "You are gameplay-engineer-blueprint. Decide whether the task is a gameplay bugfix or a new gameplay feature. "
+                        "You are gameplay-engineer-workflow. Decide whether the task is a gameplay bugfix or a new gameplay feature. "
                         "Use bugfix only when the request is about fixing an issue, regression, crash, or unintended behavior."
                     ),
                     input_text=f"Task prompt:\n{state['task_prompt']}",
@@ -373,7 +373,7 @@ def build_graph(context: BlueprintContext, metadata: BlueprintMetadata):
             try:
                 design_doc = default_llm.generate_text(
                     instructions=(
-                        "You are gameplay-engineer-blueprint. Write a concise markdown design context document for a gameplay task. "
+                        "You are gameplay-engineer-workflow. Write a concise markdown design context document for a gameplay task. "
                         "Include sections: Overview, Existing References, Player-Facing Behavior, Technical Notes, Risks. "
                         "Ground the design in the provided docs when they exist."
                     ),
@@ -398,7 +398,7 @@ def build_graph(context: BlueprintContext, metadata: BlueprintMetadata):
             try:
                 plan_doc = default_llm.generate_text(
                     instructions=(
-                        "You are gameplay-engineer-blueprint. Produce a markdown implementation plan for gameplay work. "
+                        "You are gameplay-engineer-workflow. Produce a markdown implementation plan for gameplay work. "
                         "The document must contain these exact sections: Overview, Task Type, Existing Docs, Implementation Steps, "
                         "Unit Tests, Risks, Acceptance Criteria. Each section must have concrete bullets."
                     ),
@@ -431,7 +431,7 @@ def build_graph(context: BlueprintContext, metadata: BlueprintMetadata):
         log_graph_payload_event(
             state=state,
             graph_name=graph_name,
-            node_name="gameplay-reviewer-blueprint",
+            node_name="gameplay-reviewer-workflow",
             phase="SUBGRAPH_ENTER",
             payload_label="input",
             payload=review_request,
@@ -449,7 +449,7 @@ def build_graph(context: BlueprintContext, metadata: BlueprintMetadata):
         log_graph_payload_event(
             state=state,
             graph_name=graph_name,
-            node_name="gameplay-reviewer-blueprint",
+            node_name="gameplay-reviewer-workflow",
             phase="SUBGRAPH_EXIT",
             payload_label="output",
             payload=review_result,
@@ -489,7 +489,7 @@ def build_graph(context: BlueprintContext, metadata: BlueprintMetadata):
             try:
                 revised_plan = default_llm.generate_text(
                     instructions=(
-                        "You are gameplay-engineer-blueprint. Rewrite the full markdown implementation plan after reviewer feedback. "
+                        "You are gameplay-engineer-workflow. Rewrite the full markdown implementation plan after reviewer feedback. "
                         "Keep the exact sections Overview, Task Type, Existing Docs, Implementation Steps, Unit Tests, Risks, "
                         "Acceptance Criteria, and make sure all reviewer concerns are addressed."
                     ),
@@ -527,7 +527,7 @@ def build_graph(context: BlueprintContext, metadata: BlueprintMetadata):
         try:
             result = codegen_llm.generate_json(
                 instructions=(
-                    "You are gameplay-engineer-blueprint code generation. Return Python source code and Python tests. "
+                    "You are gameplay-engineer-workflow code generation. Return Python source code and Python tests. "
                     "Do not use markdown fences. The source file must define build_gameplay_change_summary() -> dict. "
                     "The returned dict must include task_type, implementation_status set to 'ready-for-review', and unit_tests. "
                     "The test file must be plain Python with assert statements and no external dependencies."
@@ -607,7 +607,7 @@ def build_graph(context: BlueprintContext, metadata: BlueprintMetadata):
             [
                 "# Pull Request Draft",
                 "",
-                f"Blueprint: {metadata.name}",
+                f"Workflow: {metadata.name}",
                 f"Task: {state['task_prompt']}",
                 f"Review score: {state['review_score']}",
                 f"Task type rationale: {state['task_type_reason']}",
@@ -663,7 +663,7 @@ def build_graph(context: BlueprintContext, metadata: BlueprintMetadata):
         "enter_review_subgraph",
         trace_graph_node(graph_name=graph_name, node_name="enter_review_subgraph", node_fn=enter_review_subgraph),
     )
-    graph.add_node("gameplay-reviewer-blueprint", reviewer_graph)
+    graph.add_node("gameplay-reviewer-workflow", reviewer_graph)
     graph.add_node(
         "capture_review_result",
         trace_graph_node(graph_name=graph_name, node_name="capture_review_result", node_fn=capture_review_result),
@@ -695,8 +695,8 @@ def build_graph(context: BlueprintContext, metadata: BlueprintMetadata):
     graph.add_edge("build_design_doc", "plan_work")
     graph.add_edge("plan_work", "request_review")
     graph.add_edge("request_review", "enter_review_subgraph")
-    graph.add_edge("enter_review_subgraph", "gameplay-reviewer-blueprint")
-    graph.add_edge("gameplay-reviewer-blueprint", "capture_review_result")
+    graph.add_edge("enter_review_subgraph", "gameplay-reviewer-workflow")
+    graph.add_edge("gameplay-reviewer-workflow", "capture_review_result")
     graph.add_conditional_edges(
         "capture_review_result",
         trace_route_decision(graph_name=graph_name, router_name="review_gate", route_fn=review_gate),

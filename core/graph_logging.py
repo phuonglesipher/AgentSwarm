@@ -45,9 +45,9 @@ def _summarize_state(state: Mapping[str, Any] | None) -> str:
         if isinstance(active_task_id, str) and active_task_id.strip():
             details.append(f"active_task={active_task_id}")
 
-        blueprint_name = active_task.get("blueprint_name")
-        if isinstance(blueprint_name, str) and blueprint_name.strip():
-            details.append(f"active_blueprint={blueprint_name}")
+        workflow_name = active_task.get("workflow_name")
+        if isinstance(workflow_name, str) and workflow_name.strip():
+            details.append(f"active_workflow={workflow_name}")
 
     review_round = state.get("review_round")
     if isinstance(review_round, int) and review_round > 0:
