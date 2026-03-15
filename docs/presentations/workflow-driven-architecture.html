@@ -1,0 +1,1567 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Workflow-Driven Architecture | AgentSwarm</title>
+  <style>
+    :root {
+      --bg: #f5efe3;
+      --bg-strong: #fffaf2;
+      --ink: #16212c;
+      --muted: #5f6b75;
+      --line: rgba(22, 33, 44, 0.12);
+      --line-strong: rgba(22, 33, 44, 0.2);
+      --panel: rgba(255, 250, 242, 0.82);
+      --panel-strong: rgba(255, 255, 255, 0.92);
+      --teal: #0f766e;
+      --teal-soft: rgba(15, 118, 110, 0.14);
+      --coral: #e9734f;
+      --coral-soft: rgba(233, 115, 79, 0.14);
+      --gold: #d3a93d;
+      --gold-soft: rgba(211, 169, 61, 0.16);
+      --navy: #28445c;
+      --navy-soft: rgba(40, 68, 92, 0.12);
+      --shadow: 0 28px 80px rgba(21, 32, 43, 0.14);
+      --radius-xl: 30px;
+      --radius-lg: 24px;
+      --radius-md: 18px;
+      --radius-sm: 12px;
+      --display: "Avenir Next", "Trebuchet MS", "Helvetica Neue", sans-serif;
+      --body: "Avenir", "Segoe UI", "Helvetica Neue", sans-serif;
+      --mono: "SFMono-Regular", "Menlo", "Consolas", monospace;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    html,
+    body {
+      margin: 0;
+      min-height: 100%;
+      background:
+        radial-gradient(circle at 14% 18%, rgba(15, 118, 110, 0.14), transparent 26%),
+        radial-gradient(circle at 86% 12%, rgba(233, 115, 79, 0.18), transparent 25%),
+        radial-gradient(circle at 50% 84%, rgba(211, 169, 61, 0.16), transparent 28%),
+        linear-gradient(180deg, #fff9ef 0%, var(--bg) 42%, #f0e8da 100%);
+      color: var(--ink);
+      font-family: var(--body);
+      overflow: hidden;
+    }
+
+    body::before {
+      content: "";
+      position: fixed;
+      inset: 0;
+      background-image:
+        linear-gradient(rgba(255, 255, 255, 0.22) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(255, 255, 255, 0.22) 1px, transparent 1px);
+      background-size: 48px 48px;
+      mask-image: radial-gradient(circle at center, black 12%, transparent 90%);
+      pointer-events: none;
+      opacity: 0.44;
+    }
+
+    .chrome {
+      position: fixed;
+      top: 0;
+      left: 0;
+      right: 0;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 22px 28px 0;
+      z-index: 30;
+      pointer-events: none;
+    }
+
+    .brand {
+      display: inline-flex;
+      align-items: center;
+      gap: 12px;
+      padding: 12px 16px;
+      border: 1px solid rgba(22, 33, 44, 0.08);
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.72);
+      backdrop-filter: blur(20px);
+      box-shadow: 0 8px 26px rgba(22, 33, 44, 0.06);
+      font-size: 0.86rem;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--navy);
+      font-weight: 700;
+      pointer-events: auto;
+    }
+
+    .brand .dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      background: linear-gradient(135deg, var(--teal), var(--coral));
+      box-shadow: 0 0 0 5px rgba(15, 118, 110, 0.1);
+    }
+
+    .progress-shell {
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      padding: 12px 16px;
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.72);
+      backdrop-filter: blur(20px);
+      box-shadow: 0 8px 26px rgba(22, 33, 44, 0.06);
+      pointer-events: auto;
+    }
+
+    .counter {
+      min-width: 96px;
+      text-align: right;
+      font-family: var(--display);
+      font-weight: 800;
+      letter-spacing: 0.08em;
+      color: var(--navy);
+      font-size: 0.95rem;
+    }
+
+    .progress-bar {
+      position: relative;
+      width: min(20vw, 180px);
+      height: 8px;
+      border-radius: 999px;
+      background: rgba(22, 33, 44, 0.08);
+      overflow: hidden;
+    }
+
+    .progress-fill {
+      position: absolute;
+      inset: 0 auto 0 0;
+      width: 14%;
+      border-radius: inherit;
+      background: linear-gradient(90deg, var(--teal), var(--coral));
+      transition: width 320ms ease;
+    }
+
+    .deck {
+      height: 100vh;
+      overflow-y: auto;
+      scroll-snap-type: y mandatory;
+      scroll-behavior: smooth;
+      position: relative;
+      z-index: 1;
+    }
+
+    .deck::-webkit-scrollbar {
+      width: 10px;
+    }
+
+    .deck::-webkit-scrollbar-thumb {
+      background: rgba(22, 33, 44, 0.16);
+      border-radius: 999px;
+    }
+
+    .slide {
+      min-height: 100vh;
+      scroll-snap-align: start;
+      padding: 92px 28px 42px;
+      display: grid;
+      align-items: stretch;
+      position: relative;
+    }
+
+    .slide-shell {
+      max-width: 1320px;
+      width: 100%;
+      margin: 0 auto;
+      display: grid;
+      gap: 28px;
+      align-content: center;
+      position: relative;
+    }
+
+    .slide-shell > * {
+      opacity: 0.24;
+      transform: translateY(28px);
+      transition: opacity 520ms ease, transform 520ms ease;
+    }
+
+    .slide.is-active .slide-shell > * {
+      opacity: 1;
+      transform: translateY(0);
+    }
+
+    .eyebrow {
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+      padding: 10px 14px;
+      border-radius: 999px;
+      border: 1px solid rgba(22, 33, 44, 0.08);
+      background: rgba(255, 255, 255, 0.78);
+      color: var(--navy);
+      font-size: 0.8rem;
+      letter-spacing: 0.1em;
+      font-weight: 800;
+      text-transform: uppercase;
+      width: fit-content;
+      box-shadow: 0 10px 26px rgba(22, 33, 44, 0.05);
+    }
+
+    .eyebrow::before {
+      content: "";
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: linear-gradient(135deg, var(--teal), var(--gold));
+    }
+
+    h1,
+    h2,
+    h3 {
+      margin: 0;
+      font-family: var(--display);
+      letter-spacing: -0.04em;
+      line-height: 0.95;
+    }
+
+    h1 {
+      font-size: clamp(3.6rem, 7vw, 7rem);
+      max-width: 9.6ch;
+    }
+
+    h2 {
+      font-size: clamp(2.5rem, 4.5vw, 4.5rem);
+      max-width: 11ch;
+    }
+
+    h3 {
+      font-size: 1.34rem;
+      line-height: 1.1;
+      letter-spacing: -0.02em;
+    }
+
+    p {
+      margin: 0;
+      color: var(--muted);
+      line-height: 1.65;
+      font-size: clamp(1rem, 1.15vw, 1.14rem);
+    }
+
+    .lede {
+      max-width: 62ch;
+      font-size: clamp(1.08rem, 1.3vw, 1.26rem);
+    }
+
+    .hero-layout,
+    .contrast-layout,
+    .layer-layout,
+    .diagram-layout,
+    .trust-layout,
+    .impact-layout {
+      grid-template-columns: minmax(0, 1.05fr) minmax(0, 0.95fr);
+      align-items: center;
+    }
+
+    .hero-copy {
+      display: grid;
+      gap: 20px;
+    }
+
+    .badge-row,
+    .stat-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+    }
+
+    .pill,
+    .stat-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+      padding: 10px 14px;
+      border-radius: 999px;
+      border: 1px solid rgba(22, 33, 44, 0.08);
+      background: rgba(255, 255, 255, 0.76);
+      color: var(--ink);
+      font-size: 0.95rem;
+      box-shadow: 0 10px 20px rgba(22, 33, 44, 0.05);
+    }
+
+    .pill strong,
+    .stat-pill strong {
+      color: var(--navy);
+      font-family: var(--display);
+      letter-spacing: -0.02em;
+    }
+
+    .hero-panel {
+      border-radius: var(--radius-xl);
+      padding: 28px;
+      background:
+        linear-gradient(145deg, rgba(255, 255, 255, 0.88), rgba(255, 247, 236, 0.84)),
+        var(--panel);
+      border: 1px solid rgba(22, 33, 44, 0.08);
+      box-shadow: var(--shadow);
+      position: relative;
+      overflow: hidden;
+    }
+
+    .hero-panel::after {
+      content: "";
+      position: absolute;
+      width: 280px;
+      height: 280px;
+      border-radius: 50%;
+      right: -110px;
+      top: -110px;
+      background: radial-gradient(circle, rgba(15, 118, 110, 0.24), transparent 72%);
+      pointer-events: none;
+    }
+
+    .hero-visual {
+      display: grid;
+      gap: 18px;
+    }
+
+    .hero-stack {
+      display: grid;
+      gap: 14px;
+      position: relative;
+      padding-left: 16px;
+    }
+
+    .hero-stack::before {
+      content: "";
+      position: absolute;
+      left: 4px;
+      top: 10px;
+      bottom: 10px;
+      width: 2px;
+      background: linear-gradient(180deg, var(--teal), var(--coral));
+    }
+
+    .mini-card {
+      padding: 18px 18px 16px;
+      border-radius: var(--radius-md);
+      background: rgba(255, 255, 255, 0.78);
+      border: 1px solid rgba(22, 33, 44, 0.08);
+      box-shadow: 0 14px 30px rgba(22, 33, 44, 0.08);
+      display: grid;
+      gap: 8px;
+    }
+
+    .mini-card .step {
+      font-size: 0.78rem;
+      font-weight: 800;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      color: var(--teal);
+    }
+
+    .mini-card strong {
+      font-size: 1.12rem;
+      color: var(--ink);
+      font-family: var(--display);
+      letter-spacing: -0.03em;
+    }
+
+    .signal-grid,
+    .benefit-grid,
+    .layer-grid,
+    .trust-grid {
+      display: grid;
+      gap: 16px;
+    }
+
+    .signal-grid {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    .card {
+      background: var(--panel);
+      border: 1px solid rgba(22, 33, 44, 0.08);
+      border-radius: var(--radius-lg);
+      padding: 22px;
+      box-shadow: 0 18px 42px rgba(22, 33, 44, 0.08);
+      backdrop-filter: blur(18px);
+    }
+
+    .card.accent-teal {
+      background: linear-gradient(180deg, rgba(15, 118, 110, 0.12), rgba(255, 255, 255, 0.86));
+    }
+
+    .card.accent-coral {
+      background: linear-gradient(180deg, rgba(233, 115, 79, 0.12), rgba(255, 255, 255, 0.86));
+    }
+
+    .card.accent-gold {
+      background: linear-gradient(180deg, rgba(211, 169, 61, 0.13), rgba(255, 255, 255, 0.88));
+    }
+
+    .card ul,
+    .bullet-list,
+    .check-list {
+      margin: 0;
+      padding-left: 18px;
+      display: grid;
+      gap: 10px;
+      color: var(--muted);
+    }
+
+    .card li strong,
+    .bullet-list strong,
+    .check-list strong {
+      color: var(--ink);
+    }
+
+    .compare-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 18px;
+    }
+
+    .compare-card {
+      border-radius: var(--radius-xl);
+      padding: 26px;
+      border: 1px solid rgba(22, 33, 44, 0.08);
+      box-shadow: var(--shadow);
+      min-height: 100%;
+      display: grid;
+      gap: 16px;
+    }
+
+    .compare-card.left {
+      background: linear-gradient(180deg, rgba(233, 115, 79, 0.16), rgba(255, 255, 255, 0.88));
+    }
+
+    .compare-card.right {
+      background: linear-gradient(180deg, rgba(15, 118, 110, 0.16), rgba(255, 255, 255, 0.88));
+    }
+
+    .compare-title {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .compare-tag {
+      padding: 8px 12px;
+      border-radius: 999px;
+      font-size: 0.82rem;
+      font-weight: 800;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--navy);
+      background: rgba(255, 255, 255, 0.82);
+      border: 1px solid rgba(22, 33, 44, 0.08);
+    }
+
+    .bridge {
+      padding: 18px 20px;
+      border-radius: var(--radius-lg);
+      background: linear-gradient(90deg, rgba(22, 33, 44, 0.06), rgba(22, 33, 44, 0.02));
+      border: 1px solid rgba(22, 33, 44, 0.08);
+      color: var(--navy);
+      font-family: var(--display);
+      font-size: 1.2rem;
+      letter-spacing: -0.03em;
+      box-shadow: 0 14px 34px rgba(22, 33, 44, 0.06);
+    }
+
+    .layer-stack {
+      display: grid;
+      gap: 14px;
+    }
+
+    .layer-card {
+      display: grid;
+      grid-template-columns: 136px minmax(0, 1fr);
+      gap: 18px;
+      align-items: start;
+      padding: 18px 20px;
+      border-radius: var(--radius-lg);
+      border: 1px solid rgba(22, 33, 44, 0.08);
+      background: rgba(255, 255, 255, 0.82);
+      box-shadow: 0 16px 36px rgba(22, 33, 44, 0.06);
+    }
+
+    .layer-index {
+      display: grid;
+      gap: 8px;
+    }
+
+    .layer-index strong {
+      font-family: var(--display);
+      font-size: 1.16rem;
+      letter-spacing: -0.03em;
+      color: var(--navy);
+    }
+
+    .layer-index span {
+      color: var(--muted);
+      font-size: 0.88rem;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      font-weight: 700;
+    }
+
+    .file-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-top: 10px;
+    }
+
+    .file-chip {
+      padding: 8px 12px;
+      border-radius: 999px;
+      background: rgba(22, 33, 44, 0.06);
+      color: var(--navy);
+      font-family: var(--mono);
+      font-size: 0.82rem;
+      border: 1px solid rgba(22, 33, 44, 0.06);
+    }
+
+    .code-card {
+      padding: 24px;
+      border-radius: var(--radius-xl);
+      background: linear-gradient(180deg, rgba(40, 68, 92, 0.92), rgba(21, 33, 44, 0.98));
+      color: rgba(255, 252, 246, 0.9);
+      box-shadow: 0 24px 56px rgba(21, 33, 44, 0.22);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+    }
+
+    .code-card h3 {
+      margin-bottom: 14px;
+      color: #fff8ed;
+    }
+
+    .code-block {
+      margin: 0;
+      white-space: pre-wrap;
+      font-family: var(--mono);
+      font-size: 0.95rem;
+      line-height: 1.7;
+    }
+
+    .diagram-box {
+      background: rgba(255, 255, 255, 0.78);
+      border-radius: var(--radius-xl);
+      border: 1px solid rgba(22, 33, 44, 0.08);
+      padding: 20px;
+      box-shadow: var(--shadow);
+      overflow: auto;
+    }
+
+    .diagram-caption {
+      display: flex;
+      justify-content: space-between;
+      gap: 16px;
+      align-items: center;
+      margin-bottom: 16px;
+    }
+
+    .diagram-caption span {
+      color: var(--muted);
+      font-size: 0.96rem;
+    }
+
+    .legend {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-top: 14px;
+    }
+
+    .legend-item {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 12px;
+      border-radius: 999px;
+      background: rgba(22, 33, 44, 0.05);
+      font-size: 0.86rem;
+      color: var(--navy);
+    }
+
+    .legend-swatch {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+    }
+
+    svg {
+      width: 100%;
+      height: auto;
+      display: block;
+    }
+
+    .diagram-explain {
+      display: grid;
+      gap: 14px;
+    }
+
+    .explain-card {
+      padding: 18px;
+      border-radius: var(--radius-lg);
+      background: rgba(255, 255, 255, 0.82);
+      border: 1px solid rgba(22, 33, 44, 0.08);
+      box-shadow: 0 14px 32px rgba(22, 33, 44, 0.06);
+    }
+
+    .explain-card strong {
+      display: block;
+      margin-bottom: 8px;
+      font-family: var(--display);
+      color: var(--navy);
+      letter-spacing: -0.03em;
+    }
+
+    .tree-card {
+      background: linear-gradient(180deg, rgba(22, 33, 44, 0.96), rgba(37, 57, 74, 0.96));
+      color: rgba(255, 250, 242, 0.92);
+      border-radius: var(--radius-xl);
+      padding: 24px;
+      box-shadow: 0 28px 62px rgba(22, 33, 44, 0.26);
+      border: 1px solid rgba(255, 255, 255, 0.06);
+    }
+
+    .tree-card .code-block {
+      font-size: 0.92rem;
+      color: rgba(255, 250, 242, 0.88);
+    }
+
+    .trust-grid {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    .benefit-grid {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    .quote-panel {
+      padding: 28px;
+      border-radius: var(--radius-xl);
+      background: linear-gradient(135deg, rgba(15, 118, 110, 0.18), rgba(255, 255, 255, 0.88) 50%, rgba(233, 115, 79, 0.14));
+      border: 1px solid rgba(22, 33, 44, 0.08);
+      box-shadow: var(--shadow);
+      font-family: var(--display);
+      font-size: clamp(1.55rem, 2.5vw, 2.3rem);
+      letter-spacing: -0.04em;
+      line-height: 1.08;
+      color: var(--ink);
+    }
+
+    .sources {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+    }
+
+    .source-chip {
+      padding: 9px 12px;
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.76);
+      border: 1px solid rgba(22, 33, 44, 0.08);
+      font-family: var(--mono);
+      font-size: 0.81rem;
+      color: var(--navy);
+    }
+
+    .controls {
+      position: fixed;
+      right: 24px;
+      bottom: 24px;
+      display: grid;
+      gap: 12px;
+      z-index: 35;
+    }
+
+    .button-row,
+    .dot-list {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      justify-content: flex-end;
+    }
+
+    .control-btn {
+      appearance: none;
+      border: 0;
+      padding: 12px 16px;
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.82);
+      color: var(--ink);
+      font-weight: 700;
+      letter-spacing: 0.02em;
+      box-shadow: 0 10px 26px rgba(22, 33, 44, 0.08);
+      cursor: pointer;
+      transition: transform 180ms ease, background 180ms ease;
+      backdrop-filter: blur(20px);
+    }
+
+    .control-btn:hover {
+      transform: translateY(-2px);
+      background: rgba(255, 255, 255, 0.96);
+    }
+
+    .dot-btn {
+      width: 14px;
+      height: 14px;
+      padding: 0;
+      border-radius: 50%;
+      border: 0;
+      background: rgba(22, 33, 44, 0.18);
+      box-shadow: 0 4px 14px rgba(22, 33, 44, 0.1);
+      cursor: pointer;
+      transition: transform 180ms ease, background 180ms ease;
+    }
+
+    .dot-btn.active {
+      transform: scale(1.18);
+      background: linear-gradient(135deg, var(--teal), var(--coral));
+    }
+
+    .hint {
+      position: fixed;
+      left: 28px;
+      bottom: 26px;
+      padding: 12px 16px;
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.74);
+      border: 1px solid rgba(22, 33, 44, 0.08);
+      box-shadow: 0 10px 26px rgba(22, 33, 44, 0.06);
+      color: var(--navy);
+      font-size: 0.9rem;
+      z-index: 32;
+      backdrop-filter: blur(20px);
+    }
+
+    .svg-label {
+      font-family: var(--display);
+      font-size: 22px;
+      letter-spacing: -0.04em;
+      fill: #17212c;
+      font-weight: 700;
+    }
+
+    .svg-body {
+      font-family: var(--body);
+      font-size: 14px;
+      fill: #5f6b75;
+    }
+
+    .svg-tag {
+      font-family: var(--body);
+      font-size: 12px;
+      fill: #28445c;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+
+    .svg-chip {
+      font-family: var(--body);
+      font-size: 13px;
+      fill: #28445c;
+      font-weight: 700;
+    }
+
+    .svg-stroke {
+      stroke: rgba(22, 33, 44, 0.26);
+      stroke-width: 3;
+      fill: none;
+      marker-end: url(#arrow);
+    }
+
+    .svg-dashed {
+      stroke: rgba(22, 33, 44, 0.26);
+      stroke-width: 3;
+      stroke-dasharray: 10 9;
+      fill: none;
+      marker-end: url(#arrow);
+    }
+
+    .svg-panel-label {
+      font-family: var(--display);
+      font-size: 18px;
+      fill: #28445c;
+      font-weight: 700;
+      letter-spacing: -0.03em;
+    }
+
+    .footer-note {
+      color: var(--muted);
+      font-size: 0.94rem;
+    }
+
+    @media (max-width: 1100px) {
+      .hero-layout,
+      .contrast-layout,
+      .layer-layout,
+      .diagram-layout,
+      .trust-layout,
+      .impact-layout {
+        grid-template-columns: 1fr;
+      }
+
+      .signal-grid,
+      .compare-grid,
+      .trust-grid,
+      .benefit-grid {
+        grid-template-columns: 1fr;
+      }
+
+      .controls {
+        right: 18px;
+        bottom: 18px;
+      }
+
+      .hint {
+        left: 18px;
+        bottom: 18px;
+      }
+    }
+
+    @media (max-width: 760px) {
+      .chrome {
+        padding: 16px 16px 0;
+        gap: 12px;
+        flex-direction: column;
+        align-items: stretch;
+      }
+
+      .progress-shell {
+        justify-content: space-between;
+      }
+
+      .slide {
+        padding: 132px 16px 26px;
+      }
+
+      .layer-card {
+        grid-template-columns: 1fr;
+      }
+
+      .compare-title {
+        flex-direction: column;
+        align-items: flex-start;
+      }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      *,
+      *::before,
+      *::after {
+        animation: none !important;
+        transition: none !important;
+        scroll-behavior: auto !important;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="chrome">
+    <div class="brand">
+      <span class="dot"></span>
+      AgentSwarm / Workflow-Driven Architecture
+    </div>
+    <div class="progress-shell">
+      <div class="counter"><span id="current-slide">01</span> / <span id="total-slides">07</span></div>
+      <div class="progress-bar"><div class="progress-fill" id="progress-fill"></div></div>
+    </div>
+  </div>
+
+  <main class="deck" id="deck">
+    <section class="slide is-active" data-title="Overview">
+      <div class="slide-shell hero-layout">
+        <div class="hero-copy">
+          <span class="eyebrow">Architecture Story</span>
+          <h1>Workflow-Driven Architecture</h1>
+          <p class="lede">Từ một prompt chung, AgentSwarm biến execution thành chuỗi bước rõ ràng: có planning, có routing, có workflow chuyên trách, có reviewer loop, có self-test, và có đầy đủ artifacts để team tin tưởng khi chạy thật.</p>
+          <div class="badge-row">
+            <div class="pill"><strong>2 workflows</strong> đang được register</div>
+            <div class="pill"><strong>1 workflow</strong> exposed cho router</div>
+            <div class="pill"><strong>7 core nodes</strong> trong orchestrator</div>
+            <div class="pill"><strong>LLM optional</strong> với deterministic fallback</div>
+          </div>
+          <div class="signal-grid">
+            <div class="card accent-teal">
+              <h3>Control plane nhỏ và rõ</h3>
+              <p>`main_graph` chỉ làm 5 việc: plan, route, dispatch, collect, finalize.</p>
+            </div>
+            <div class="card accent-coral">
+              <h3>Domain logic nằm trong workflow</h3>
+              <p>Mỗi workflow có metadata riêng, graph riêng, artifacts riêng và có thể lồng subgraph khác.</p>
+            </div>
+            <div class="card accent-gold">
+              <h3>Review trước khi implement</h3>
+              <p>`gameplay-engineer-workflow` không viết code ngay. Nó phải qua review loop tới khi score = 100.</p>
+            </div>
+            <div class="card">
+              <h3>Debug được, test được, mở rộng được</h3>
+              <p>`graph_traversal.log`, `graph_state_debug.jsonl`, checkpoints và tests làm flow này vận hành được ở team scale.</p>
+            </div>
+          </div>
+        </div>
+
+        <div class="hero-panel">
+          <div class="hero-visual">
+            <div class="mini-card">
+              <span class="step">Step 1</span>
+              <strong>Prompt -> Tasks</strong>
+              <p>Prompt lớn được chia thành từng task nhỏ, đủ hẹp để route đúng workflow.</p>
+            </div>
+            <div class="hero-stack">
+              <div class="mini-card">
+                <span class="step">Step 2</span>
+                <strong>Tasks -> Specialist Workflow</strong>
+                <p>`Workflow.md` quyết định khả năng discover, route và profile LLM của từng workflow.</p>
+              </div>
+              <div class="mini-card">
+                <span class="step">Step 3</span>
+                <strong>Workflow -> Reviewer / Self-test</strong>
+                <p>Luồng nội bộ có thể tự review, sửa plan, regenerate code và test lại trước khi trả output.</p>
+              </div>
+              <div class="mini-card">
+                <span class="step">Step 4</span>
+                <strong>Artifacts -> Trust</strong>
+                <p>Mỗi run sinh ra logs, summaries, checkpoints, code/tests, commit message và draft PR.</p>
+              </div>
+            </div>
+            <div class="stat-row">
+              <div class="stat-pill"><strong>main.py</strong> entrypoint</div>
+              <div class="stat-pill"><strong>core/</strong> runtime platform</div>
+              <div class="stat-pill"><strong>Workflows/</strong> domain subgraphs</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="slide" data-title="Why Workflow">
+      <div class="slide-shell contrast-layout">
+        <div style="display:grid; gap:20px;">
+          <span class="eyebrow">Why This Shift</span>
+          <h2>Từ một agent làm tất cả sang nhiều workflow hợp tác</h2>
+          <p class="lede">Điểm khác biệt không nằm ở chỗ "dùng LangGraph", mà nằm ở cách repo này tách phần orchestration khỏi phần domain execution. Kết quả là architecture dễ hiểu hơn, dễ test hơn và dễ gắn owner theo team hơn.</p>
+          <div class="bridge">Từ behavior khó đoán -> execution có hợp đồng, có gate, có trace</div>
+        </div>
+
+        <div class="compare-grid">
+          <div class="compare-card left">
+            <div class="compare-title">
+              <h3>Single all-in-one agent</h3>
+              <span class="compare-tag">Prompt-centric</span>
+            </div>
+            <ul class="bullet-list">
+              <li><strong>Planning, routing, review và codegen</strong> trộn vào cùng một context lớn.</li>
+              <li><strong>Khó xác định lỗi</strong> vì không biết sai ở bước plan, route hay implementation.</li>
+              <li><strong>Khó test deterministic</strong> khi mọi thứ phụ thuộc vào một LLM flow duy nhất.</li>
+              <li><strong>Khó chia owner</strong> vì không có boundary rõ giữa platform và domain expertise.</li>
+              <li><strong>Khó quan sát</strong> nếu không có logs/artifacts tách theo từng stage.</li>
+            </ul>
+          </div>
+
+          <div class="compare-card right">
+            <div class="compare-title">
+              <h3>Workflow-driven runtime</h3>
+              <span class="compare-tag">Graph-centric</span>
+            </div>
+            <ul class="bullet-list">
+              <li><strong>Main graph</strong> chỉ orchestration: plan, route, dispatch, collect, finalize.</li>
+              <li><strong>Mỗi workflow</strong> là một module runtime có metadata, state và graph riêng.</li>
+              <li><strong>Subgraph ẩn</strong> như reviewer có thể chạy nội bộ mà không cần expose cho router.</li>
+              <li><strong>Fallback vẫn chạy</strong> ngay cả khi planner/router/reviewer/codegen LLM unavailable.</li>
+              <li><strong>Logs, checkpoints, artifacts</strong> giúp vận hành, debug và review output thực tế.</li>
+            </ul>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="slide" data-title="Repo Design">
+      <div class="slide-shell layer-layout">
+        <div style="display:grid; gap:20px;">
+          <span class="eyebrow">Repo Mapping</span>
+          <h2>Repo này hiện thực hóa ý tưởng đó như thế nào?</h2>
+          <p class="lede">Trong AgentSwarm, workflow không phải chỉ là prompt template. Nó là một contract có metadata, graph implementation, runtime wrapper, routing surface và output artifact rõ ràng.</p>
+          <div class="layer-stack">
+            <div class="layer-card">
+              <div class="layer-index">
+                <span>Layer 01</span>
+                <strong>Entrypoint</strong>
+              </div>
+              <div>
+                <p>Nhận prompt, tạo `run_dir`, load workflows, build main graph, invoke runtime và ghi checkpoint summary.</p>
+                <div class="file-row">
+                  <span class="file-chip">main.py</span>
+                  <span class="file-chip">AgentSwarm.sh</span>
+                  <span class="file-chip">AgentSwarm.bat</span>
+                </div>
+              </div>
+            </div>
+
+            <div class="layer-card">
+              <div class="layer-index">
+                <span>Layer 02</span>
+                <strong>Platform Core</strong>
+              </div>
+              <div>
+                <p>`workflow_loader` parse `Workflow.md`, bind LLM profile, compile graph; `registry` quản lý lookup và fallback routing; `llm.py` trừu tượng hóa backend.</p>
+                <div class="file-row">
+                  <span class="file-chip">core/workflow_loader.py</span>
+                  <span class="file-chip">core/registry.py</span>
+                  <span class="file-chip">core/llm.py</span>
+                  <span class="file-chip">core/models.py</span>
+                </div>
+              </div>
+            </div>
+
+            <div class="layer-card">
+              <div class="layer-index">
+                <span>Layer 03</span>
+                <strong>Main Orchestrator</strong>
+              </div>
+              <div>
+                <p>`main_graph` giữ state chung, plan task, route workflow, dispatch subgraph và tổng hợp final response.</p>
+                <div class="file-row">
+                  <span class="file-chip">core/main_graph.py</span>
+                  <span class="file-chip">build_initial_state()</span>
+                  <span class="file-chip">build_runtime_config()</span>
+                </div>
+              </div>
+            </div>
+
+            <div class="layer-card">
+              <div class="layer-index">
+                <span>Layer 04</span>
+                <strong>Workflow Plane</strong>
+              </div>
+              <div>
+                <p>Mỗi thư mục workflow có `Workflow.md` + `entry.py`. Chính `entry.py` export `build_graph(context, metadata)` để tạo domain subgraph.</p>
+                <div class="file-row">
+                  <span class="file-chip">Workflows/gameplay-engineer-workflow/</span>
+                  <span class="file-chip">Workflows/gameplay-reviewer-workflow/</span>
+                </div>
+              </div>
+            </div>
+
+            <div class="layer-card">
+              <div class="layer-index">
+                <span>Layer 05</span>
+                <strong>Observability</strong>
+              </div>
+              <div>
+                <p>`graph_logging` ghi ENTER / EXIT / ROUTE và payload debug; `runs/` giữ summary, checkpoints và artifacts theo task.</p>
+                <div class="file-row">
+                  <span class="file-chip">core/graph_logging.py</span>
+                  <span class="file-chip">runs/*</span>
+                  <span class="file-chip">tests/test_runtime.py</span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="code-card">
+          <h3>Workflow contract nhìn rất gọn</h3>
+          <pre class="code-block">---
+name: gameplay-engineer-workflow
+entry: entry.py
+version: 1.0.0
+exposed: true
+capabilities:
+  - gameplay implementation
+  - gameplay bug fixing
+---
+
+def build_graph(context, metadata):
+    ...
+    return graph</pre>
+          <p style="margin-top:16px; color:rgba(255, 250, 242, 0.76);">Điểm đáng giá là metadata quyết định discoverability, routing surface và profile, còn graph quyết định behavior thật sự của workflow.</p>
+        </div>
+      </div>
+    </section>
+
+    <section class="slide" data-title="Main Graph">
+      <div class="slide-shell diagram-layout">
+        <div class="diagram-box">
+          <div class="diagram-caption">
+            <h3>Main graph: prompt chạy qua đâu?</h3>
+            <span>Simplified từ `core/main_graph.py` và xray topology của graph hiện tại</span>
+          </div>
+          <svg viewBox="0 0 1200 660" role="img" aria-label="Main graph flow">
+            <defs>
+              <linearGradient id="nodeWarm" x1="0%" x2="100%" y1="0%" y2="100%">
+                <stop offset="0%" stop-color="#fff7ef"/>
+                <stop offset="100%" stop-color="#fff0dc"/>
+              </linearGradient>
+              <linearGradient id="nodeTeal" x1="0%" x2="100%" y1="0%" y2="100%">
+                <stop offset="0%" stop-color="#daf4ef"/>
+                <stop offset="100%" stop-color="#edfef8"/>
+              </linearGradient>
+              <linearGradient id="nodeCoral" x1="0%" x2="100%" y1="0%" y2="100%">
+                <stop offset="0%" stop-color="#ffe3da"/>
+                <stop offset="100%" stop-color="#fff4ef"/>
+              </linearGradient>
+              <linearGradient id="nodeNavy" x1="0%" x2="100%" y1="0%" y2="100%">
+                <stop offset="0%" stop-color="#dce8f0"/>
+                <stop offset="100%" stop-color="#eef6fb"/>
+              </linearGradient>
+              <marker id="arrow" markerWidth="14" markerHeight="14" refX="10" refY="7" orient="auto">
+                <path d="M0,0 L14,7 L0,14 z" fill="rgba(22, 33, 44, 0.32)"></path>
+              </marker>
+            </defs>
+
+            <path class="svg-stroke" d="M170 126 L268 126"></path>
+            <path class="svg-stroke" d="M442 126 L536 126"></path>
+            <path class="svg-stroke" d="M710 126 L804 126"></path>
+            <path class="svg-stroke" d="M894 164 L894 244"></path>
+            <path class="svg-dashed" d="M806 308 L276 308"></path>
+            <path class="svg-stroke" d="M362 344 L362 474"></path>
+            <path class="svg-stroke" d="M532 344 L532 474"></path>
+            <path class="svg-stroke" d="M658 528 L812 528"></path>
+            <path class="svg-dashed" d="M980 490 C1080 430 1070 230 964 230"></path>
+
+            <rect x="40" y="78" width="130" height="96" rx="26" fill="url(#nodeWarm)" stroke="rgba(22,33,44,0.12)"></rect>
+            <text x="66" y="116" class="svg-tag">Input</text>
+            <text x="66" y="144" class="svg-label">Prompt</text>
+            <text x="66" y="164" class="svg-body">run_dir + thread_id</text>
+
+            <rect x="268" y="72" width="174" height="108" rx="28" fill="url(#nodeTeal)" stroke="rgba(22,33,44,0.12)"></rect>
+            <text x="292" y="108" class="svg-tag">Node 01</text>
+            <text x="292" y="138" class="svg-label">analyze_prompt</text>
+            <text x="292" y="160" class="svg-body">Normalize context</text>
+
+            <rect x="536" y="72" width="174" height="108" rx="28" fill="url(#nodeWarm)" stroke="rgba(22,33,44,0.12)"></rect>
+            <text x="560" y="108" class="svg-tag">Node 02</text>
+            <text x="560" y="138" class="svg-label">plan_tasks</text>
+            <text x="560" y="160" class="svg-body">Split request into tasks</text>
+
+            <rect x="804" y="72" width="180" height="108" rx="28" fill="url(#nodeNavy)" stroke="rgba(22,33,44,0.12)"></rect>
+            <text x="828" y="108" class="svg-tag">Node 03</text>
+            <text x="828" y="138" class="svg-label">route_tasks</text>
+            <text x="828" y="160" class="svg-body">Pick best workflow</text>
+
+            <rect x="720" y="244" width="348" height="110" rx="32" fill="rgba(255,255,255,0.86)" stroke="rgba(22,33,44,0.12)"></rect>
+            <text x="748" y="278" class="svg-tag">Dispatcher</text>
+            <text x="748" y="312" class="svg-label">select_next_task</text>
+            <text x="748" y="334" class="svg-body">Prepare active task, choose next branch</text>
+            <rect x="930" y="262" width="112" height="30" rx="15" fill="#eef8f7"></rect>
+            <text x="948" y="282" class="svg-chip">tasks[]</text>
+            <rect x="930" y="300" width="112" height="30" rx="15" fill="#fff0ea"></rect>
+            <text x="940" y="320" class="svg-chip">routing_notes</text>
+
+            <rect x="170" y="430" width="192" height="96" rx="24" fill="url(#nodeWarm)" stroke="rgba(22,33,44,0.12)"></rect>
+            <text x="194" y="466" class="svg-tag">If no routed task</text>
+            <text x="194" y="496" class="svg-label">finalize</text>
+            <text x="194" y="516" class="svg-body">Write summary + response</text>
+
+            <rect x="446" y="390" width="212" height="176" rx="30" fill="url(#nodeTeal)" stroke="rgba(22,33,44,0.12)"></rect>
+            <text x="472" y="430" class="svg-tag">Workflow subgraph</text>
+            <text x="472" y="462" class="svg-label">gameplay-engineer-</text>
+            <text x="472" y="488" class="svg-label">workflow</text>
+            <text x="472" y="514" class="svg-body">Docs -> Plan -> Review -> Code -> Test</text>
+            <rect x="472" y="528" width="72" height="24" rx="12" fill="#ffffff"></rect>
+            <text x="487" y="544" class="svg-chip">review</text>
+            <rect x="552" y="528" width="72" height="24" rx="12" fill="#ffffff"></rect>
+            <text x="572" y="544" class="svg-chip">repair</text>
+
+            <rect x="812" y="430" width="192" height="96" rx="24" fill="url(#nodeNavy)" stroke="rgba(22,33,44,0.12)"></rect>
+            <text x="836" y="466" class="svg-tag">After workflow</text>
+            <text x="836" y="496" class="svg-label">collect_task_result</text>
+            <text x="836" y="516" class="svg-body">Merge output and continue</text>
+
+            <rect x="932" y="390" width="182" height="96" rx="24" fill="url(#nodeCoral)" stroke="rgba(22,33,44,0.12)"></rect>
+            <text x="956" y="426" class="svg-tag">If runtime missing</text>
+            <text x="956" y="456" class="svg-label">mark_task_failed</text>
+            <text x="956" y="476" class="svg-body">Capture workflow error</text>
+
+            <text x="308" y="612" class="svg-panel-label">Ý chính: main graph giữ orchestration nhỏ, còn execution thật được dồn vào workflow subgraphs.</text>
+          </svg>
+          <div class="legend">
+            <div class="legend-item"><span class="legend-swatch" style="background:var(--teal);"></span> workflow execution</div>
+            <div class="legend-item"><span class="legend-swatch" style="background:var(--navy);"></span> orchestration node</div>
+            <div class="legend-item"><span class="legend-swatch" style="background:var(--coral);"></span> failure path</div>
+            <div class="legend-item"><span class="legend-swatch" style="background:var(--gold);"></span> finalization path</div>
+          </div>
+        </div>
+
+        <div class="diagram-explain">
+          <span class="eyebrow">Control Plane</span>
+          <h2>Main graph giữ orchestration, không ôm domain logic</h2>
+          <div class="explain-card">
+            <strong>`plan_tasks`</strong>
+            Chia prompt thành 1 tới 5 implementation tasks. Nếu planner LLM không sẵn sàng, hệ thống fallback sang split deterministic.
+          </div>
+          <div class="explain-card">
+            <strong>`route_tasks`</strong>
+            Ưu tiên router LLM, nhưng vẫn có fallback bằng keyword overlap trên `name`, `description`, `capabilities` của workflow metadata.
+          </div>
+          <div class="explain-card">
+            <strong>`select_next_task` + dispatch</strong>
+            Chọn task có trạng thái `routed`, cắt state cần thiết cho task đó, rồi gọi workflow subgraph tương ứng.
+          </div>
+          <div class="explain-card">
+            <strong>`collect_task_result` + `finalize`</strong>
+            Merge kết quả, cập nhật notes, lặp tới khi không còn task nào, sau đó ghi `summary.md` và trả final response.
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="slide" data-title="Engineer Workflow">
+      <div class="slide-shell diagram-layout">
+        <div style="display:grid; gap:20px;">
+          <span class="eyebrow">Deep Dive</span>
+          <h2>`gameplay-engineer-workflow` là nơi governance thật sự xảy ra</h2>
+          <p class="lede">Workflow này cho thấy lợi thế lớn nhất của kiến trúc hiện tại: domain workflow có thể tự xây design context, tự review plan, tự sửa cho tới khi đạt chuẩn, rồi mới implement và self-test.</p>
+          <div class="explain-card">
+            <strong>Reviewer là subgraph ẩn</strong>
+            `gameplay-reviewer-workflow` có `exposed: false`, nghĩa là nó không được route trực tiếp từ user prompt, nhưng vẫn là một block chuyên trách được gọi bên trong engineer workflow.
+          </div>
+          <div class="explain-card">
+            <strong>Hai quality gates rất rõ</strong>
+            Gate 1: plan phải được reviewer chấm 100/100. Gate 2: code phải compile và pass tests trước khi được phép prepare delivery.
+          </div>
+          <div class="explain-card">
+            <strong>Artifacts sinh ra rất thực dụng</strong>
+            `design_doc.md`, `plan_doc.md`, `review_round_*.md`, `gameplay_change.py`, `test_gameplay_change.py`, `self_test.txt`, `commit_message.txt`, `pull_request.md`.
+          </div>
+        </div>
+
+        <div class="diagram-box">
+          <div class="diagram-caption">
+            <h3>Workflow loop thực tế trong repo</h3>
+            <span>Simplified từ `Workflows/gameplay-engineer-workflow/entry.py`</span>
+          </div>
+          <svg viewBox="0 0 1240 760" role="img" aria-label="Gameplay engineer workflow">
+            <defs>
+              <linearGradient id="engTeal" x1="0%" x2="100%" y1="0%" y2="100%">
+                <stop offset="0%" stop-color="#d7f3ee"/>
+                <stop offset="100%" stop-color="#f2fffb"/>
+              </linearGradient>
+              <linearGradient id="engWarm" x1="0%" x2="100%" y1="0%" y2="100%">
+                <stop offset="0%" stop-color="#fff4e3"/>
+                <stop offset="100%" stop-color="#fffdf6"/>
+              </linearGradient>
+              <linearGradient id="engCoral" x1="0%" x2="100%" y1="0%" y2="100%">
+                <stop offset="0%" stop-color="#ffe5de"/>
+                <stop offset="100%" stop-color="#fff7f4"/>
+              </linearGradient>
+              <linearGradient id="engNavy" x1="0%" x2="100%" y1="0%" y2="100%">
+                <stop offset="0%" stop-color="#dceaf4"/>
+                <stop offset="100%" stop-color="#f4fafe"/>
+              </linearGradient>
+              <marker id="arrow-workflow" markerWidth="14" markerHeight="14" refX="10" refY="7" orient="auto">
+                <path d="M0,0 L14,7 L0,14 z" fill="rgba(22, 33, 44, 0.32)"></path>
+              </marker>
+            </defs>
+
+            <path d="M124 126 L238 126" stroke="rgba(22,33,44,0.28)" stroke-width="3" fill="none" marker-end="url(#arrow-workflow)"></path>
+            <path d="M412 126 L524 126" stroke="rgba(22,33,44,0.28)" stroke-width="3" fill="none" marker-end="url(#arrow-workflow)"></path>
+            <path d="M698 126 L810 126" stroke="rgba(22,33,44,0.28)" stroke-width="3" fill="none" marker-end="url(#arrow-workflow)"></path>
+            <path d="M984 126 L1092 126" stroke="rgba(22,33,44,0.28)" stroke-width="3" fill="none" marker-end="url(#arrow-workflow)"></path>
+            <path d="M1168 164 L1168 262" stroke="rgba(22,33,44,0.28)" stroke-width="3" fill="none" marker-end="url(#arrow-workflow)"></path>
+            <path d="M1130 358 L1030 358" stroke="rgba(22,33,44,0.28)" stroke-width="3" fill="none" marker-end="url(#arrow-workflow)"></path>
+            <path d="M944 392 L944 486" stroke="rgba(22,33,44,0.28)" stroke-width="3" fill="none" marker-end="url(#arrow-workflow)"></path>
+            <path d="M1046 540 L1154 540" stroke="rgba(22,33,44,0.28)" stroke-width="3" fill="none" marker-end="url(#arrow-workflow)"></path>
+            <path d="M1122 574 L1122 662" stroke="rgba(22,33,44,0.28)" stroke-width="3" fill="none" marker-end="url(#arrow-workflow)"></path>
+            <path d="M922 574 L812 574" stroke="rgba(22,33,44,0.28)" stroke-width="3" fill="none" marker-end="url(#arrow-workflow)"></path>
+            <path d="M724 608 L724 662" stroke="rgba(22,33,44,0.28)" stroke-width="3" fill="none" marker-end="url(#arrow-workflow)"></path>
+
+            <path d="M854 358 C760 358 752 358 662 358" stroke="rgba(22,33,44,0.28)" stroke-width="3" stroke-dasharray="10 9" fill="none" marker-end="url(#arrow-workflow)"></path>
+            <path d="M648 392 C576 392 536 392 536 330 L536 190" stroke="rgba(22,33,44,0.28)" stroke-width="3" stroke-dasharray="10 9" fill="none" marker-end="url(#arrow-workflow)"></path>
+            <path d="M724 704 C724 734 1122 734 1122 706" stroke="rgba(22,33,44,0.28)" stroke-width="3" stroke-dasharray="10 9" fill="none" marker-end="url(#arrow-workflow)"></path>
+
+            <rect x="34" y="74" width="90" height="104" rx="24" fill="url(#engWarm)" stroke="rgba(22,33,44,0.12)"></rect>
+            <text x="54" y="112" class="svg-tag">Start</text>
+            <text x="54" y="144" class="svg-label">Task</text>
+
+            <rect x="238" y="70" width="174" height="112" rx="26" fill="url(#engWarm)" stroke="rgba(22,33,44,0.12)"></rect>
+            <text x="262" y="106" class="svg-tag">Step 01</text>
+            <text x="262" y="136" class="svg-label">classify_request</text>
+            <text x="262" y="160" class="svg-body">bugfix or feature?</text>
+
+            <rect x="524" y="70" width="174" height="112" rx="26" fill="url(#engTeal)" stroke="rgba(22,33,44,0.12)"></rect>
+            <text x="548" y="106" class="svg-tag">Step 02</text>
+            <text x="548" y="136" class="svg-label">inspect_docs</text>
+            <text x="548" y="160" class="svg-body">Find gameplay references</text>
+
+            <rect x="810" y="70" width="174" height="112" rx="26" fill="url(#engNavy)" stroke="rgba(22,33,44,0.12)"></rect>
+            <text x="834" y="106" class="svg-tag">Step 03</text>
+            <text x="834" y="136" class="svg-label">build_design_doc</text>
+            <text x="834" y="160" class="svg-body">Context before action</text>
+
+            <rect x="1092" y="70" width="116" height="112" rx="26" fill="url(#engWarm)" stroke="rgba(22,33,44,0.12)"></rect>
+            <text x="1114" y="106" class="svg-tag">Step 04</text>
+            <text x="1114" y="136" class="svg-label">plan_work</text>
+            <text x="1114" y="160" class="svg-body">Create plan</text>
+
+            <rect x="996" y="262" width="172" height="96" rx="26" fill="url(#engWarm)" stroke="rgba(22,33,44,0.12)"></rect>
+            <text x="1020" y="296" class="svg-tag">Step 05</text>
+            <text x="1020" y="324" class="svg-label">request_review</text>
+            <text x="1020" y="344" class="svg-body">review_round + 1</text>
+
+            <rect x="854" y="312" width="92" height="92" rx="28" fill="#ffffff" stroke="rgba(22,33,44,0.14)"></rect>
+            <text x="874" y="346" class="svg-tag">Gate</text>
+            <text x="880" y="372" class="svg-chip">100?</text>
+
+            <rect x="618" y="264" width="234" height="126" rx="30" fill="rgba(15,118,110,0.12)" stroke="rgba(15,118,110,0.18)" stroke-dasharray="12 8"></rect>
+            <text x="646" y="300" class="svg-tag">Hidden subgraph</text>
+            <text x="646" y="332" class="svg-label">gameplay-reviewer-</text>
+            <text x="646" y="358" class="svg-label">workflow</text>
+            <text x="646" y="382" class="svg-body">review_plan -> score / feedback / missing sections</text>
+
+            <rect x="474" y="392" width="188" height="96" rx="26" fill="url(#engCoral)" stroke="rgba(22,33,44,0.12)"></rect>
+            <text x="498" y="426" class="svg-tag">If score &lt; 100</text>
+            <text x="498" y="456" class="svg-label">revise_plan</text>
+            <text x="498" y="476" class="svg-body">Rewrite and retry review</text>
+
+            <rect x="854" y="486" width="192" height="108" rx="28" fill="url(#engTeal)" stroke="rgba(22,33,44,0.12)"></rect>
+            <text x="878" y="522" class="svg-tag">If score = 100</text>
+            <text x="878" y="552" class="svg-label">implement_code</text>
+            <text x="878" y="574" class="svg-body">Generate source + tests</text>
+
+            <rect x="1154" y="486" width="116" height="108" rx="28" fill="url(#engNavy)" stroke="rgba(22,33,44,0.12)"></rect>
+            <text x="1176" y="522" class="svg-tag">Step 07</text>
+            <text x="1176" y="552" class="svg-label">self_test</text>
+            <text x="1176" y="574" class="svg-body">compile + tests</text>
+
+            <rect x="1022" y="612" width="200" height="96" rx="26" fill="url(#engWarm)" stroke="rgba(22,33,44,0.12)"></rect>
+            <text x="1046" y="648" class="svg-tag">If tests pass</text>
+            <text x="1046" y="678" class="svg-label">prepare_delivery</text>
+            <text x="1046" y="698" class="svg-body">PR + commit artifacts</text>
+
+            <rect x="612" y="612" width="188" height="96" rx="26" fill="url(#engCoral)" stroke="rgba(22,33,44,0.12)"></rect>
+            <text x="636" y="648" class="svg-tag">If tests fail</text>
+            <text x="636" y="678" class="svg-label">repair_code</text>
+            <text x="636" y="698" class="svg-body">Regenerate with error context</text>
+
+            <text x="424" y="742" class="svg-panel-label">Điểm mạnh: review loop và test loop được encode thành graph state, không phải nhúng mơ hồ trong một prompt lớn.</text>
+          </svg>
+          <div class="legend">
+            <div class="legend-item"><span class="legend-swatch" style="background:var(--teal);"></span> quality-ready path</div>
+            <div class="legend-item"><span class="legend-swatch" style="background:var(--coral);"></span> revision / repair loop</div>
+            <div class="legend-item"><span class="legend-swatch" style="background:var(--navy);"></span> document / validation stages</div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="slide" data-title="Trust & Ops">
+      <div class="slide-shell trust-layout">
+        <div style="display:grid; gap:20px;">
+          <span class="eyebrow">Trust Layer</span>
+          <h2>Vì sao flow này đáng tin hơn khi đem ra team scale?</h2>
+          <p class="lede">Repo hiện tại không chỉ “chạy được”. Nó đã encode sẵn nhiều cơ chế để giảm rủi ro khi dùng LLM trong runtime: deterministic fallback, thread-aware checkpoints, trace logs và per-task artifacts.</p>
+          <div class="trust-grid">
+            <div class="card accent-teal">
+              <h3>Deterministic fallback</h3>
+              <p>`plan_tasks`, `route_tasks`, classification, review và code bundle generation đều có fallback. Nghĩa là flow vẫn chạy khi model unavailable.</p>
+            </div>
+            <div class="card accent-gold">
+              <h3>Checkpoints theo thread</h3>
+              <p>`build_runtime_config(thread_id)` và `InMemorySaver` cho phép lấy `get_state()` và `get_state_history()` sau mỗi run.</p>
+            </div>
+            <div class="card accent-coral">
+              <h3>Graph-level observability</h3>
+              <p>`graph_traversal.log` ghi ENTER / EXIT / ROUTE, còn `graph_state_debug.jsonl` lưu payload debug theo event id.</p>
+            </div>
+            <div class="card">
+              <h3>Tests đã validate behavior cốt lõi</h3>
+              <p>`tests/test_runtime.py` cover load workflows, routing, nested subgraphs, end-to-end runtime và checkpoint state tracking.</p>
+            </div>
+          </div>
+        </div>
+
+        <div class="tree-card">
+          <h3 style="margin-bottom:14px; color:#fff9f0;">Artifacts của một run nhìn như thế nào?</h3>
+          <pre class="code-block">runs/&lt;timestamp&gt;/
+  summary.md
+  checkpoint_summary.md
+  checkpoint_summary.json
+  graph_traversal.log
+  graph_state_debug.jsonl
+  tasks/
+    task-1-fix-combat-dodge-cancel-bug.../
+      gameplay-engineer-workflow/
+        design_doc.md
+        plan_doc.md
+        review_round_1.md
+        gameplay_change.py
+        test_gameplay_change.py
+        self_test.txt
+        commit_message.txt
+        pull_request.md</pre>
+          <p style="margin-top:18px; color:rgba(255, 250, 242, 0.76);">Điều này rất quan trọng khi present với team: output không dừng ở chat response, mà được materialize thành file artifacts đủ để review, diff và follow-up.</p>
+        </div>
+      </div>
+    </section>
+
+    <section class="slide" data-title="Team Impact">
+      <div class="slide-shell impact-layout">
+        <div style="display:grid; gap:20px;">
+          <span class="eyebrow">Team Value</span>
+          <h2>Ý nghĩa thực tế với team nếu đi theo hướng này</h2>
+          <div class="benefit-grid">
+            <div class="card accent-teal">
+              <h3>Dễ chia ownership</h3>
+              <p>Platform team giữ orchestration và contracts. Domain team giữ từng workflow. Reviewer workflows có thể được team lead hoặc QA định nghĩa riêng.</p>
+            </div>
+            <div class="card accent-coral">
+              <h3>Dễ mở rộng dần</h3>
+              <p>Không cần làm “siêu agent” ngay từ đầu. Chỉ cần thêm workflow mới, metadata mới và route surface phù hợp.</p>
+            </div>
+            <div class="card accent-gold">
+              <h3>Dễ review output</h3>
+              <p>Artifacts theo task khiến việc review design, plan, test và PR draft trở thành quy trình quen thuộc với engineering team.</p>
+            </div>
+            <div class="card">
+              <h3>Dễ kiểm soát AI risk</h3>
+              <p>LLM được dùng như capability trong từng step, không phải “black box” duy nhất điều khiển toàn bộ execution.</p>
+            </div>
+          </div>
+        </div>
+
+        <div style="display:grid; gap:20px;">
+          <div class="quote-panel">“Chúng ta không xây một agent thông minh duy nhất. Chúng ta đang xây một runtime để nhiều workflow chuyên trách cộng tác an toàn.”</div>
+          <div class="card">
+            <h3>Next steps nên ưu tiên</h3>
+            <ul class="check-list">
+              <li><strong>Thêm workflow mới theo domain</strong> như backend, frontend, docs, QA reviewer.</li>
+              <li><strong>Giữ `Workflow.md` thật gọn</strong> để route surface dễ hiểu và dễ audit.</li>
+              <li><strong>Xuất graph viewer trong CI</strong> để team luôn thấy topology mới nhất sau mỗi thay đổi.</li>
+              <li><strong>Chuẩn hóa artifact contract</strong> để mọi workflow trả ra summary, validation và delivery assets nhất quán.</li>
+              <li><strong>Chỉ expose workflow an toàn</strong>; internal reviewer / validator có thể giữ `exposed: false`.</li>
+            </ul>
+          </div>
+          <div class="card">
+            <h3>Nguồn nội dung trong deck này</h3>
+            <div class="sources">
+              <span class="source-chip">main.py</span>
+              <span class="source-chip">core/main_graph.py</span>
+              <span class="source-chip">core/workflow_loader.py</span>
+              <span class="source-chip">core/registry.py</span>
+              <span class="source-chip">core/graph_logging.py</span>
+              <span class="source-chip">Workflows/gameplay-engineer-workflow/entry.py</span>
+              <span class="source-chip">Workflows/gameplay-reviewer-workflow/entry.py</span>
+              <span class="source-chip">tests/test_runtime.py</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <div class="hint">Scroll, click dots, hoặc dùng phím mũi tên để trình chiếu.</div>
+
+  <div class="controls">
+    <div class="button-row">
+      <button class="control-btn" id="prev-btn" type="button">Previous</button>
+      <button class="control-btn" id="next-btn" type="button">Next</button>
+    </div>
+    <div class="dot-list" id="dot-list"></div>
+  </div>
+
+  <script>
+    const deck = document.getElementById("deck");
+    const slides = Array.from(document.querySelectorAll(".slide"));
+    const dotList = document.getElementById("dot-list");
+    const currentSlideLabel = document.getElementById("current-slide");
+    const totalSlidesLabel = document.getElementById("total-slides");
+    const progressFill = document.getElementById("progress-fill");
+    const prevButton = document.getElementById("prev-btn");
+    const nextButton = document.getElementById("next-btn");
+
+    totalSlidesLabel.textContent = String(slides.length).padStart(2, "0");
+
+    const dots = slides.map((slide, index) => {
+      const button = document.createElement("button");
+      button.className = "dot-btn";
+      button.type = "button";
+      button.setAttribute("aria-label", `Go to slide ${index + 1}`);
+      button.title = slide.dataset.title || `Slide ${index + 1}`;
+      button.addEventListener("click", () => {
+        slide.scrollIntoView({ behavior: "smooth", block: "start" });
+      });
+      dotList.appendChild(button);
+      return button;
+    });
+
+    let activeIndex = 0;
+
+    function renderActiveSlide(index) {
+      activeIndex = index;
+      slides.forEach((slide, slideIndex) => {
+        slide.classList.toggle("is-active", slideIndex === index);
+      });
+      dots.forEach((dot, dotIndex) => {
+        dot.classList.toggle("active", dotIndex === index);
+      });
+      currentSlideLabel.textContent = String(index + 1).padStart(2, "0");
+      progressFill.style.width = `${((index + 1) / slides.length) * 100}%`;
+      prevButton.disabled = index === 0;
+      nextButton.disabled = index === slides.length - 1;
+      prevButton.style.opacity = index === 0 ? "0.5" : "1";
+      nextButton.style.opacity = index === slides.length - 1 ? "0.5" : "1";
+    }
+
+    const observer = new IntersectionObserver(
+      (entries) => {
+        entries.forEach((entry) => {
+          if (!entry.isIntersecting) {
+            return;
+          }
+          const index = slides.indexOf(entry.target);
+          if (index >= 0 && entry.intersectionRatio > 0.55) {
+            renderActiveSlide(index);
+          }
+        });
+      },
+      {
+        root: deck,
+        threshold: [0.4, 0.55, 0.7],
+      }
+    );
+
+    slides.forEach((slide) => observer.observe(slide));
+
+    prevButton.addEventListener("click", () => {
+      const target = slides[Math.max(0, activeIndex - 1)];
+      target.scrollIntoView({ behavior: "smooth", block: "start" });
+    });
+
+    nextButton.addEventListener("click", () => {
+      const target = slides[Math.min(slides.length - 1, activeIndex + 1)];
+      target.scrollIntoView({ behavior: "smooth", block: "start" });
+    });
+
+    window.addEventListener("keydown", (event) => {
+      if (["ArrowDown", "PageDown", "ArrowRight", " "].includes(event.key)) {
+        event.preventDefault();
+        const target = slides[Math.min(slides.length - 1, activeIndex + 1)];
+        target.scrollIntoView({ behavior: "smooth", block: "start" });
+      }
+      if (["ArrowUp", "PageUp", "ArrowLeft"].includes(event.key)) {
+        event.preventDefault();
+        const target = slides[Math.max(0, activeIndex - 1)];
+        target.scrollIntoView({ behavior: "smooth", block: "start" });
+      }
+      if (event.key === "Home") {
+        event.preventDefault();
+        slides[0].scrollIntoView({ behavior: "smooth", block: "start" });
+      }
+      if (event.key === "End") {
+        event.preventDefault();
+        slides[slides.length - 1].scrollIntoView({ behavior: "smooth", block: "start" });
+      }
+    });
+
+    renderActiveSlide(0);
+  </script>
+</body>
+</html>

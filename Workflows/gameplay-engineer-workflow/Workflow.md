@@ -9,6 +9,9 @@ capabilities:
   - 3c feature development
   - combat feature development
   - gameplay planning
+tools:
+  - find-gameplay-docs
+  - load-markdown-context
 ---
 This workflow is responsible for gameplay engineering work. It handles gameplay
 feature development and bug fixing across 3C and combat content. The workflow

@@ -4,6 +4,7 @@ from pathlib import Path
 import re
 from typing import Any
 
+from langchain_core.messages import AnyMessage
 from langgraph.graph import END, START, StateGraph
 from typing_extensions import TypedDict
 
@@ -43,6 +44,9 @@ class MainState(TypedDict):
     feedback: str
     missing_sections: list[str]
     approved: bool
+    messages: list[AnyMessage]
+    pending_tool_name: str
+    pending_tool_call_id: str
 
 
 def _split_prompt(prompt: str) -> list[str]:
@@ -180,6 +184,9 @@ def _reset_active_task_fields() -> dict[str, Any]:
         "feedback": "",
         "missing_sections": [],
         "approved": False,
+        "messages": [],
+        "pending_tool_name": "",
+        "pending_tool_call_id": "",
     }
 
 
@@ -199,6 +206,9 @@ def _prepare_active_task(task: MainTask, index: int) -> dict[str, Any]:
         "feedback": "",
         "missing_sections": [],
         "approved": False,
+        "messages": [],
+        "pending_tool_name": "",
+        "pending_tool_call_id": "",
     }
 
 

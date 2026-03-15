@@ -8,16 +8,17 @@ import tempfile
 from typing import Any
 import unittest
 
-from langgraph.graph import END, START, StateGraph
+from langgraph.graph import END, START, MessagesState, StateGraph
 from typing_extensions import NotRequired, TypedDict
 
 from core.graph_logging import log_graph_payload_event, trace_graph_node, trace_route_decision
 from core.llm import LLMError
 from core.models import WorkflowContext, WorkflowMetadata
+from core.tool_graph import build_tool_call_message, find_latest_tool_message
 from core.text_utils import normalize_text, slugify, tokenize
 
 
-class EngineerState(TypedDict):
+class EngineerState(MessagesState):
     prompt: str
     task_prompt: str
     task_id: str
@@ -45,6 +46,8 @@ class EngineerState(TypedDict):
     score: NotRequired[int]
     feedback: NotRequired[str]
     approved: NotRequired[bool]
+    pending_tool_name: str
+    pending_tool_call_id: str
 
 
 REQUIRED_PLAN_SECTIONS = {
@@ -55,38 +58,6 @@ REQUIRED_PLAN_SECTIONS = {
     "Risks": "Record the likely implementation risks and fallback plans.",
     "Acceptance Criteria": "State the observable gameplay outcome when the task is complete.",
 }
-
-
-def _find_relevant_docs(project_root: Path, task_prompt: str) -> list[str]:
-    search_roots = [
-        project_root / "docs" / "engineer" / "gameplay",
-        project_root / "docs" / "designer",
-    ]
-    prompt_tokens = tokenize(task_prompt)
-    scored: list[tuple[int, Path]] = []
-
-    for root in search_roots:
-        if not root.exists():
-            continue
-        for path in root.rglob("*.md"):
-            content = path.read_text(encoding="utf-8")
-            score = len(prompt_tokens & tokenize(f"{path.name} {content}"))
-            if score:
-                scored.append((score, path))
-
-    scored.sort(key=lambda item: (-item[0], item[1].name))
-    return [str(path.relative_to(project_root)) for _, path in scored[:3]]
-
-
-def _load_doc_context(project_root: Path, doc_hits: list[str]) -> str:
-    blocks: list[str] = []
-    for relative_path in doc_hits:
-        path = project_root / relative_path
-        if not path.exists():
-            continue
-        snippet = path.read_text(encoding="utf-8")[:2000].strip()
-        blocks.append(f"# {relative_path}\n{snippet}")
-    return "\n\n".join(blocks)
 
 
 def _fallback_task_classification(task_prompt: str) -> tuple[str, str]:
@@ -222,6 +193,24 @@ def _fallback_code_bundle(task_prompt: str, task_type: str, attempt: int) -> dic
     }
 
 
+def _build_tool_call_id(state: EngineerState, tool_name: str) -> str:
+    message_count = len(state.get("messages", []))
+    return f"{state['task_id']}-{tool_name}-{message_count + 1}"
+
+
+def _extract_tool_artifact(state: EngineerState, tool_name: str) -> dict[str, Any]:
+    tool_message = find_latest_tool_message(
+        list(state.get("messages", [])),
+        tool_name=tool_name,
+        tool_call_id=state.get("pending_tool_call_id") or None,
+    )
+    if tool_message is None:
+        raise RuntimeError(f"Expected ToolMessage for {tool_name}, but no matching tool result was found.")
+    if isinstance(tool_message.artifact, dict):
+        return tool_message.artifact
+    return {}
+
+
 def _load_module_from_path(module_name: str, module_path: Path):
     spec = importlib.util.spec_from_file_location(module_name, module_path)
     if spec is None or spec.loader is None:
@@ -313,10 +302,10 @@ def _run_compile_and_tests(source_code: str, test_code: str) -> tuple[bool, bool
 
 
 def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
-    project_root = context.project_root
     default_llm = context.llm
     graph_name = metadata.name
     reviewer_graph = context.get_workflow_graph("gameplay-reviewer-workflow")
+    tool_subgraphs = context.register_tools(metadata.tools, EngineerState)
 
     def classify_request(state: EngineerState) -> dict[str, Any]:
         artifact_dir = Path(state["run_dir"]) / "tasks" / state["task_id"] / metadata.name
@@ -357,10 +346,67 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
             "artifact_dir": str(artifact_dir),
         }
 
-    def inspect_docs(state: EngineerState) -> dict[str, Any]:
-        doc_hits = _find_relevant_docs(project_root, state["task_prompt"])
-        doc_context = _load_doc_context(project_root, doc_hits)
-        return {"doc_hits": doc_hits, "doc_context": doc_context}
+    def prepare_doc_search(state: EngineerState) -> dict[str, Any]:
+        tool_name = "find-gameplay-docs"
+        call_id = _build_tool_call_id(state, tool_name)
+        return {
+            "pending_tool_name": tool_name,
+            "pending_tool_call_id": call_id,
+            "messages": [
+                build_tool_call_message(
+                    tool_name,
+                    {"task_prompt": state["task_prompt"]},
+                    call_id,
+                    content="Find the gameplay and design docs most relevant to this task.",
+                )
+            ],
+        }
+
+    def route_tool_request(state: EngineerState) -> str:
+        tool_name = state.get("pending_tool_name", "").strip()
+        if tool_name in tool_subgraphs:
+            return tool_name
+        return "tool_request_error"
+
+    def tool_request_error(state: EngineerState) -> dict[str, Any]:
+        raise RuntimeError(
+            f"{metadata.name} requested an unregistered tool: {state.get('pending_tool_name') or '(empty)'}"
+        )
+
+    def capture_doc_hits(state: EngineerState) -> dict[str, Any]:
+        artifact = _extract_tool_artifact(state, "find-gameplay-docs")
+        raw_hits = artifact.get("doc_hits", [])
+        doc_hits = [str(item) for item in raw_hits] if isinstance(raw_hits, list) else []
+        return {
+            "doc_hits": doc_hits,
+            "pending_tool_name": "",
+            "pending_tool_call_id": "",
+        }
+
+    def prepare_doc_context_lookup(state: EngineerState) -> dict[str, Any]:
+        tool_name = "load-markdown-context"
+        call_id = _build_tool_call_id(state, tool_name)
+        return {
+            "pending_tool_name": tool_name,
+            "pending_tool_call_id": call_id,
+            "messages": [
+                build_tool_call_message(
+                    tool_name,
+                    {"doc_paths": state["doc_hits"], "max_chars": 2000},
+                    call_id,
+                    content="Load markdown snippets for the matched gameplay and design docs.",
+                )
+            ],
+        }
+
+    def capture_doc_context(state: EngineerState) -> dict[str, Any]:
+        artifact = _extract_tool_artifact(state, "load-markdown-context")
+        doc_context = str(artifact.get("doc_context") or "")
+        return {
+            "doc_context": doc_context,
+            "pending_tool_name": "",
+            "pending_tool_call_id": "",
+        }
 
     def build_design_doc(state: EngineerState) -> dict[str, Any]:
         design_doc = _compose_design_doc(
@@ -644,8 +690,28 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
         trace_graph_node(graph_name=graph_name, node_name="classify_request", node_fn=classify_request),
     )
     graph.add_node(
-        "inspect_docs",
-        trace_graph_node(graph_name=graph_name, node_name="inspect_docs", node_fn=inspect_docs),
+        "prepare_doc_search",
+        trace_graph_node(graph_name=graph_name, node_name="prepare_doc_search", node_fn=prepare_doc_search),
+    )
+    graph.add_node(
+        "tool_request_error",
+        trace_graph_node(graph_name=graph_name, node_name="tool_request_error", node_fn=tool_request_error),
+    )
+    graph.add_node(
+        "capture_doc_hits",
+        trace_graph_node(graph_name=graph_name, node_name="capture_doc_hits", node_fn=capture_doc_hits),
+    )
+    graph.add_node(
+        "prepare_doc_context_lookup",
+        trace_graph_node(
+            graph_name=graph_name,
+            node_name="prepare_doc_context_lookup",
+            node_fn=prepare_doc_context_lookup,
+        ),
+    )
+    graph.add_node(
+        "capture_doc_context",
+        trace_graph_node(graph_name=graph_name, node_name="capture_doc_context", node_fn=capture_doc_context),
     )
     graph.add_node(
         "build_design_doc",
@@ -688,10 +754,32 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
         "prepare_delivery",
         trace_graph_node(graph_name=graph_name, node_name="prepare_delivery", node_fn=prepare_delivery),
     )
+    for tool_name, tool_subgraph in tool_subgraphs.items():
+        graph.add_node(tool_name, tool_subgraph)
 
     graph.add_edge(START, "classify_request")
-    graph.add_edge("classify_request", "inspect_docs")
-    graph.add_edge("inspect_docs", "build_design_doc")
+    graph.add_edge("classify_request", "prepare_doc_search")
+    graph.add_conditional_edges(
+        "prepare_doc_search",
+        trace_route_decision(graph_name=graph_name, router_name="route_tool_request", route_fn=route_tool_request),
+        {
+            **{tool_name: tool_name for tool_name in tool_subgraphs},
+            "tool_request_error": "tool_request_error",
+        },
+    )
+    graph.add_edge("tool_request_error", END)
+    graph.add_edge("find-gameplay-docs", "capture_doc_hits")
+    graph.add_edge("capture_doc_hits", "prepare_doc_context_lookup")
+    graph.add_conditional_edges(
+        "prepare_doc_context_lookup",
+        trace_route_decision(graph_name=graph_name, router_name="route_tool_request", route_fn=route_tool_request),
+        {
+            **{tool_name: tool_name for tool_name in tool_subgraphs},
+            "tool_request_error": "tool_request_error",
+        },
+    )
+    graph.add_edge("load-markdown-context", "capture_doc_context")
+    graph.add_edge("capture_doc_context", "build_design_doc")
     graph.add_edge("build_design_doc", "plan_work")
     graph.add_edge("plan_work", "request_review")
     graph.add_edge("request_review", "enter_review_subgraph")

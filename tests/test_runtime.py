@@ -5,8 +5,10 @@ import tempfile
 from pathlib import Path
 import unittest
 
+from langchain_core.messages import ToolMessage
 from langgraph.checkpoint.memory import InMemorySaver
 
+from core.tool_loader import load_tools
 from core.workflow_loader import load_workflows
 from core.graph_logging import GRAPH_DEBUG_TRACE_FILE
 from core.main_graph import build_initial_state, build_main_graph, build_runtime_config
@@ -56,14 +58,29 @@ class WorkflowDrivenRuntimeTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.project_root = Path(__file__).resolve().parents[1]
         cls.workflows_root = cls.project_root / "Workflows"
+        cls.tools_root = cls.project_root / "Tools"
         cls.llm_manager = FakeLLMManager()
+        cls.tool_registry = load_tools(
+            project_root=cls.project_root,
+            tools_root=cls.tools_root,
+            llm_manager=cls.llm_manager,
+        )
         cls.registry = load_workflows(
             project_root=cls.project_root,
             workflows_root=cls.workflows_root,
             llm_manager=cls.llm_manager,
         )
 
-    def test_load_workflows_and_route_gameplay_task(self) -> None:
+    def test_load_tools_and_workflows_for_gameplay_task(self) -> None:
+        tool_names = [item.name for item in self.tool_registry.list_metadata()]
+        self.assertEqual(
+            tool_names,
+            [
+                "find-gameplay-docs",
+                "load-markdown-context",
+            ],
+        )
+
         metadata = self.registry.list_metadata()
         names = [item.name for item in metadata]
         self.assertEqual(
@@ -150,6 +167,40 @@ class WorkflowDrivenRuntimeTests(unittest.TestCase):
 
         subgraphs = dict(engineer_graph.get_subgraphs())
         self.assertIn("gameplay-reviewer-workflow", subgraphs)
+        self.assertIn("find-gameplay-docs", subgraphs)
+        self.assertIn("load-markdown-context", subgraphs)
+
+    def test_engineer_workflow_uses_tool_messages_for_doc_context(self) -> None:
+        engineer_graph = self.registry.get("gameplay-engineer-workflow").graph
+        self.assertIsNotNone(engineer_graph)
+
+        with tempfile.TemporaryDirectory(prefix="langgraph-tools-") as temp_dir:
+            run_dir = Path(temp_dir) / "run"
+            run_dir.mkdir(parents=True, exist_ok=True)
+
+            result = engineer_graph.invoke(
+                {
+                    "prompt": "Fix combat dodge cancel bug in melee gameplay",
+                    "task_prompt": "Fix combat dodge cancel bug in melee gameplay",
+                    "task_id": "task-1-fix-combat-dodge-cancel-bug",
+                    "run_dir": str(run_dir),
+                    "messages": [],
+                }
+            )
+
+        self.assertIn("docs/designer/combat_design_template.md", result["doc_hits"])
+        self.assertIn("# docs/designer/combat_design_template.md", result["doc_context"])
+
+        tool_messages = [message for message in result["messages"] if isinstance(message, ToolMessage)]
+        self.assertEqual(
+            [message.name for message in tool_messages],
+            [
+                "find-gameplay-docs",
+                "load-markdown-context",
+            ],
+        )
+        self.assertIn("docs/designer/combat_design_template.md", tool_messages[0].artifact["doc_hits"])
+        self.assertIn("doc_context", tool_messages[1].artifact)
 
     def test_main_graph_xray_mermaid_includes_workflow_subgraphs(self) -> None:
         graph = build_main_graph(registry=self.registry, llm_manager=self.llm_manager)
@@ -164,6 +215,8 @@ class WorkflowDrivenRuntimeTests(unittest.TestCase):
 
         mermaid = engineer_graph.get_graph(xray=1).draw_mermaid()
         self.assertIn("subgraph gameplay-reviewer-workflow", mermaid)
+        self.assertIn("subgraph find-gameplay-docs", mermaid)
+        self.assertIn("subgraph load-markdown-context", mermaid)
 
     def test_main_graph_checkpointer_tracks_thread_state(self) -> None:
         graph = build_main_graph(

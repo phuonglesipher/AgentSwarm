@@ -1,0 +1,42 @@
+---
+config:
+  flowchart:
+    curve: linear
+---
+graph TD;
+	__start__([<p>__start__</p>]):::first
+	classify_request(classify_request)
+	inspect_docs(inspect_docs)
+	build_design_doc(build_design_doc)
+	plan_work(plan_work)
+	request_review(request_review)
+	enter_review_subgraph(enter_review_subgraph)
+	capture_review_result(capture_review_result)
+	revise_plan(revise_plan)
+	implement_code(implement_code)
+	self_test(self_test)
+	repair_code(repair_code)
+	prepare_delivery(prepare_delivery)
+	__end__([<p>__end__</p>]):::last
+	__start__ --> classify_request;
+	build_design_doc --> plan_work;
+	capture_review_result -.-> implement_code;
+	capture_review_result -.-> revise_plan;
+	classify_request --> inspect_docs;
+	enter_review_subgraph --> gameplay-reviewer-workflow\3areview_plan;
+	gameplay-reviewer-workflow\3areview_plan --> capture_review_result;
+	implement_code --> self_test;
+	inspect_docs --> build_design_doc;
+	plan_work --> request_review;
+	repair_code --> self_test;
+	request_review --> enter_review_subgraph;
+	revise_plan --> request_review;
+	self_test -.-> prepare_delivery;
+	self_test -.-> repair_code;
+	prepare_delivery --> __end__;
+	subgraph gameplay-reviewer-workflow
+	gameplay-reviewer-workflow\3areview_plan(review_plan)
+	end
+	classDef default fill:#f2f0ff,line-height:1.2
+	classDef first fill-opacity:0
+	classDef last fill:#bfb6fc

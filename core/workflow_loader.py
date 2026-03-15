@@ -5,68 +5,12 @@ from pathlib import Path
 import sys
 from typing import Any
 
+from core.front_matter import parse_markdown_front_matter
 from core.llm import LLMManager
 from core.models import WorkflowContext, WorkflowMetadata, WorkflowRuntime
 from core.registry import WorkflowRegistry
-
-
-def _parse_scalar(value: str) -> Any:
-    cleaned = value.strip().strip('"').strip("'")
-    lowered = cleaned.lower()
-    if lowered == "true":
-        return True
-    if lowered == "false":
-        return False
-    return cleaned
-
-
-def _parse_workflow_markdown(markdown_path: Path) -> WorkflowMetadata:
-    content = markdown_path.read_text(encoding="utf-8")
-    lines = content.splitlines()
-    if not lines or lines[0].strip() != "---":
-        raise ValueError(f"{markdown_path} must start with front matter delimited by ---")
-
-    front_matter: dict[str, Any] = {}
-    list_key: str | None = None
-    index = 1
-    while index < len(lines):
-        stripped = lines[index].strip()
-        if stripped == "---":
-            index += 1
-            break
-        if not stripped:
-            index += 1
-            continue
-        if stripped.startswith("- "):
-            if list_key is None:
-                raise ValueError(f"List item found before a key in {markdown_path}")
-            front_matter.setdefault(list_key, []).append(stripped[2:].strip())
-            index += 1
-            continue
-        if ":" not in stripped:
-            raise ValueError(f"Invalid front matter line in {markdown_path}: {stripped}")
-        key, value = stripped.split(":", 1)
-        key = key.strip()
-        value = value.strip()
-        if value:
-            front_matter[key] = _parse_scalar(value)
-            list_key = None
-        else:
-            front_matter[key] = []
-            list_key = key
-        index += 1
-
-    description = "\n".join(lines[index:]).strip()
-    return WorkflowMetadata(
-        name=str(front_matter["name"]),
-        entry=str(front_matter["entry"]),
-        version=str(front_matter.get("version", "1.0.0")),
-        description=description,
-        capabilities=list(front_matter.get("capabilities", [])),
-        exposed=bool(front_matter.get("exposed", True)),
-        llm_profile=str(front_matter["llm_profile"]) if "llm_profile" in front_matter else None,
-        workflow_dir=markdown_path.parent,
-    )
+from core.tool_graph import build_tool_subgraph
+from core.tool_loader import load_tools
 
 
 def _load_module(module_path: Path, module_name: str) -> Any:
@@ -77,6 +21,21 @@ def _load_module(module_path: Path, module_name: str) -> Any:
     sys.modules[module_name] = module
     spec.loader.exec_module(module)
     return module
+
+
+def _parse_workflow_markdown(markdown_path: Path) -> WorkflowMetadata:
+    front_matter, description = parse_markdown_front_matter(markdown_path)
+    return WorkflowMetadata(
+        name=str(front_matter["name"]),
+        entry=str(front_matter["entry"]),
+        version=str(front_matter.get("version", "1.0.0")),
+        description=description,
+        capabilities=list(front_matter.get("capabilities", [])),
+        exposed=bool(front_matter.get("exposed", True)),
+        llm_profile=str(front_matter["llm_profile"]) if "llm_profile" in front_matter else None,
+        tools=list(front_matter.get("tools", [])),
+        workflow_dir=markdown_path.parent,
+    )
 
 
 def _require_graph_runtime(runtime: WorkflowRuntime) -> Any:
@@ -91,6 +50,8 @@ def load_workflows(project_root: Path, workflows_root: Path, llm_manager: LLMMan
         raise FileNotFoundError(f"Workflow directory not found: {workflows_root}")
 
     registry = WorkflowRegistry()
+    tools_root = project_root / "Tools"
+    tool_registry = load_tools(project_root=project_root, tools_root=tools_root, llm_manager=llm_manager)
     workflow_markdowns = sorted(workflows_root.glob("*/Workflow.md"))
     workflow_specs: dict[str, tuple[WorkflowMetadata, Any]] = {}
 
@@ -120,9 +81,16 @@ def load_workflows(project_root: Path, workflows_root: Path, llm_manager: LLMMan
                 project_root=project_root,
                 workflows_root=workflows_root,
                 workflow_dir=metadata.workflow_dir,
+                tools_root=tools_root,
                 llm=llm_manager.resolve(metadata.llm_profile),
                 llm_manager=llm_manager,
                 get_llm=lambda profile=None, active_manager=llm_manager: active_manager.resolve(profile),
+                get_tool=lambda target_name, active_registry=tool_registry: active_registry.get(target_name),
+                register_tools=lambda tool_names, state_schema, active_registry=tool_registry: {
+                    tool_name: build_tool_subgraph(active_registry.get(tool_name), state_schema)
+                    for tool_name in tool_names
+                },
+                list_tool_metadata=lambda active_registry=tool_registry: active_registry.list_metadata(),
                 invoke_workflow=lambda target_name, payload: build_runtime(target_name).invoke(payload),
                 get_workflow_graph=lambda target_name: _require_graph_runtime(build_runtime(target_name)),
             )

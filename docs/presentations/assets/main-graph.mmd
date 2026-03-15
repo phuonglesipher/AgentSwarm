@@ -1,0 +1,63 @@
+---
+config:
+  flowchart:
+    curve: linear
+---
+graph TD;
+	__start__([<p>__start__</p>]):::first
+	analyze_prompt(analyze_prompt)
+	plan_tasks(plan_tasks)
+	route_tasks(route_tasks)
+	select_next_task(select_next_task)
+	mark_task_failed(mark_task_failed)
+	collect_task_result(collect_task_result)
+	finalize(finalize)
+	__end__([<p>__end__</p>]):::last
+	__start__ --> analyze_prompt;
+	analyze_prompt --> plan_tasks;
+	collect_task_result --> select_next_task;
+	gameplay-engineer-workflow\3aprepare_delivery --> collect_task_result;
+	gameplay-reviewer-workflow\3areview_plan --> collect_task_result;
+	mark_task_failed --> collect_task_result;
+	plan_tasks --> route_tasks;
+	route_tasks --> select_next_task;
+	select_next_task -.-> finalize;
+	select_next_task -.-> gameplay-engineer-workflow\3aclassify_request;
+	select_next_task -.-> gameplay-reviewer-workflow\3areview_plan;
+	select_next_task -.-> mark_task_failed;
+	finalize --> __end__;
+	subgraph gameplay-engineer-workflow
+	gameplay-engineer-workflow\3aclassify_request(classify_request)
+	gameplay-engineer-workflow\3ainspect_docs(inspect_docs)
+	gameplay-engineer-workflow\3abuild_design_doc(build_design_doc)
+	gameplay-engineer-workflow\3aplan_work(plan_work)
+	gameplay-engineer-workflow\3arequest_review(request_review)
+	gameplay-engineer-workflow\3aenter_review_subgraph(enter_review_subgraph)
+	gameplay-engineer-workflow\3agameplay-reviewer-workflow(gameplay-reviewer-workflow)
+	gameplay-engineer-workflow\3acapture_review_result(capture_review_result)
+	gameplay-engineer-workflow\3arevise_plan(revise_plan)
+	gameplay-engineer-workflow\3aimplement_code(implement_code)
+	gameplay-engineer-workflow\3aself_test(self_test)
+	gameplay-engineer-workflow\3arepair_code(repair_code)
+	gameplay-engineer-workflow\3aprepare_delivery(prepare_delivery)
+	gameplay-engineer-workflow\3abuild_design_doc --> gameplay-engineer-workflow\3aplan_work;
+	gameplay-engineer-workflow\3acapture_review_result -.-> gameplay-engineer-workflow\3aimplement_code;
+	gameplay-engineer-workflow\3acapture_review_result -.-> gameplay-engineer-workflow\3arevise_plan;
+	gameplay-engineer-workflow\3aclassify_request --> gameplay-engineer-workflow\3ainspect_docs;
+	gameplay-engineer-workflow\3aenter_review_subgraph --> gameplay-engineer-workflow\3agameplay-reviewer-workflow;
+	gameplay-engineer-workflow\3agameplay-reviewer-workflow --> gameplay-engineer-workflow\3acapture_review_result;
+	gameplay-engineer-workflow\3aimplement_code --> gameplay-engineer-workflow\3aself_test;
+	gameplay-engineer-workflow\3ainspect_docs --> gameplay-engineer-workflow\3abuild_design_doc;
+	gameplay-engineer-workflow\3aplan_work --> gameplay-engineer-workflow\3arequest_review;
+	gameplay-engineer-workflow\3arepair_code --> gameplay-engineer-workflow\3aself_test;
+	gameplay-engineer-workflow\3arequest_review --> gameplay-engineer-workflow\3aenter_review_subgraph;
+	gameplay-engineer-workflow\3arevise_plan --> gameplay-engineer-workflow\3arequest_review;
+	gameplay-engineer-workflow\3aself_test -.-> gameplay-engineer-workflow\3aprepare_delivery;
+	gameplay-engineer-workflow\3aself_test -.-> gameplay-engineer-workflow\3arepair_code;
+	end
+	subgraph gameplay-reviewer-workflow
+	gameplay-reviewer-workflow\3areview_plan(review_plan)
+	end
+	classDef default fill:#f2f0ff,line-height:1.2
+	classDef first fill-opacity:0
+	classDef last fill:#bfb6fc
