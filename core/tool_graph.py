@@ -42,7 +42,7 @@ def find_latest_tool_message(
 
 def build_tool_subgraph(runtime: ToolRuntime, state_schema: type[Any]) -> Any:
     graph = StateGraph(state_schema)
-    graph.add_node("execute_tool", ToolNode([runtime.tool], name=runtime.metadata.name))
+    graph.add_node("execute_tool", ToolNode([runtime.tool], name=runtime.metadata.qualified_name))
     graph.add_edge(START, "execute_tool")
     graph.add_edge("execute_tool", END)
-    return graph.compile(name=runtime.metadata.name)
+    return graph.compile(name=runtime.metadata.qualified_name)

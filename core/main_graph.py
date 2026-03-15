@@ -8,6 +8,7 @@ from langchain_core.messages import AnyMessage
 from langgraph.graph import END, START, StateGraph
 from typing_extensions import TypedDict
 
+from core.graph_ids import to_graph_node_name
 from core.graph_logging import trace_graph_node, trace_route_decision
 from core.llm import LLMError, LLMManager
 from core.registry import WorkflowRegistry
@@ -25,6 +26,9 @@ class MainTask(TypedDict):
 
 
 class MainState(TypedDict):
+    agent_root: str
+    host_root: str
+    target_scope: str
     prompt: str
     run_dir: str
     tasks: list[MainTask]
@@ -60,10 +64,10 @@ def _fallback_plan_tasks(prompt: str) -> list[str]:
 
 def _fallback_route_task(registry: WorkflowRegistry, description: str) -> str | None:
     match = registry.route(description)
-    return match.name if match else None
+    return match.qualified_name if match else None
 
 
-def _llm_plan_tasks(llm, prompt: str) -> list[str]:
+def _llm_plan_tasks(llm, prompt: str, workspace_context: str = "") -> list[str]:
     schema = {
         "type": "object",
         "properties": {
@@ -87,9 +91,10 @@ def _llm_plan_tasks(llm, prompt: str) -> list[str]:
         instructions=(
             "You are the planning step of a workflow-driven software agent called AgentSwarm. "
             "Break the user's request into 1 to 5 implementation tasks. "
-            "Return concise task descriptions that can each be routed to one workflow."
+            "Return concise task descriptions that can each be routed to one workflow. "
+            "Operate on the host project, not on the AgentSwarm engine internals, unless the user explicitly asks to modify AgentSwarm."
         ),
-        input_text=f"User prompt:\n{prompt}",
+        input_text=f"{workspace_context}User prompt:\n{prompt}",
         schema_name="main_graph_task_plan",
         schema=schema,
     )
@@ -101,15 +106,22 @@ def _llm_route_tasks(
     llm,
     registry: WorkflowRegistry,
     tasks: list[MainTask],
+    workspace_context: str = "",
 ) -> dict[str, str | None]:
-    candidates = registry.list_metadata(exposed_only=True)
+    candidates = registry.list_metadata(exposed_only=True, include_shadowed=False)
     if not candidates:
         return {}
 
-    candidate_names = [item.name for item in candidates]
+    candidate_names = [item.qualified_name for item in candidates]
     candidate_descriptions = "\n\n".join(
         [
-            f"Workflow: {item.name}\nCapabilities: {', '.join(item.capabilities)}\nDescription: {item.description}"
+            (
+                f"Workflow: {item.qualified_name}\n"
+                f"Short Name: {item.name}\n"
+                f"Namespace: {item.namespace}\n"
+                f"Capabilities: {', '.join(item.capabilities)}\n"
+                f"Description: {item.description}"
+            )
             for item in candidates
         ]
     )
@@ -137,9 +149,10 @@ def _llm_route_tasks(
     result = llm.generate_json(
         instructions=(
             "You route implementation tasks to the best matching workflow. "
-            "Use each workflow's description and capabilities, and assign every task to exactly one workflow."
+            "Use each workflow's description and capabilities, and assign every task to exactly one workflow. "
+            "Default to workflows that operate on the host project."
         ),
-        input_text=f"Available workflows:\n{candidate_descriptions}\n\nTasks:\n{task_block}",
+        input_text=f"{workspace_context}Available workflows:\n{candidate_descriptions}\n\nTasks:\n{task_block}",
         schema_name="main_graph_routes",
         schema=schema,
     )
@@ -213,7 +226,8 @@ def _prepare_active_task(task: MainTask, index: int) -> dict[str, Any]:
 
 
 def _extract_workflow_output(state: MainState, workflow_name: str | None) -> dict[str, Any] | None:
-    if workflow_name == "gameplay-reviewer-workflow":
+    short_workflow_name = str(workflow_name or "").split("::", 1)[-1]
+    if short_workflow_name == "gameplay-reviewer-workflow":
         return {
             "score": state["score"],
             "feedback": state["feedback"],
@@ -231,8 +245,18 @@ def _extract_workflow_output(state: MainState, workflow_name: str | None) -> dic
     }
 
 
-def build_initial_state(prompt: str, run_dir: str) -> MainState:
+def build_initial_state(
+    prompt: str,
+    run_dir: str,
+    *,
+    agent_root: str = "",
+    host_root: str = "",
+    target_scope: str = "host_project",
+) -> MainState:
     return {
+        "agent_root": agent_root,
+        "host_root": host_root,
+        "target_scope": target_scope,
         "prompt": prompt,
         "run_dir": run_dir,
         "tasks": [],
@@ -250,20 +274,44 @@ def build_runtime_config(thread_id: str) -> dict[str, Any]:
     return {"configurable": {"thread_id": cleaned_thread_id}}
 
 
-def build_main_graph(registry: WorkflowRegistry, llm_manager: LLMManager, checkpointer: Any | None = None):
+def build_main_graph(
+    registry: WorkflowRegistry,
+    llm_manager: LLMManager,
+    checkpointer: Any | None = None,
+    *,
+    runtime_paths: Any | None = None,
+    config: Any | None = None,
+):
     graph_name = "main_graph"
+    host_root = str(getattr(runtime_paths, "host_root", "") or "")
+    agent_root = str(getattr(runtime_paths, "agent_root", "") or "")
+    target_scope = str(getattr(config, "target_scope", "host_project"))
+    workspace_context = ""
+    if host_root or agent_root:
+        workspace_context = (
+            f"Host project root: {host_root or '(unknown)'}\n"
+            f"AgentSwarm engine root: {agent_root or '(unknown)'}\n"
+            f"Target scope: {target_scope}\n\n"
+        )
     workflow_subgraphs = {
-        metadata.name: registry.get(metadata.name).graph
+        metadata.qualified_name: registry.get(metadata.qualified_name).graph
         for metadata in registry.list_metadata()
-        if registry.get(metadata.name).graph is not None
+        if registry.get(metadata.qualified_name).graph is not None
+    }
+    workflow_node_names = {
+        workflow_name: to_graph_node_name(workflow_name)
+        for workflow_name in workflow_subgraphs
     }
 
     def analyze_prompt(state: MainState) -> dict[str, Any]:
         return {
             "routing_notes": [
-                f"Loaded {len(registry.list_metadata())} workflows",
+                f"Loaded {len(registry.list_metadata())} workflows across AgentSwarm and project sources",
                 f"Default Codex profile is {llm_manager.describe()}",
                 f"Available LLM profiles: {', '.join(llm_manager.available_profiles())}",
+                f"Target scope is {state['target_scope'] or target_scope}",
+                f"Host project root is {state['host_root'] or host_root or '(unknown)'}",
+                f"AgentSwarm engine root is {state['agent_root'] or agent_root or '(unknown)'}",
                 "Prompt was normalized and ready for planning",
             ]
         }
@@ -274,7 +322,7 @@ def build_main_graph(registry: WorkflowRegistry, llm_manager: LLMManager, checkp
         planner_llm = llm_manager.resolve("planner")
         if planner_llm.is_enabled():
             try:
-                descriptions = _llm_plan_tasks(planner_llm, state["prompt"])
+                descriptions = _llm_plan_tasks(planner_llm, state["prompt"], workspace_context)
                 planning_notes.append(f"Task planning used {llm_manager.describe('planner')}.")
             except LLMError as exc:
                 planning_notes.append(f"Planner fallback: {exc}")
@@ -309,7 +357,7 @@ def build_main_graph(registry: WorkflowRegistry, llm_manager: LLMManager, checkp
         router_llm = llm_manager.resolve("router")
         if router_llm.is_enabled() and state["tasks"]:
             try:
-                llm_assignments = _llm_route_tasks(router_llm, registry, state["tasks"])
+                llm_assignments = _llm_route_tasks(router_llm, registry, state["tasks"], workspace_context)
                 notes.append(f"Task routing used {llm_manager.describe('router')}.")
             except LLMError as exc:
                 notes.append(f"Router fallback: {exc}")
@@ -341,7 +389,7 @@ def build_main_graph(registry: WorkflowRegistry, llm_manager: LLMManager, checkp
 
         workflow_name = active_task["workflow_name"]
         if workflow_name in workflow_subgraphs:
-            return str(workflow_name)
+            return workflow_node_names[str(workflow_name)]
         return "mark_task_failed"
 
     def mark_task_failed(state: MainState) -> dict[str, Any]:
@@ -449,7 +497,7 @@ def build_main_graph(registry: WorkflowRegistry, llm_manager: LLMManager, checkp
         trace_graph_node(graph_name=graph_name, node_name="finalize", node_fn=finalize),
     )
     for workflow_name, subgraph in workflow_subgraphs.items():
-        graph.add_node(workflow_name, subgraph)
+        graph.add_node(workflow_node_names[workflow_name], subgraph)
 
     graph.add_edge(START, "analyze_prompt")
     graph.add_edge("analyze_prompt", "plan_tasks")
@@ -463,13 +511,16 @@ def build_main_graph(registry: WorkflowRegistry, llm_manager: LLMManager, checkp
             route_fn=dispatch_active_task,
         ),
         {
-            **{workflow_name: workflow_name for workflow_name in workflow_subgraphs},
+            **{
+                workflow_node_names[workflow_name]: workflow_node_names[workflow_name]
+                for workflow_name in workflow_subgraphs
+            },
             "mark_task_failed": "mark_task_failed",
             "finalize": "finalize",
         },
     )
     for workflow_name in workflow_subgraphs:
-        graph.add_edge(workflow_name, "collect_task_result")
+        graph.add_edge(workflow_node_names[workflow_name], "collect_task_result")
     graph.add_edge("mark_task_failed", "collect_task_result")
     graph.add_edge("collect_task_result", "select_next_task")
     graph.add_edge("finalize", END)

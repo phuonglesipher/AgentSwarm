@@ -7,12 +7,15 @@ from typing import TYPE_CHECKING, Any, Callable
 if TYPE_CHECKING:
     from langchain_core.tools import BaseTool
 
+    from core.config_loader import AgentSwarmConfig, ProjectManifest
     from core.llm import LLMClient, LLMManager
+    from core.runtime_paths import RuntimePaths
 
 
 @dataclass(frozen=True)
 class WorkflowMetadata:
     name: str
+    namespace: str
     entry: str
     version: str
     description: str
@@ -22,13 +25,26 @@ class WorkflowMetadata:
     tools: list[str]
     workflow_dir: Path
 
+    @property
+    def qualified_name(self) -> str:
+        return f"{self.namespace}::{self.name}"
+
 
 @dataclass(frozen=True)
 class WorkflowContext:
     project_root: Path
+    agent_root: Path
+    host_root: Path
+    overlay_root: Path
+    artifact_root: Path
+    memory_root: Path
     workflows_root: Path
     workflow_dir: Path
     tools_root: Path
+    runtime_paths: "RuntimePaths"
+    config: "AgentSwarmConfig"
+    manifest: "ProjectManifest"
+    target_scope: str
     llm: "LLMClient"
     llm_manager: "LLMManager"
     get_llm: Callable[[str | None], "LLMClient"]
@@ -37,6 +53,9 @@ class WorkflowContext:
     list_tool_metadata: Callable[[], list["ToolMetadata"]]
     invoke_workflow: Callable[[str, dict[str, Any]], dict[str, Any]]
     get_workflow_graph: Callable[[str], Any]
+
+    def resolve_scope_root(self, scope: str) -> Path:
+        return self.agent_root if scope == "agentswarm" else self.host_root
 
 
 @dataclass
@@ -49,6 +68,7 @@ class WorkflowRuntime:
 @dataclass(frozen=True)
 class ToolMetadata:
     name: str
+    namespace: str
     entry: str
     version: str
     description: str
@@ -58,15 +78,31 @@ class ToolMetadata:
     llm_profile: str | None
     tool_dir: Path
 
+    @property
+    def qualified_name(self) -> str:
+        return f"{self.namespace}::{self.name}"
+
 
 @dataclass(frozen=True)
 class ToolContext:
     project_root: Path
+    agent_root: Path
+    host_root: Path
+    overlay_root: Path
+    artifact_root: Path
+    memory_root: Path
     tools_root: Path
     tool_dir: Path
+    runtime_paths: "RuntimePaths"
+    config: "AgentSwarmConfig"
+    manifest: "ProjectManifest"
+    target_scope: str
     llm: "LLMClient"
     llm_manager: "LLMManager"
     get_llm: Callable[[str | None], "LLMClient"]
+
+    def resolve_scope_root(self, scope: str) -> Path:
+        return self.agent_root if scope == "agentswarm" else self.host_root
 
 
 @dataclass

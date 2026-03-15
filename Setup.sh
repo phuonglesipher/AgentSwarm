@@ -12,5 +12,6 @@ fi
 
 "$PYTHON_BIN" -m pip install --upgrade pip
 "$PYTHON_BIN" -m pip install "langgraph>=1.1,<2" "langchain-core>=1.2,<2"
+"$PYTHON_BIN" -m core.host_setup --agent-root "$SCRIPT_DIR"
 
 echo "Installed LangGraph and LangChain Core tool support with $PYTHON_BIN"

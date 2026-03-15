@@ -8,6 +8,9 @@ import unittest
 from langchain_core.messages import ToolMessage
 from langgraph.checkpoint.memory import InMemorySaver
 
+from core.config_loader import load_agentswarm_config, load_project_manifest
+from core.host_setup import initialize_host_project
+from core.runtime_paths import resolve_runtime_paths
 from core.tool_loader import load_tools
 from core.workflow_loader import load_workflows
 from core.graph_logging import GRAPH_DEBUG_TRACE_FILE
@@ -80,6 +83,14 @@ class WorkflowDrivenRuntimeTests(unittest.TestCase):
                 "load-markdown-context",
             ],
         )
+        qualified_tool_names = [item.qualified_name for item in self.tool_registry.list_metadata()]
+        self.assertEqual(
+            qualified_tool_names,
+            [
+                "agentswarm::find-gameplay-docs",
+                "agentswarm::load-markdown-context",
+            ],
+        )
 
         metadata = self.registry.list_metadata()
         names = [item.name for item in metadata]
@@ -147,7 +158,7 @@ class WorkflowDrivenRuntimeTests(unittest.TestCase):
             self.assertIn("input_keys=", trace_output)
             self.assertIn("output_keys=", trace_output)
             self.assertIn(f"details={GRAPH_DEBUG_TRACE_FILE}#", trace_output)
-            self.assertIn("next=gameplay-engineer-workflow", trace_output)
+            self.assertIn("next=agentswarm__gameplay-engineer-workflow", trace_output)
             self.assertIn("[gameplay-engineer-workflow] [gameplay-reviewer-workflow] SUBGRAPH_ENTER", trace_output)
             self.assertIn("[gameplay-engineer-workflow] [gameplay-reviewer-workflow] SUBGRAPH_EXIT", trace_output)
             self.assertIn("[gameplay-engineer-workflow] [request_review] ENTER", trace_output)
@@ -158,8 +169,8 @@ class WorkflowDrivenRuntimeTests(unittest.TestCase):
         graph = build_main_graph(registry=self.registry, llm_manager=self.llm_manager)
         subgraphs = dict(graph.get_subgraphs())
 
-        self.assertIn("gameplay-engineer-workflow", subgraphs)
-        self.assertIn("gameplay-reviewer-workflow", subgraphs)
+        self.assertIn("agentswarm__gameplay-engineer-workflow", subgraphs)
+        self.assertIn("agentswarm__gameplay-reviewer-workflow", subgraphs)
 
     def test_engineer_workflow_registers_reviewer_subgraph(self) -> None:
         engineer_graph = self.registry.get("gameplay-engineer-workflow").graph
@@ -167,8 +178,8 @@ class WorkflowDrivenRuntimeTests(unittest.TestCase):
 
         subgraphs = dict(engineer_graph.get_subgraphs())
         self.assertIn("gameplay-reviewer-workflow", subgraphs)
-        self.assertIn("find-gameplay-docs", subgraphs)
-        self.assertIn("load-markdown-context", subgraphs)
+        self.assertIn("agentswarm__find-gameplay-docs", subgraphs)
+        self.assertIn("agentswarm__load-markdown-context", subgraphs)
 
     def test_engineer_workflow_uses_tool_messages_for_doc_context(self) -> None:
         engineer_graph = self.registry.get("gameplay-engineer-workflow").graph
@@ -195,8 +206,8 @@ class WorkflowDrivenRuntimeTests(unittest.TestCase):
         self.assertEqual(
             [message.name for message in tool_messages],
             [
-                "find-gameplay-docs",
-                "load-markdown-context",
+                "agentswarm::find-gameplay-docs",
+                "agentswarm::load-markdown-context",
             ],
         )
         self.assertIn("docs/designer/combat_design_template.md", tool_messages[0].artifact["doc_hits"])
@@ -206,8 +217,8 @@ class WorkflowDrivenRuntimeTests(unittest.TestCase):
         graph = build_main_graph(registry=self.registry, llm_manager=self.llm_manager)
         mermaid = graph.get_graph(xray=1).draw_mermaid()
 
-        self.assertIn("subgraph gameplay-engineer-workflow", mermaid)
-        self.assertIn("subgraph gameplay-reviewer-workflow", mermaid)
+        self.assertIn("subgraph agentswarm__gameplay-engineer-workflow", mermaid)
+        self.assertIn("subgraph agentswarm__gameplay-reviewer-workflow", mermaid)
 
     def test_engineer_graph_xray_mermaid_includes_reviewer_subgraph(self) -> None:
         engineer_graph = self.registry.get("gameplay-engineer-workflow").graph
@@ -215,8 +226,147 @@ class WorkflowDrivenRuntimeTests(unittest.TestCase):
 
         mermaid = engineer_graph.get_graph(xray=1).draw_mermaid()
         self.assertIn("subgraph gameplay-reviewer-workflow", mermaid)
-        self.assertIn("subgraph find-gameplay-docs", mermaid)
-        self.assertIn("subgraph load-markdown-context", mermaid)
+        self.assertIn("subgraph agentswarm__find-gameplay-docs", mermaid)
+        self.assertIn("subgraph agentswarm__load-markdown-context", mermaid)
+
+    def test_initialize_host_project_scaffolds_overlay_files_in_submodule_mode(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="agentswarm-host-") as temp_dir:
+            host_root = Path(temp_dir) / "host-project"
+            agent_root = host_root / "AgentSwarm"
+            agent_root.mkdir(parents=True, exist_ok=True)
+
+            paths, created = initialize_host_project(agent_root=agent_root, host_root=host_root)
+
+            self.assertTrue(paths.is_submodule)
+            self.assertTrue(created)
+            self.assertTrue(paths.config_path.exists())
+            self.assertTrue(paths.manifest_path.exists())
+            self.assertTrue((paths.project_workflows_root / ".gitkeep").exists())
+            self.assertTrue((paths.project_tools_root / ".gitkeep").exists())
+            self.assertTrue((paths.memory_root / "project" / ".gitkeep").exists())
+            self.assertTrue((paths.memory_root / "agentswarm" / ".gitkeep").exists())
+            self.assertTrue((paths.memory_root / "shared" / ".gitkeep").exists())
+
+    def test_project_tool_override_wins_alias_while_agentswarm_tool_remains_accessible(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="agentswarm-tool-overlay-") as temp_dir:
+            host_root = Path(temp_dir) / "host-project"
+            paths, _ = initialize_host_project(agent_root=self.project_root, host_root=host_root)
+            override_dir = paths.project_tools_root / "find-gameplay-docs"
+            override_dir.mkdir(parents=True, exist_ok=True)
+            (override_dir / "Tool.md").write_text(
+                "\n".join(
+                    [
+                        "---",
+                        "name: find-gameplay-docs",
+                        "entry: entry.py",
+                        "version: 1.0.0",
+                        "output_mode: message",
+                        "state_keys_shared:",
+                        "  - messages",
+                        "capabilities:",
+                        "  - project override",
+                        "---",
+                        "Project override for tests.",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            (override_dir / "entry.py").write_text(
+                "\n".join(
+                    [
+                        "from langchain_core.tools import tool",
+                        "",
+                        "def build_tool(context, metadata):",
+                        "    @tool(metadata.qualified_name, response_format='content_and_artifact')",
+                        "    def find_gameplay_docs(task_prompt: str, scope: str = 'host_project'):",
+                        "        '''Override doc finder.'''",
+                        "        return 'project override', {'doc_hits': ['docs/project_override.md'], 'scope': scope}",
+                        "    return find_gameplay_docs",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            config = load_agentswarm_config(paths)
+            manifest = load_project_manifest(paths)
+            registry = load_tools(
+                project_root=self.project_root,
+                tools_root=self.tools_root,
+                llm_manager=self.llm_manager,
+                runtime_paths=paths,
+                config=config,
+                manifest=manifest,
+            )
+
+            preferred = registry.get("find-gameplay-docs")
+            fallback = registry.get("agentswarm::find-gameplay-docs")
+
+            self.assertEqual(preferred.metadata.namespace, "project")
+            self.assertEqual(preferred.metadata.qualified_name, "project::find-gameplay-docs")
+            self.assertEqual(fallback.metadata.namespace, "agentswarm")
+
+    def test_project_workflow_override_wins_alias_while_agentswarm_workflow_remains_accessible(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="agentswarm-workflow-overlay-") as temp_dir:
+            host_root = Path(temp_dir) / "host-project"
+            paths, _ = initialize_host_project(agent_root=self.project_root, host_root=host_root)
+            override_dir = paths.project_workflows_root / "gameplay-engineer-workflow"
+            override_dir.mkdir(parents=True, exist_ok=True)
+            (override_dir / "Workflow.md").write_text(
+                "\n".join(
+                    [
+                        "---",
+                        "name: gameplay-engineer-workflow",
+                        "entry: entry.py",
+                        "version: 1.0.0",
+                        "exposed: true",
+                        "capabilities:",
+                        "  - project workflow override",
+                        "---",
+                        "Project workflow override for tests.",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            (override_dir / "entry.py").write_text(
+                "\n".join(
+                    [
+                        "from langgraph.graph import END, START, StateGraph",
+                        "from typing_extensions import TypedDict",
+                        "",
+                        "def build_graph(context, metadata):",
+                        "    class State(TypedDict):",
+                        "        summary: str",
+                        "",
+                        "    def summarize(state: State):",
+                        "        return {'summary': 'project override active'}",
+                        "",
+                        "    graph = StateGraph(State)",
+                        "    graph.add_node('summarize', summarize)",
+                        "    graph.add_edge(START, 'summarize')",
+                        "    graph.add_edge('summarize', END)",
+                        "    return graph",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            config = load_agentswarm_config(paths)
+            manifest = load_project_manifest(paths)
+            registry = load_workflows(
+                project_root=self.project_root,
+                workflows_root=self.workflows_root,
+                llm_manager=self.llm_manager,
+                runtime_paths=paths,
+                config=config,
+                manifest=manifest,
+            )
+
+            preferred = registry.get("gameplay-engineer-workflow")
+            fallback = registry.get("agentswarm::gameplay-engineer-workflow")
+
+            self.assertEqual(preferred.metadata.namespace, "project")
+            self.assertEqual(preferred.metadata.qualified_name, "project::gameplay-engineer-workflow")
+            self.assertEqual(fallback.metadata.namespace, "agentswarm")
 
     def test_main_graph_checkpointer_tracks_thread_state(self) -> None:
         graph = build_main_graph(

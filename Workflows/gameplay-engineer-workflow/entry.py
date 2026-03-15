@@ -11,6 +11,7 @@ import unittest
 from langgraph.graph import END, START, MessagesState, StateGraph
 from typing_extensions import NotRequired, TypedDict
 
+from core.graph_ids import to_graph_node_name
 from core.graph_logging import log_graph_payload_event, trace_graph_node, trace_route_decision
 from core.llm import LLMError
 from core.models import WorkflowContext, WorkflowMetadata
@@ -26,6 +27,7 @@ class EngineerState(MessagesState):
     task_type: str
     task_type_reason: str
     doc_hits: list[str]
+    doc_scope: str
     doc_context: str
     design_doc: str
     plan_doc: str
@@ -306,6 +308,12 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
     graph_name = metadata.name
     reviewer_graph = context.get_workflow_graph("gameplay-reviewer-workflow")
     tool_subgraphs = context.register_tools(metadata.tools, EngineerState)
+    doc_search_tool_name = context.get_tool("find-gameplay-docs").metadata.qualified_name
+    doc_context_tool_name = context.get_tool("load-markdown-context").metadata.qualified_name
+    tool_node_names = {
+        tool_name: to_graph_node_name(tool_name)
+        for tool_name in tool_subgraphs
+    }
 
     def classify_request(state: EngineerState) -> dict[str, Any]:
         artifact_dir = Path(state["run_dir"]) / "tasks" / state["task_id"] / metadata.name
@@ -347,7 +355,7 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
         }
 
     def prepare_doc_search(state: EngineerState) -> dict[str, Any]:
-        tool_name = "find-gameplay-docs"
+        tool_name = doc_search_tool_name
         call_id = _build_tool_call_id(state, tool_name)
         return {
             "pending_tool_name": tool_name,
@@ -355,7 +363,7 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
             "messages": [
                 build_tool_call_message(
                     tool_name,
-                    {"task_prompt": state["task_prompt"]},
+                    {"task_prompt": state["task_prompt"], "scope": "host_project"},
                     call_id,
                     content="Find the gameplay and design docs most relevant to this task.",
                 )
@@ -365,7 +373,7 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
     def route_tool_request(state: EngineerState) -> str:
         tool_name = state.get("pending_tool_name", "").strip()
         if tool_name in tool_subgraphs:
-            return tool_name
+            return tool_node_names[tool_name]
         return "tool_request_error"
 
     def tool_request_error(state: EngineerState) -> dict[str, Any]:
@@ -374,17 +382,19 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
         )
 
     def capture_doc_hits(state: EngineerState) -> dict[str, Any]:
-        artifact = _extract_tool_artifact(state, "find-gameplay-docs")
+        artifact = _extract_tool_artifact(state, doc_search_tool_name)
         raw_hits = artifact.get("doc_hits", [])
         doc_hits = [str(item) for item in raw_hits] if isinstance(raw_hits, list) else []
+        doc_scope = str(artifact.get("scope") or "host_project")
         return {
             "doc_hits": doc_hits,
+            "doc_scope": doc_scope,
             "pending_tool_name": "",
             "pending_tool_call_id": "",
         }
 
     def prepare_doc_context_lookup(state: EngineerState) -> dict[str, Any]:
-        tool_name = "load-markdown-context"
+        tool_name = doc_context_tool_name
         call_id = _build_tool_call_id(state, tool_name)
         return {
             "pending_tool_name": tool_name,
@@ -392,7 +402,7 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
             "messages": [
                 build_tool_call_message(
                     tool_name,
-                    {"doc_paths": state["doc_hits"], "max_chars": 2000},
+                    {"doc_paths": state["doc_hits"], "max_chars": 2000, "scope": state["doc_scope"]},
                     call_id,
                     content="Load markdown snippets for the matched gameplay and design docs.",
                 )
@@ -400,7 +410,7 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
         }
 
     def capture_doc_context(state: EngineerState) -> dict[str, Any]:
-        artifact = _extract_tool_artifact(state, "load-markdown-context")
+        artifact = _extract_tool_artifact(state, doc_context_tool_name)
         doc_context = str(artifact.get("doc_context") or "")
         return {
             "doc_context": doc_context,
@@ -755,7 +765,7 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
         trace_graph_node(graph_name=graph_name, node_name="prepare_delivery", node_fn=prepare_delivery),
     )
     for tool_name, tool_subgraph in tool_subgraphs.items():
-        graph.add_node(tool_name, tool_subgraph)
+        graph.add_node(tool_node_names[tool_name], tool_subgraph)
 
     graph.add_edge(START, "classify_request")
     graph.add_edge("classify_request", "prepare_doc_search")
@@ -763,22 +773,28 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
         "prepare_doc_search",
         trace_route_decision(graph_name=graph_name, router_name="route_tool_request", route_fn=route_tool_request),
         {
-            **{tool_name: tool_name for tool_name in tool_subgraphs},
+            **{
+                tool_node_names[tool_name]: tool_node_names[tool_name]
+                for tool_name in tool_subgraphs
+            },
             "tool_request_error": "tool_request_error",
         },
     )
     graph.add_edge("tool_request_error", END)
-    graph.add_edge("find-gameplay-docs", "capture_doc_hits")
+    graph.add_edge(tool_node_names[doc_search_tool_name], "capture_doc_hits")
     graph.add_edge("capture_doc_hits", "prepare_doc_context_lookup")
     graph.add_conditional_edges(
         "prepare_doc_context_lookup",
         trace_route_decision(graph_name=graph_name, router_name="route_tool_request", route_fn=route_tool_request),
         {
-            **{tool_name: tool_name for tool_name in tool_subgraphs},
+            **{
+                tool_node_names[tool_name]: tool_node_names[tool_name]
+                for tool_name in tool_subgraphs
+            },
             "tool_request_error": "tool_request_error",
         },
     )
-    graph.add_edge("load-markdown-context", "capture_doc_context")
+    graph.add_edge(tool_node_names[doc_context_tool_name], "capture_doc_context")
     graph.add_edge("capture_doc_context", "build_design_doc")
     graph.add_edge("build_design_doc", "plan_work")
     graph.add_edge("plan_work", "request_review")
