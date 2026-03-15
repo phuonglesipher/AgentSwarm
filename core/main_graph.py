@@ -233,7 +233,14 @@ def build_initial_state(prompt: str, run_dir: str) -> MainState:
     }
 
 
-def build_main_graph(registry: BlueprintRegistry, llm_manager: LLMManager):
+def build_runtime_config(thread_id: str) -> dict[str, Any]:
+    cleaned_thread_id = thread_id.strip()
+    if not cleaned_thread_id:
+        raise ValueError("thread_id must not be empty")
+    return {"configurable": {"thread_id": cleaned_thread_id}}
+
+
+def build_main_graph(registry: BlueprintRegistry, llm_manager: LLMManager, checkpointer: Any | None = None):
     graph_name = "main_graph"
     blueprint_subgraphs = {
         metadata.name: registry.get(metadata.name).graph
@@ -457,4 +464,4 @@ def build_main_graph(registry: BlueprintRegistry, llm_manager: LLMManager):
     graph.add_edge("collect_task_result", "select_next_task")
     graph.add_edge("finalize", END)
 
-    return graph.compile()
+    return graph.compile(checkpointer=checkpointer)

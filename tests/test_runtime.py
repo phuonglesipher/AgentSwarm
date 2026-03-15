@@ -5,9 +5,11 @@ import tempfile
 from pathlib import Path
 import unittest
 
+from langgraph.checkpoint.memory import InMemorySaver
+
 from core.blueprint_loader import load_blueprints
 from core.graph_logging import GRAPH_DEBUG_TRACE_FILE
-from core.main_graph import build_initial_state, build_main_graph
+from core.main_graph import build_initial_state, build_main_graph, build_runtime_config
 
 
 class DisabledLLMClient:
@@ -162,6 +164,34 @@ class BlueprintDrivenRuntimeTests(unittest.TestCase):
 
         mermaid = engineer_graph.get_graph(xray=1).draw_mermaid()
         self.assertIn("subgraph gameplay-reviewer-blueprint", mermaid)
+
+    def test_main_graph_checkpointer_tracks_thread_state(self) -> None:
+        graph = build_main_graph(
+            registry=self.registry,
+            llm_manager=self.llm_manager,
+            checkpointer=InMemorySaver(),
+        )
+        config = build_runtime_config("test-thread")
+
+        with tempfile.TemporaryDirectory(prefix="langgraph-checkpoints-") as temp_dir:
+            run_dir = Path(temp_dir) / "run"
+            run_dir.mkdir(parents=True, exist_ok=True)
+
+            result = graph.invoke(
+                build_initial_state(
+                    prompt="Fix combat dodge cancel bug in melee gameplay and keep 3C responsiveness stable",
+                    run_dir=str(run_dir),
+                ),
+                config,
+            )
+
+        snapshot = graph.get_state(config)
+        history = list(graph.get_state_history(config))
+
+        self.assertIn("gameplay-engineer-blueprint", result["final_response"])
+        self.assertEqual(snapshot.values["final_response"], result["final_response"])
+        self.assertEqual(snapshot.config["configurable"]["thread_id"], "test-thread")
+        self.assertGreaterEqual(len(history), 2)
 
     def test_self_test_harness_supports_module_aliases_and___file__(self) -> None:
         engineer_entry = self.project_root / "Blueprints" / "gameplay-engineer-blueprint" / "entry.py"
