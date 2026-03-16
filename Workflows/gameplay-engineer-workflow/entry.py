@@ -19,6 +19,15 @@ from core.tool_graph import build_tool_call_message, find_latest_tool_message
 from core.text_utils import normalize_text, slugify, tokenize
 
 
+class SectionReview(TypedDict):
+    section: str
+    score: int
+    max_score: int
+    status: str
+    rationale: str
+    action_items: list[str]
+
+
 class EngineerState(MessagesState):
     prompt: str
     task_prompt: str
@@ -35,6 +44,10 @@ class EngineerState(MessagesState):
     review_score: int
     review_feedback: str
     missing_sections: list[str]
+    review_section_reviews: list[SectionReview]
+    review_blocking_issues: list[str]
+    review_improvement_actions: list[str]
+    review_approved: bool
     code_attempt: int
     generated_code: str
     generated_tests: str
@@ -47,19 +60,26 @@ class EngineerState(MessagesState):
     summary: str
     score: NotRequired[int]
     feedback: NotRequired[str]
+    section_reviews: NotRequired[list[SectionReview]]
+    blocking_issues: NotRequired[list[str]]
+    improvement_actions: NotRequired[list[str]]
     approved: NotRequired[bool]
     pending_tool_name: str
     pending_tool_call_id: str
 
 
 REQUIRED_PLAN_SECTIONS = {
-    "Task Type": "Describe whether this is a bug-fix or a new feature.",
+    "Overview": "Summarize the player-facing gameplay goal and the systems in scope.",
+    "Task Type": "Describe whether this is a bug-fix or a new feature and why.",
     "Existing Docs": "Reference gameplay and design docs that informed the work.",
-    "Implementation Steps": "Describe the implementation sequence and system touch points.",
-    "Unit Tests": "List the unit tests that must exist before code is considered done.",
+    "Implementation Steps": "Describe the implementation sequence, touch points, and regression safeguards.",
+    "Unit Tests": "List the automated tests that must exist before code is considered done.",
     "Risks": "Record the likely implementation risks and fallback plans.",
-    "Acceptance Criteria": "State the observable gameplay outcome when the task is complete.",
+    "Acceptance Criteria": "State the observable gameplay outcome and regression checks for completion.",
 }
+PLAN_SECTION_ORDER = list(REQUIRED_PLAN_SECTIONS)
+REVIEW_APPROVAL_SCORE = 90
+MAX_REVIEW_ROUNDS = 3
 
 
 def _fallback_task_classification(task_prompt: str) -> tuple[str, str]:
@@ -103,42 +123,157 @@ def _compose_design_doc(task_prompt: str, task_type: str, doc_hits: list[str], d
 
 
 def _compose_initial_plan(task_prompt: str, task_type: str, doc_hits: list[str]) -> str:
-    references = "\n".join(f"- {item}" for item in doc_hits) or "- No matching docs found."
-    return "\n".join(
-        [
-            "# Gameplay Implementation Plan",
-            "",
-            "## Overview",
-            f"- Deliver work for: {task_prompt}",
-            "",
-            "## Task Type",
-            f"- {task_type}",
-            "",
-            "## Existing Docs",
-            references,
-            "",
-            "## Implementation Steps",
-            "- Inspect related gameplay systems and identify touch points.",
-            "- Update the gameplay behavior and preserve predictable state transitions.",
-            "- Capture expected debug signals for fast regression checks.",
-        ]
+    return _render_plan_doc(
+        _build_plan_sections(
+            task_prompt=task_prompt,
+            task_type=task_type,
+            doc_hits=doc_hits,
+        )
     )
 
 
-def _revise_plan(plan_doc: str, missing_sections: list[str], task_prompt: str, review_feedback: str) -> str:
-    additions: list[str] = []
-    for section in missing_sections:
-        guidance = REQUIRED_PLAN_SECTIONS.get(section, "Add the missing section with concrete details.")
-        additions.extend(
-            [
-                "",
-                f"## {section}",
-                f"- {guidance}",
-                f"- Task context: {task_prompt}",
-                f"- Reviewer note: {review_feedback}",
-            ]
+def _parse_plan_sections(plan_doc: str) -> dict[str, list[str]]:
+    sections: dict[str, list[str]] = {}
+    current_section: str | None = None
+    buffer: list[str] = []
+
+    for line in plan_doc.splitlines():
+        if line.startswith("## "):
+            if current_section is not None:
+                sections[current_section] = [item for item in buffer if item.strip()]
+            heading = line[3:].strip()
+            current_section = heading if heading in PLAN_SECTION_ORDER else None
+            buffer = []
+            continue
+
+        if current_section is not None:
+            buffer.append(line.rstrip())
+
+    if current_section is not None:
+        sections[current_section] = [item for item in buffer if item.strip()]
+    return sections
+
+
+def _dedupe_section_lines(lines: list[str]) -> list[str]:
+    ordered: list[str] = []
+    seen: set[str] = set()
+    for raw_line in lines:
+        line = raw_line.rstrip()
+        if not line:
+            continue
+        if line in seen:
+            continue
+        seen.add(line)
+        ordered.append(line)
+    return ordered
+
+
+def _default_section_lines(section: str, task_prompt: str, task_type: str, doc_hits: list[str]) -> list[str]:
+    if section == "Overview":
+        return [
+            f"- Gameplay task: {task_prompt}",
+            "- Player-facing goal: make the target gameplay flow behave predictably without regressing nearby interactions.",
+        ]
+    if section == "Task Type":
+        task_reason = (
+            "restore intended gameplay behavior and remove a regression or bug."
+            if task_type == "bugfix"
+            else "add or extend gameplay behavior without breaking existing expectations."
         )
-    return plan_doc + "\n" + "\n".join(additions)
+        return [
+            f"- {task_type}",
+            f"- Classification reason: treat this as a {task_type} because the requested work should {task_reason}",
+        ]
+    if section == "Existing Docs":
+        if doc_hits:
+            return [f"- {item}" for item in doc_hits] + [
+                "- Use the referenced docs as the implementation baseline and call out any conflicts before coding.",
+            ]
+        return [
+            "- No matching docs found.",
+            "- Proceed from the incoming task prompt and document any assumptions before implementation starts.",
+        ]
+    if section == "Implementation Steps":
+        return [
+            "- Inspect the current gameplay flow and identify the systems, states, or assets touched by the task.",
+            "- Implement the behavior change in an ordered sequence so state transitions remain predictable.",
+            "- Add logging, assertions, or debug breadcrumbs that make gameplay regressions fast to detect.",
+        ]
+    if section == "Unit Tests":
+        return [
+            "- Add or update automated tests that cover the requested gameplay path and its expected state transition.",
+            "- Verify the regression case described in the task prompt and assert the intended gameplay outcome.",
+        ]
+    if section == "Risks":
+        return [
+            "- Risk: adjacent gameplay states, timings, or animation hooks may regress when this change lands.",
+            "- Mitigation: add validation, fallback guards, or targeted debug logging before shipping the change.",
+        ]
+    return [
+        f"- Players should observe the intended gameplay behavior from: {task_prompt}",
+        "- Regression checks for adjacent states, timing windows, and nearby inputs should still pass before the task is complete.",
+    ]
+
+
+def _build_plan_sections(
+    task_prompt: str,
+    task_type: str,
+    doc_hits: list[str],
+    current_sections: dict[str, list[str]] | None = None,
+    review_section_reviews: list[SectionReview] | None = None,
+) -> dict[str, list[str]]:
+    current_sections = current_sections or {}
+    review_section_map = {
+        review["section"]: review
+        for review in review_section_reviews or []
+    }
+    built_sections: dict[str, list[str]] = {}
+
+    for section in PLAN_SECTION_ORDER:
+        lines = list(current_sections.get(section, []))
+        review = review_section_map.get(section)
+
+        if not lines:
+            lines.extend(_default_section_lines(section, task_prompt, task_type, doc_hits))
+
+        if review is not None and review["status"] != "pass":
+            lines.extend(_default_section_lines(section, task_prompt, task_type, doc_hits))
+            lines.extend(f"- Reviewer follow-up: {item}" for item in review["action_items"])
+
+        built_sections[section] = _dedupe_section_lines(lines)
+
+    return built_sections
+
+
+def _render_plan_doc(sections: dict[str, list[str]]) -> str:
+    lines = ["# Gameplay Implementation Plan", ""]
+    for section in PLAN_SECTION_ORDER:
+        lines.append(f"## {section}")
+        section_lines = sections.get(section, [])
+        if section_lines:
+            lines.extend(section_lines)
+        else:
+            lines.append(f"- {REQUIRED_PLAN_SECTIONS[section]}")
+        lines.append("")
+    return "\n".join(lines).rstrip()
+
+
+def _revise_plan(
+    plan_doc: str,
+    task_prompt: str,
+    task_type: str,
+    doc_hits: list[str],
+    review_section_reviews: list[SectionReview],
+) -> str:
+    current_sections = _parse_plan_sections(plan_doc)
+    revised_sections = _build_plan_sections(
+        task_prompt=task_prompt,
+        task_type=task_type,
+        doc_hits=doc_hits,
+        current_sections=current_sections,
+        review_section_reviews=review_section_reviews,
+    )
+    return _render_plan_doc(revised_sections)
 
 
 def _fallback_code_bundle(task_prompt: str, task_type: str, attempt: int) -> dict[str, str]:
@@ -350,6 +485,12 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
             "task_type_reason": task_type_reason,
             "review_round": 0,
             "review_score": 0,
+            "review_feedback": "",
+            "missing_sections": [],
+            "review_section_reviews": [],
+            "review_blocking_issues": [],
+            "review_improvement_actions": [],
+            "review_approved": False,
             "code_attempt": 0,
             "artifact_dir": str(artifact_dir),
         }
@@ -456,11 +597,13 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
                     instructions=(
                         "You are gameplay-engineer-workflow. Produce a markdown implementation plan for gameplay work. "
                         "The document must contain these exact sections: Overview, Task Type, Existing Docs, Implementation Steps, "
-                        "Unit Tests, Risks, Acceptance Criteria. Each section must have concrete bullets."
+                        "Unit Tests, Risks, Acceptance Criteria. Each section must have concrete bullets that are specific enough "
+                        f"to pass a reviewer rubric with an approval bar of {REVIEW_APPROVAL_SCORE}/100."
                     ),
                     input_text=(
                         f"Task prompt:\n{state['task_prompt']}\n\n"
                         f"Task type: {state['task_type']}\n"
+                        f"Task type reason: {state['task_type_reason']}\n\n"
                         f"Design doc:\n{state['design_doc']}\n\n"
                         f"Relevant docs:\n{state['doc_context'] or 'No matching docs.'}"
                     ),
@@ -499,6 +642,9 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
             "score": state["score"],
             "feedback": state["feedback"],
             "missing_sections": state["missing_sections"],
+            "section_reviews": state.get("section_reviews", []),
+            "blocking_issues": state.get("blocking_issues", []),
+            "improvement_actions": state.get("improvement_actions", []),
             "approved": state["approved"],
             "summary": state["summary"],
         }
@@ -511,12 +657,34 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
             payload=review_result,
         )
         artifact_dir = Path(state["artifact_dir"])
+        section_reviews = list(state.get("section_reviews", []))
+        blocking_issues = list(state.get("blocking_issues", []))
+        improvement_actions = list(state.get("improvement_actions", []))
         feedback_lines = [
             f"# Review Round {state['review_round']}",
             "",
-            f"Score: {state['score']}",
+            f"- Score: {state['score']}",
+            f"- Approved: {state['approved']}",
             "",
-            "## Feedback",
+            "## Blocking Issues",
+            *([f"- {item}" for item in blocking_issues] or ["- None."]),
+            "",
+            "## Improvement Checklist",
+            *([f"- {item}" for item in improvement_actions] or ["- None."]),
+            "",
+            "## Section Scores",
+            *(
+                [
+                    (
+                        f"- {review['section']}: {review['score']}/{review['max_score']} "
+                        f"({review['status']}) - {review['rationale']}"
+                    )
+                    for review in section_reviews
+                ]
+                or ["- Reviewer did not return per-section scores."]
+            ),
+            "",
+            "## Full Feedback",
             state["feedback"],
         ]
         (artifact_dir / f"review_round_{state['review_round']}.md").write_text(
@@ -527,19 +695,26 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
             "review_score": state["score"],
             "review_feedback": state["feedback"],
             "missing_sections": state["missing_sections"],
+            "review_section_reviews": section_reviews,
+            "review_blocking_issues": blocking_issues,
+            "review_improvement_actions": improvement_actions,
+            "review_approved": state["approved"],
         }
 
     def review_gate(state: EngineerState) -> str:
-        if state["review_score"] < 100:
+        if not state["review_approved"]:
+            if state["review_round"] >= MAX_REVIEW_ROUNDS:
+                return "prepare_review_blocked_delivery"
             return "revise_plan"
         return "implement_code"
 
     def revise_plan(state: EngineerState) -> dict[str, Any]:
         revised_plan = _revise_plan(
-            state["plan_doc"],
-            state["missing_sections"],
-            state["task_prompt"],
-            state["review_feedback"],
+            plan_doc=state["plan_doc"],
+            task_prompt=state["task_prompt"],
+            task_type=state["task_type"],
+            doc_hits=state["doc_hits"],
+            review_section_reviews=state["review_section_reviews"],
         )
         if default_llm.is_enabled():
             try:
@@ -547,12 +722,17 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
                     instructions=(
                         "You are gameplay-engineer-workflow. Rewrite the full markdown implementation plan after reviewer feedback. "
                         "Keep the exact sections Overview, Task Type, Existing Docs, Implementation Steps, Unit Tests, Risks, "
-                        "Acceptance Criteria, and make sure all reviewer concerns are addressed."
+                        "Acceptance Criteria, and make sure all reviewer blockers and checklist items are addressed clearly enough "
+                        f"to reach the reviewer approval bar of {REVIEW_APPROVAL_SCORE}/100."
                     ),
                     input_text=(
                         f"Task prompt:\n{state['task_prompt']}\n\n"
+                        f"Task type: {state['task_type']}\n"
+                        f"Task type reason: {state['task_type_reason']}\n\n"
                         f"Current plan:\n{state['plan_doc']}\n\n"
-                        f"Missing sections:\n{state['missing_sections']}\n\n"
+                        f"Per-section review results:\n{state['review_section_reviews']}\n\n"
+                        f"Blocking issues:\n{state['review_blocking_issues']}\n\n"
+                        f"Improvement checklist:\n{state['review_improvement_actions']}\n\n"
                         f"Reviewer feedback:\n{state['review_feedback']}\n\n"
                         f"Design doc:\n{state['design_doc']}"
                     ),
@@ -666,6 +846,7 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
                 f"Workflow: {metadata.name}",
                 f"Task: {state['task_prompt']}",
                 f"Review score: {state['review_score']}",
+                f"Review approved: {state['review_approved']}",
                 f"Task type rationale: {state['task_type_reason']}",
                 f"Implementation notes: {state['implementation_notes']}",
                 "",
@@ -677,9 +858,11 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
         (artifact_dir / "pull_request.md").write_text(pr_body, encoding="utf-8")
 
         final_report = {
+            "status": "completed",
             "task_type": state["task_type"],
             "review_rounds": state["review_round"],
             "review_score": state["review_score"],
+            "review_approved": state["review_approved"],
             "compile_ok": state["compile_ok"],
             "tests_ok": state["tests_ok"],
             "commit_message": commit_message,
@@ -691,6 +874,54 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
         summary = (
             f"{metadata.name} completed {state['task_type']} flow in "
             f"{state['review_round']} review round(s) and {state['code_attempt']} code attempt(s)."
+        )
+        return {"final_report": final_report, "summary": summary}
+
+    def prepare_review_blocked_delivery(state: EngineerState) -> dict[str, Any]:
+        artifact_dir = Path(state["artifact_dir"])
+        missing_sections = list(state["missing_sections"]) or ["Reviewer did not provide structured missing sections."]
+        blocking_issues = list(state["review_blocking_issues"]) or ["Reviewer did not provide structured blocking issues."]
+        improvement_actions = list(state["review_improvement_actions"]) or ["Reviewer did not provide structured action items."]
+        review_abort = "\n".join(
+            [
+                "# Review Blocked",
+                "",
+                f"Workflow stopped after {state['review_round']} review round(s).",
+                "",
+                "## Latest Feedback",
+                state["review_feedback"],
+                "",
+                "## Blocking Issues",
+                *[f"- {issue}" for issue in blocking_issues],
+                "",
+                "## Improvement Checklist",
+                *[f"- {item}" for item in improvement_actions],
+                "",
+                "## Missing Sections",
+                *[f"- {section}" for section in missing_sections],
+            ]
+        )
+        (artifact_dir / "review_abort.md").write_text(review_abort, encoding="utf-8")
+
+        final_report = {
+            "status": "review-blocked",
+            "task_type": state["task_type"],
+            "review_rounds": state["review_round"],
+            "review_score": state["review_score"],
+            "review_approved": state["review_approved"],
+            "compile_ok": False,
+            "tests_ok": False,
+            "artifact_dir": str(artifact_dir),
+            "llm_profile": context.llm_manager.describe(metadata.llm_profile),
+            "codegen_profile": context.llm_manager.describe("codegen"),
+            "missing_sections": missing_sections,
+            "blocking_issues": blocking_issues,
+            "improvement_actions": improvement_actions,
+            "review_feedback": state["review_feedback"],
+        }
+        summary = (
+            f"{metadata.name} stopped after {state['review_round']} review round(s) because the plan never reached "
+            f"approval. See review_abort.md for the latest reviewer feedback."
         )
         return {"final_report": final_report, "summary": summary}
 
@@ -764,6 +995,14 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
         "prepare_delivery",
         trace_graph_node(graph_name=graph_name, node_name="prepare_delivery", node_fn=prepare_delivery),
     )
+    graph.add_node(
+        "prepare_review_blocked_delivery",
+        trace_graph_node(
+            graph_name=graph_name,
+            node_name="prepare_review_blocked_delivery",
+            node_fn=prepare_review_blocked_delivery,
+        ),
+    )
     for tool_name, tool_subgraph in tool_subgraphs.items():
         graph.add_node(tool_node_names[tool_name], tool_subgraph)
 
@@ -806,6 +1045,7 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
         trace_route_decision(graph_name=graph_name, router_name="review_gate", route_fn=review_gate),
         {
             "revise_plan": "revise_plan",
+            "prepare_review_blocked_delivery": "prepare_review_blocked_delivery",
             "implement_code": "implement_code",
         },
     )
@@ -821,4 +1061,5 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
     )
     graph.add_edge("repair_code", "self_test")
     graph.add_edge("prepare_delivery", END)
+    graph.add_edge("prepare_review_blocked_delivery", END)
     return graph

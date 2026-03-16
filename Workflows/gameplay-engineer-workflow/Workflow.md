@@ -17,6 +17,7 @@ This workflow is responsible for gameplay engineering work. It handles gameplay
 feature development and bug fixing across 3C and combat content. The workflow
 classifies a task as bug-fix or new feature, checks the existing gameplay and
 design docs, builds a design doc when one does not exist, writes a planning doc,
-requests review feedback from the gameplay-reviewer-workflow until the score is
-100, then implements code, self-tests, verifies compilation, and prepares commit
-and pull request artifacts.
+requests structured review feedback from the gameplay-reviewer-workflow, revises
+the plan using per-section scores, blockers, and checklist items until the plan
+is approved by the reviewer rubric, then implements code, self-tests, verifies
+compilation, and prepares commit and pull request artifacts.

@@ -56,6 +56,212 @@ class FakeLLMManager:
         return ["default"]
 
 
+class AlwaysBadLLMClient:
+    def is_enabled(self) -> bool:
+        return True
+
+    def describe(self) -> str:
+        return "always bad test client"
+
+    def generate_text(self, *, instructions: str, input_text: str, effort: str | None = None) -> str:
+        del instructions, input_text, effort
+        return "Need more information before I can produce the required plan."
+
+    def generate_json(
+        self,
+        *,
+        instructions: str,
+        input_text: str,
+        schema_name: str,
+        schema: dict,
+        effort: str | None = None,
+    ) -> dict:
+        del instructions, input_text, schema, effort
+        if schema_name == "gameplay_task_classification":
+            return {
+                "task_type": "feature",
+                "reason": "Intentionally returning a non-actionable feature classification for review-cap testing.",
+            }
+        return {
+            "score": 0,
+            "feedback": "The plan is incomplete and still missing required sections.",
+            "missing_sections": [],
+            "approved": False,
+        }
+
+
+class AlwaysBadLLMManager:
+    def __init__(self) -> None:
+        self._client = AlwaysBadLLMClient()
+
+    def resolve(self, profile: str | None = None) -> AlwaysBadLLMClient:
+        return self._client
+
+    def is_enabled(self, profile: str | None = None) -> bool:
+        return True
+
+    def describe(self, profile: str | None = None) -> str:
+        return f"{profile or 'default'}: always bad test client"
+
+    def available_profiles(self) -> list[str]:
+        return ["default"]
+
+
+class AlmostApprovedLLMClient:
+    def is_enabled(self) -> bool:
+        return True
+
+    def describe(self) -> str:
+        return "almost approved test client"
+
+    def generate_text(self, *, instructions: str, input_text: str, effort: str | None = None) -> str:
+        del input_text, effort
+        if "Write a concise markdown design context document" in instructions:
+            return "\n".join(
+                [
+                    "# Gameplay Design Context",
+                    "",
+                    "## Overview",
+                    "- Player-facing issue is clearly identified.",
+                    "",
+                    "## Existing References",
+                    "- docs/designer/combat_design_template.md",
+                ]
+            )
+        if "Produce a markdown implementation plan" in instructions or "Rewrite the full markdown implementation plan" in instructions:
+            return "\n".join(
+                [
+                    "# Gameplay Implementation Plan",
+                    "",
+                    "## Overview",
+                    "- Restore the intended dodge cancel timing for melee gameplay.",
+                    "- Keep nearby responsiveness and state transitions stable for players.",
+                    "",
+                    "## Task Type",
+                    "- bugfix",
+                    "",
+                    "## Existing Docs",
+                    "- docs/designer/combat_design_template.md",
+                    "- docs/programming/gameplay_runtime.md",
+                    "",
+                    "## Implementation Steps",
+                    "- Inspect the dodge cancel state machine and the melee timing gates.",
+                    "- Update the timing logic while preserving valid transition order.",
+                    "- Add debug breadcrumbs so regressions are easy to spot.",
+                    "",
+                    "## Unit Tests",
+                    "- Add an automated regression test for melee dodge cancel timing.",
+                    "- Assert the expected state transition and responsiveness window.",
+                    "",
+                    "## Risks",
+                    "- Risk: adjacent cancel windows may drift if timing hooks change.",
+                    "- Mitigation: keep validation and debug logging around the transition gates.",
+                    "",
+                    "## Acceptance Criteria",
+                    "- Players should be able to dodge cancel melee actions at the intended timing window.",
+                    "- Regression checks for neighboring melee states should still pass.",
+                ]
+            )
+        raise AssertionError(f"Unexpected generate_text instructions: {instructions}")
+
+    def generate_json(
+        self,
+        *,
+        instructions: str,
+        input_text: str,
+        schema_name: str,
+        schema: dict,
+        effort: str | None = None,
+    ) -> dict:
+        del instructions, input_text, schema, effort
+        if schema_name == "gameplay_task_classification":
+            return {
+                "task_type": "bugfix",
+                "reason": "The prompt is clearly about fixing unintended gameplay behavior.",
+            }
+        if schema_name == "gameplay_plan_review":
+            return {
+                "score": 95,
+                "feedback": "The plan is implementation-ready. Only the task type rationale could be more explicit.",
+                "missing_sections": [],
+                "section_reviews": [
+                    {
+                        "section": "Overview",
+                        "score": 10,
+                        "status": "pass",
+                        "rationale": "The gameplay goal and scope are clear.",
+                        "action_items": [],
+                    },
+                    {
+                        "section": "Task Type",
+                        "score": 5,
+                        "status": "needs-work",
+                        "rationale": "The plan names the task type but does not fully justify it.",
+                        "action_items": ["Add one sentence justifying why this work is classified as a bugfix."],
+                    },
+                    {
+                        "section": "Existing Docs",
+                        "score": 10,
+                        "status": "pass",
+                        "rationale": "Relevant gameplay references are listed.",
+                        "action_items": [],
+                    },
+                    {
+                        "section": "Implementation Steps",
+                        "score": 25,
+                        "status": "pass",
+                        "rationale": "Implementation sequencing is concrete and actionable.",
+                        "action_items": [],
+                    },
+                    {
+                        "section": "Unit Tests",
+                        "score": 20,
+                        "status": "pass",
+                        "rationale": "Automated regression coverage is specified.",
+                        "action_items": [],
+                    },
+                    {
+                        "section": "Risks",
+                        "score": 10,
+                        "status": "pass",
+                        "rationale": "Risks and mitigations are documented.",
+                        "action_items": [],
+                    },
+                    {
+                        "section": "Acceptance Criteria",
+                        "score": 15,
+                        "status": "pass",
+                        "rationale": "Player-visible outcomes and regression checks are explicit.",
+                        "action_items": [],
+                    },
+                ],
+                "blocking_issues": [],
+                "improvement_actions": ["Add one sentence justifying why this work is classified as a bugfix."],
+                "approved": True,
+            }
+        raise AssertionError(f"Unexpected schema_name: {schema_name}")
+
+
+class MixedLLMManager:
+    def __init__(self) -> None:
+        self._default_client = AlmostApprovedLLMClient()
+        self._codegen_client = DisabledLLMClient()
+
+    def resolve(self, profile: str | None = None):
+        if profile == "codegen":
+            return self._codegen_client
+        return self._default_client
+
+    def is_enabled(self, profile: str | None = None) -> bool:
+        return self.resolve(profile).is_enabled()
+
+    def describe(self, profile: str | None = None) -> str:
+        return f"{profile or 'default'}: {self.resolve(profile).describe()}"
+
+    def available_profiles(self) -> list[str]:
+        return ["default", "reviewer", "codegen"]
+
+
 class WorkflowDrivenRuntimeTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
@@ -122,6 +328,10 @@ class WorkflowDrivenRuntimeTests(unittest.TestCase):
         self.assertLess(result["score"], 100)
         self.assertIn("Unit Tests", result["missing_sections"])
         self.assertFalse(result["approved"])
+        self.assertTrue(result["blocking_issues"])
+        self.assertTrue(result["improvement_actions"])
+        self.assertEqual(len(result["section_reviews"]), 7)
+        self.assertIn("## Section Scores", result["feedback"])
 
     def test_main_graph_runs_end_to_end_without_llm(self) -> None:
         graph = build_main_graph(registry=self.registry, llm_manager=self.llm_manager)
@@ -212,6 +422,71 @@ class WorkflowDrivenRuntimeTests(unittest.TestCase):
         )
         self.assertIn("docs/designer/combat_design_template.md", tool_messages[0].artifact["doc_hits"])
         self.assertIn("doc_context", tool_messages[1].artifact)
+
+    def test_engineer_workflow_caps_review_rounds_when_llm_never_produces_an_approvable_plan(self) -> None:
+        always_bad_registry = load_workflows(
+            project_root=self.project_root,
+            workflows_root=self.workflows_root,
+            llm_manager=AlwaysBadLLMManager(),
+        )
+        engineer_graph = always_bad_registry.get("gameplay-engineer-workflow").graph
+        self.assertIsNotNone(engineer_graph)
+
+        with tempfile.TemporaryDirectory(prefix="langgraph-review-cap-") as temp_dir:
+            run_dir = Path(temp_dir) / "run"
+            run_dir.mkdir(parents=True, exist_ok=True)
+
+            result = engineer_graph.invoke(
+                {
+                    "prompt": "Summarize one accessible gameplay doc without changing files",
+                    "task_prompt": "Summarize one accessible gameplay doc without changing files",
+                    "task_id": "task-1-summarize-doc",
+                    "run_dir": str(run_dir),
+                    "messages": [],
+                }
+            )
+
+            artifact_dir = run_dir / "tasks" / "task-1-summarize-doc" / "gameplay-engineer-workflow"
+            self.assertTrue((artifact_dir / "review_abort.md").exists())
+
+        self.assertEqual(result["review_round"], 3)
+        self.assertEqual(result["final_report"]["status"], "review-blocked")
+        self.assertFalse(result["final_report"]["compile_ok"])
+        self.assertFalse(result["final_report"]["tests_ok"])
+        self.assertIn("never reached approval", result["summary"])
+
+    def test_engineer_workflow_accepts_reviewer_approval_below_perfect_score(self) -> None:
+        mixed_registry = load_workflows(
+            project_root=self.project_root,
+            workflows_root=self.workflows_root,
+            llm_manager=MixedLLMManager(),
+        )
+        engineer_graph = mixed_registry.get("gameplay-engineer-workflow").graph
+        self.assertIsNotNone(engineer_graph)
+
+        with tempfile.TemporaryDirectory(prefix="langgraph-review-approved-") as temp_dir:
+            run_dir = Path(temp_dir) / "run"
+            run_dir.mkdir(parents=True, exist_ok=True)
+
+            result = engineer_graph.invoke(
+                {
+                    "prompt": "Fix combat dodge cancel bug in melee gameplay",
+                    "task_prompt": "Fix combat dodge cancel bug in melee gameplay",
+                    "task_id": "task-1-fix-combat-dodge-cancel-bug",
+                    "run_dir": str(run_dir),
+                    "messages": [],
+                }
+            )
+
+            artifact_dir = run_dir / "tasks" / "task-1-fix-combat-dodge-cancel-bug" / "gameplay-engineer-workflow"
+            review_round = (artifact_dir / "review_round_1.md").read_text(encoding="utf-8")
+
+        self.assertEqual(result["review_score"], 95)
+        self.assertTrue(result["review_approved"])
+        self.assertEqual(result["review_round"], 1)
+        self.assertEqual(result["final_report"]["status"], "completed")
+        self.assertIn("Approved: True", review_round)
+        self.assertIn("Task Type: 5/10", review_round)
 
     def test_main_graph_xray_mermaid_includes_workflow_subgraphs(self) -> None:
         graph = build_main_graph(registry=self.registry, llm_manager=self.llm_manager)
