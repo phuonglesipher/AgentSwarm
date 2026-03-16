@@ -6,36 +6,131 @@ config:
 graph TD;
 	__start__([<p>__start__</p>]):::first
 	classify_request(classify_request)
-	inspect_docs(inspect_docs)
+	prepare_doc_search(prepare_doc_search)
+	tool_request_error(tool_request_error)
+	capture_doc_hits(capture_doc_hits)
+	prepare_doc_context_lookup(prepare_doc_context_lookup)
+	capture_doc_context(capture_doc_context)
+	prepare_code_search(prepare_code_search)
+	capture_code_hits(capture_code_hits)
+	prepare_code_context_lookup(prepare_code_context_lookup)
+	capture_code_context(capture_code_context)
+	prepare_blueprint_search(prepare_blueprint_search)
+	capture_blueprint_hits(capture_blueprint_hits)
+	prepare_blueprint_context_lookup(prepare_blueprint_context_lookup)
+	capture_blueprint_context(capture_blueprint_context)
+	assess_implementation_strategy(assess_implementation_strategy)
 	build_design_doc(build_design_doc)
+	build_bug_context_doc(build_bug_context_doc)
 	plan_work(plan_work)
 	request_review(request_review)
 	enter_review_subgraph(enter_review_subgraph)
 	capture_review_result(capture_review_result)
 	revise_plan(revise_plan)
 	implement_code(implement_code)
+	post_implementation_gate(post_implementation_gate)
 	self_test(self_test)
 	repair_code(repair_code)
 	prepare_delivery(prepare_delivery)
+	prepare_review_blocked_delivery(prepare_review_blocked_delivery)
 	__end__([<p>__end__</p>]):::last
 	__start__ --> classify_request;
+	agentswarm__find-gameplay-blueprints\3aexecute_tool --> capture_blueprint_hits;
+	agentswarm__find-gameplay-code\3aexecute_tool --> capture_code_hits;
+	agentswarm__find-gameplay-docs\3aexecute_tool --> capture_doc_hits;
+	agentswarm__load-blueprint-context\3aexecute_tool --> capture_blueprint_context;
+	agentswarm__load-markdown-context\3aexecute_tool --> capture_doc_context;
+	agentswarm__load-source-context\3aexecute_tool --> capture_code_context;
+	assess_implementation_strategy -.-> build_bug_context_doc;
+	assess_implementation_strategy -.-> build_design_doc;
+	build_bug_context_doc --> implement_code;
 	build_design_doc --> plan_work;
+	capture_blueprint_context --> assess_implementation_strategy;
+	capture_blueprint_hits --> prepare_blueprint_context_lookup;
+	capture_code_context --> prepare_blueprint_search;
+	capture_code_hits --> prepare_code_context_lookup;
+	capture_doc_context --> prepare_code_search;
+	capture_doc_hits --> prepare_doc_context_lookup;
 	capture_review_result -.-> implement_code;
+	capture_review_result -.-> prepare_review_blocked_delivery;
 	capture_review_result -.-> revise_plan;
-	classify_request --> inspect_docs;
+	classify_request --> prepare_doc_search;
 	enter_review_subgraph --> gameplay-reviewer-workflow\3areview_plan;
 	gameplay-reviewer-workflow\3areview_plan --> capture_review_result;
-	implement_code --> self_test;
-	inspect_docs --> build_design_doc;
+	implement_code --> post_implementation_gate;
 	plan_work --> request_review;
+	post_implementation_gate -.-> prepare_delivery;
+	post_implementation_gate -.-> self_test;
+	prepare_blueprint_context_lookup -.-> agentswarm__find-gameplay-blueprints\3aexecute_tool;
+	prepare_blueprint_context_lookup -.-> agentswarm__find-gameplay-code\3aexecute_tool;
+	prepare_blueprint_context_lookup -.-> agentswarm__find-gameplay-docs\3aexecute_tool;
+	prepare_blueprint_context_lookup -.-> agentswarm__load-blueprint-context\3aexecute_tool;
+	prepare_blueprint_context_lookup -.-> agentswarm__load-markdown-context\3aexecute_tool;
+	prepare_blueprint_context_lookup -.-> agentswarm__load-source-context\3aexecute_tool;
+	prepare_blueprint_context_lookup -.-> tool_request_error;
+	prepare_blueprint_search -.-> agentswarm__find-gameplay-blueprints\3aexecute_tool;
+	prepare_blueprint_search -.-> agentswarm__find-gameplay-code\3aexecute_tool;
+	prepare_blueprint_search -.-> agentswarm__find-gameplay-docs\3aexecute_tool;
+	prepare_blueprint_search -.-> agentswarm__load-blueprint-context\3aexecute_tool;
+	prepare_blueprint_search -.-> agentswarm__load-markdown-context\3aexecute_tool;
+	prepare_blueprint_search -.-> agentswarm__load-source-context\3aexecute_tool;
+	prepare_blueprint_search -.-> tool_request_error;
+	prepare_code_context_lookup -.-> agentswarm__find-gameplay-blueprints\3aexecute_tool;
+	prepare_code_context_lookup -.-> agentswarm__find-gameplay-code\3aexecute_tool;
+	prepare_code_context_lookup -.-> agentswarm__find-gameplay-docs\3aexecute_tool;
+	prepare_code_context_lookup -.-> agentswarm__load-blueprint-context\3aexecute_tool;
+	prepare_code_context_lookup -.-> agentswarm__load-markdown-context\3aexecute_tool;
+	prepare_code_context_lookup -.-> agentswarm__load-source-context\3aexecute_tool;
+	prepare_code_context_lookup -.-> tool_request_error;
+	prepare_code_search -.-> agentswarm__find-gameplay-blueprints\3aexecute_tool;
+	prepare_code_search -.-> agentswarm__find-gameplay-code\3aexecute_tool;
+	prepare_code_search -.-> agentswarm__find-gameplay-docs\3aexecute_tool;
+	prepare_code_search -.-> agentswarm__load-blueprint-context\3aexecute_tool;
+	prepare_code_search -.-> agentswarm__load-markdown-context\3aexecute_tool;
+	prepare_code_search -.-> agentswarm__load-source-context\3aexecute_tool;
+	prepare_code_search -.-> tool_request_error;
+	prepare_doc_context_lookup -.-> agentswarm__find-gameplay-blueprints\3aexecute_tool;
+	prepare_doc_context_lookup -.-> agentswarm__find-gameplay-code\3aexecute_tool;
+	prepare_doc_context_lookup -.-> agentswarm__find-gameplay-docs\3aexecute_tool;
+	prepare_doc_context_lookup -.-> agentswarm__load-blueprint-context\3aexecute_tool;
+	prepare_doc_context_lookup -.-> agentswarm__load-markdown-context\3aexecute_tool;
+	prepare_doc_context_lookup -.-> agentswarm__load-source-context\3aexecute_tool;
+	prepare_doc_context_lookup -.-> tool_request_error;
+	prepare_doc_search -.-> agentswarm__find-gameplay-blueprints\3aexecute_tool;
+	prepare_doc_search -.-> agentswarm__find-gameplay-code\3aexecute_tool;
+	prepare_doc_search -.-> agentswarm__find-gameplay-docs\3aexecute_tool;
+	prepare_doc_search -.-> agentswarm__load-blueprint-context\3aexecute_tool;
+	prepare_doc_search -.-> agentswarm__load-markdown-context\3aexecute_tool;
+	prepare_doc_search -.-> agentswarm__load-source-context\3aexecute_tool;
+	prepare_doc_search -.-> tool_request_error;
 	repair_code --> self_test;
 	request_review --> enter_review_subgraph;
 	revise_plan --> request_review;
 	self_test -.-> prepare_delivery;
 	self_test -.-> repair_code;
 	prepare_delivery --> __end__;
+	prepare_review_blocked_delivery --> __end__;
+	tool_request_error --> __end__;
 	subgraph gameplay-reviewer-workflow
 	gameplay-reviewer-workflow\3areview_plan(review_plan)
+	end
+	subgraph agentswarm__find-gameplay-blueprints
+	agentswarm__find-gameplay-blueprints\3aexecute_tool(execute_tool)
+	end
+	subgraph agentswarm__find-gameplay-docs
+	agentswarm__find-gameplay-docs\3aexecute_tool(execute_tool)
+	end
+	subgraph agentswarm__load-blueprint-context
+	agentswarm__load-blueprint-context\3aexecute_tool(execute_tool)
+	end
+	subgraph agentswarm__load-markdown-context
+	agentswarm__load-markdown-context\3aexecute_tool(execute_tool)
+	end
+	subgraph agentswarm__find-gameplay-code
+	agentswarm__find-gameplay-code\3aexecute_tool(execute_tool)
+	end
+	subgraph agentswarm__load-source-context
+	agentswarm__load-source-context\3aexecute_tool(execute_tool)
 	end
 	classDef default fill:#f2f0ff,line-height:1.2
 	classDef first fill-opacity:0

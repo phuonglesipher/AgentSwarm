@@ -82,6 +82,11 @@ class AlwaysBadLLMClient:
                 "task_type": "feature",
                 "reason": "Intentionally returning a non-actionable feature classification for review-cap testing.",
             }
+        if schema_name == "gameplay_implementation_medium":
+            return {
+                "implementation_medium": "cpp",
+                "reason": "Return code-side execution so the test can focus on the feature review loop.",
+            }
         return {
             "score": 0,
             "feedback": "The plan is incomplete and still missing required sections.",
@@ -115,50 +120,106 @@ class AlmostApprovedLLMClient:
         return "almost approved test client"
 
     def generate_text(self, *, instructions: str, input_text: str, effort: str | None = None) -> str:
-        del input_text, effort
+        del effort
+        feature_prompt = "add " in input_text.lower() or "new feature" in input_text.lower()
         if "Write a concise markdown design context document" in instructions:
             return "\n".join(
                 [
                     "# Gameplay Design Context",
                     "",
                     "## Overview",
-                    "- Player-facing issue is clearly identified.",
+                    (
+                        "- Player-facing feature goal is clearly identified."
+                        if feature_prompt
+                        else "- Player-facing issue is clearly identified."
+                    ),
                     "",
                     "## Existing References",
                     "- docs/designer/combat_design_template.md",
                 ]
             )
-        if "Produce a markdown implementation plan" in instructions or "Rewrite the full markdown implementation plan" in instructions:
+        if "Write a concise markdown bug investigation brief" in instructions:
+            return "\n".join(
+                [
+                    "# Gameplay Bug Context",
+                    "",
+                    "## Bug Summary",
+                    "- Repro and likely failing gameplay state are identified.",
+                    "",
+                    "## Current Signals",
+                    "- src/combat_dodge.py",
+                ]
+            )
+        if (
+            "Produce a markdown implementation plan" in instructions
+            or "Produce a markdown architecture and implementation plan" in instructions
+            or "Rewrite the full markdown implementation plan" in instructions
+        ):
+            task_type = "feature" if feature_prompt else "bugfix"
+            task_reason = (
+                "- Classification reason: this is a feature because it adds new gameplay behavior that needs plan approval."
+                if feature_prompt
+                else "- Classification reason: this is a bugfix because it restores intended gameplay behavior."
+            )
             return "\n".join(
                 [
                     "# Gameplay Implementation Plan",
                     "",
                     "## Overview",
-                    "- Restore the intended dodge cancel timing for melee gameplay.",
-                    "- Keep nearby responsiveness and state transitions stable for players.",
+                    (
+                        "- Add a new melee combo extension that preserves existing responsiveness."
+                        if feature_prompt
+                        else "- Restore the intended dodge cancel timing for melee gameplay."
+                    ),
+                    (
+                        "- Keep nearby responsiveness and state transitions stable for players."
+                        if not feature_prompt
+                        else "- Keep adjacent combat states readable for design review and implementation."
+                    ),
                     "",
                     "## Task Type",
-                    "- bugfix",
+                    f"- {task_type}",
+                    task_reason,
                     "",
                     "## Existing Docs",
                     "- docs/designer/combat_design_template.md",
                     "- docs/programming/gameplay_runtime.md",
                     "",
                     "## Implementation Steps",
-                    "- Inspect the dodge cancel state machine and the melee timing gates.",
-                    "- Update the timing logic while preserving valid transition order.",
+                    (
+                        "- Inspect the melee combo state machine and the extension points for the new branch."
+                        if feature_prompt
+                        else "- Inspect the dodge cancel state machine and the melee timing gates."
+                    ),
+                    (
+                        "- Add the new branch while preserving valid transition order."
+                        if feature_prompt
+                        else "- Update the timing logic while preserving valid transition order."
+                    ),
                     "- Add debug breadcrumbs so regressions are easy to spot.",
                     "",
                     "## Unit Tests",
-                    "- Add an automated regression test for melee dodge cancel timing.",
-                    "- Assert the expected state transition and responsiveness window.",
+                    (
+                        "- Add an automated regression test for the new melee combo branch."
+                        if feature_prompt
+                        else "- Add an automated regression test for melee dodge cancel timing."
+                    ),
+                    (
+                        "- Assert the new branch unlocks only from the expected combat state."
+                        if feature_prompt
+                        else "- Assert the expected state transition and responsiveness window."
+                    ),
                     "",
                     "## Risks",
                     "- Risk: adjacent cancel windows may drift if timing hooks change.",
                     "- Mitigation: keep validation and debug logging around the transition gates.",
                     "",
                     "## Acceptance Criteria",
-                    "- Players should be able to dodge cancel melee actions at the intended timing window.",
+                    (
+                        "- Players should be able to enter the new melee combo branch from the approved combat window."
+                        if feature_prompt
+                        else "- Players should be able to dodge cancel melee actions at the intended timing window."
+                    ),
                     "- Regression checks for neighboring melee states should still pass.",
                 ]
             )
@@ -173,11 +234,21 @@ class AlmostApprovedLLMClient:
         schema: dict,
         effort: str | None = None,
     ) -> dict:
-        del instructions, input_text, schema, effort
+        del instructions, schema, effort
+        feature_prompt = "add " in input_text.lower() or "new feature" in input_text.lower()
         if schema_name == "gameplay_task_classification":
             return {
-                "task_type": "bugfix",
-                "reason": "The prompt is clearly about fixing unintended gameplay behavior.",
+                "task_type": "feature" if feature_prompt else "bugfix",
+                "reason": (
+                    "The prompt adds new gameplay behavior and should go through the feature track."
+                    if feature_prompt
+                    else "The prompt is clearly about fixing unintended gameplay behavior."
+                ),
+            }
+        if schema_name == "gameplay_implementation_medium":
+            return {
+                "implementation_medium": "cpp",
+                "reason": "The matched test fixture uses source code files rather than Blueprint assets.",
             }
         if schema_name == "gameplay_plan_review":
             return {
@@ -197,7 +268,13 @@ class AlmostApprovedLLMClient:
                         "score": 5,
                         "status": "needs-work",
                         "rationale": "The plan names the task type but does not fully justify it.",
-                        "action_items": ["Add one sentence justifying why this work is classified as a bugfix."],
+                        "action_items": [
+                            (
+                                "Add one sentence justifying why this work is classified as a feature."
+                                if feature_prompt
+                                else "Add one sentence justifying why this work is classified as a bugfix."
+                            )
+                        ],
                     },
                     {
                         "section": "Existing Docs",
@@ -236,7 +313,13 @@ class AlmostApprovedLLMClient:
                     },
                 ],
                 "blocking_issues": [],
-                "improvement_actions": ["Add one sentence justifying why this work is classified as a bugfix."],
+                "improvement_actions": [
+                    (
+                        "Add one sentence justifying why this work is classified as a feature."
+                        if feature_prompt
+                        else "Add one sentence justifying why this work is classified as a bugfix."
+                    )
+                ],
                 "approved": True,
             }
         raise AssertionError(f"Unexpected schema_name: {schema_name}")
@@ -285,16 +368,24 @@ class WorkflowDrivenRuntimeTests(unittest.TestCase):
         self.assertEqual(
             tool_names,
             [
+                "find-gameplay-blueprints",
+                "find-gameplay-code",
                 "find-gameplay-docs",
+                "load-blueprint-context",
                 "load-markdown-context",
+                "load-source-context",
             ],
         )
         qualified_tool_names = [item.qualified_name for item in self.tool_registry.list_metadata()]
         self.assertEqual(
             qualified_tool_names,
             [
+                "agentswarm::find-gameplay-blueprints",
+                "agentswarm::find-gameplay-code",
                 "agentswarm::find-gameplay-docs",
+                "agentswarm::load-blueprint-context",
                 "agentswarm::load-markdown-context",
+                "agentswarm::load-source-context",
             ],
         )
 
@@ -341,7 +432,7 @@ class WorkflowDrivenRuntimeTests(unittest.TestCase):
 
             result = graph.invoke(
                 build_initial_state(
-                    prompt="Fix combat dodge cancel bug in melee gameplay and keep 3C responsiveness stable",
+                    prompt="Add a melee combo extension feature and keep 3C responsiveness stable",
                     run_dir=str(run_dir),
                 )
             )
@@ -355,10 +446,11 @@ class WorkflowDrivenRuntimeTests(unittest.TestCase):
             artifact_dir = (
                 run_dir
                 / "tasks"
-                / "task-1-fix-combat-dodge-cancel-bug-in-melee-gameplay"
+                / "task-1-add-a-melee-combo-extension-feature-and-keep"
                 / "gameplay-engineer-workflow"
             )
             self.assertTrue((artifact_dir / "plan_doc.md").exists())
+            self.assertTrue((artifact_dir / "architecture_plan.md").exists())
             self.assertTrue((artifact_dir / "pull_request.md").exists())
             self.assertTrue((artifact_dir / "self_test.txt").exists())
 
@@ -388,10 +480,14 @@ class WorkflowDrivenRuntimeTests(unittest.TestCase):
 
         subgraphs = dict(engineer_graph.get_subgraphs())
         self.assertIn("gameplay-reviewer-workflow", subgraphs)
+        self.assertIn("agentswarm__find-gameplay-blueprints", subgraphs)
+        self.assertIn("agentswarm__find-gameplay-code", subgraphs)
         self.assertIn("agentswarm__find-gameplay-docs", subgraphs)
+        self.assertIn("agentswarm__load-blueprint-context", subgraphs)
         self.assertIn("agentswarm__load-markdown-context", subgraphs)
+        self.assertIn("agentswarm__load-source-context", subgraphs)
 
-    def test_engineer_workflow_uses_tool_messages_for_doc_context(self) -> None:
+    def test_engineer_workflow_uses_tool_messages_for_doc_and_code_context(self) -> None:
         engineer_graph = self.registry.get("gameplay-engineer-workflow").graph
         self.assertIsNotNone(engineer_graph)
 
@@ -411,6 +507,8 @@ class WorkflowDrivenRuntimeTests(unittest.TestCase):
 
         self.assertIn("docs/designer/combat_design_template.md", result["doc_hits"])
         self.assertIn("# docs/designer/combat_design_template.md", result["doc_context"])
+        self.assertIsInstance(result["source_hits"], list)
+        self.assertIn("Generated code was saved to workflow artifacts only.", result["workspace_write_summary"])
 
         tool_messages = [message for message in result["messages"] if isinstance(message, ToolMessage)]
         self.assertEqual(
@@ -418,10 +516,146 @@ class WorkflowDrivenRuntimeTests(unittest.TestCase):
             [
                 "agentswarm::find-gameplay-docs",
                 "agentswarm::load-markdown-context",
+                "agentswarm::find-gameplay-code",
+                "agentswarm::load-source-context",
+                "agentswarm::find-gameplay-blueprints",
+                "agentswarm::load-blueprint-context",
             ],
         )
         self.assertIn("docs/designer/combat_design_template.md", tool_messages[0].artifact["doc_hits"])
         self.assertIn("doc_context", tool_messages[1].artifact)
+        self.assertIn("source_hits", tool_messages[2].artifact)
+        self.assertIn("code_context", tool_messages[3].artifact)
+        self.assertIn("blueprint_hits", tool_messages[4].artifact)
+        self.assertIn("blueprint_context", tool_messages[5].artifact)
+
+    def test_engineer_workflow_writes_generated_code_into_host_project_roots(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="agentswarm-host-code-") as temp_dir:
+            host_root = Path(temp_dir) / "host-project"
+            host_root.mkdir(parents=True, exist_ok=True)
+            (host_root / "src").mkdir(parents=True, exist_ok=True)
+            (host_root / "tests").mkdir(parents=True, exist_ok=True)
+            (host_root / "src" / "combat_dodge.py").write_text(
+                "\n".join(
+                    [
+                        "def get_dodge_window():",
+                        "    return 3",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            (host_root / "tests" / "test_combat_dodge.py").write_text(
+                "\n".join(
+                    [
+                        "from src.combat_dodge import get_dodge_window",
+                        "",
+                        "def test_get_dodge_window():",
+                        "    assert get_dodge_window() == 3",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            paths, _ = initialize_host_project(agent_root=self.project_root, host_root=host_root)
+            config = load_agentswarm_config(paths)
+            manifest = load_project_manifest(paths)
+            registry = load_workflows(
+                project_root=self.project_root,
+                workflows_root=self.workflows_root,
+                llm_manager=self.llm_manager,
+                runtime_paths=paths,
+                config=config,
+                manifest=manifest,
+            )
+            engineer_graph = registry.get("gameplay-engineer-workflow").graph
+            self.assertIsNotNone(engineer_graph)
+
+            run_dir = host_root / ".agentswarm" / "runs" / "test-run"
+            run_dir.mkdir(parents=True, exist_ok=True)
+            result = engineer_graph.invoke(
+                {
+                    "prompt": "Fix combat dodge window gameplay bug",
+                    "task_prompt": "Fix combat dodge window gameplay bug",
+                    "task_id": "task-1-fix-combat-dodge-window",
+                    "run_dir": str(run_dir),
+                    "messages": [],
+                }
+            )
+
+            artifact_dir = run_dir / "tasks" / "task-1-fix-combat-dodge-window" / "gameplay-engineer-workflow"
+            workspace_source = host_root / Path(result["workspace_source_file"])
+            workspace_test = host_root / Path(result["workspace_test_file"])
+            self.assertTrue(result["workspace_write_enabled"])
+            self.assertTrue(workspace_source.exists())
+            self.assertTrue(workspace_test.exists())
+            self.assertIn("build_gameplay_change_summary", workspace_source.read_text(encoding="utf-8"))
+            self.assertIn("test_build_gameplay_change_summary", workspace_test.read_text(encoding="utf-8"))
+            self.assertTrue((artifact_dir / "workspace_write_manifest.md").exists())
+            self.assertEqual(result["execution_track"], "bugfix")
+            self.assertFalse(result["requires_architecture_review"])
+            self.assertEqual(result["implementation_medium"], "cpp")
+            self.assertEqual(result["review_round"], 0)
+            self.assertTrue((artifact_dir / "bug_context.md").exists())
+            self.assertFalse((artifact_dir / "review_round_1.md").exists())
+
+    def test_engineer_workflow_handles_blueprint_bugfix_with_manual_handoff(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="agentswarm-host-blueprint-") as temp_dir:
+            host_root = Path(temp_dir) / "host-project"
+            blueprint_dir = host_root / "Content" / "Combat"
+            blueprint_dir.mkdir(parents=True, exist_ok=True)
+            (blueprint_dir / "BP_DodgeCancel.uasset").write_bytes(b"binary-blueprint-placeholder")
+            (blueprint_dir / "BP_DodgeCancel.copy").write_text(
+                "\n".join(
+                    [
+                        "EventGraph:",
+                        "  State: DodgeCancel",
+                        "  Bug: cancel window closes too early during melee recovery",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            paths, _ = initialize_host_project(agent_root=self.project_root, host_root=host_root)
+            config = load_agentswarm_config(paths)
+            manifest = load_project_manifest(paths)
+            registry = load_workflows(
+                project_root=self.project_root,
+                workflows_root=self.workflows_root,
+                llm_manager=self.llm_manager,
+                runtime_paths=paths,
+                config=config,
+                manifest=manifest,
+            )
+            engineer_graph = registry.get("gameplay-engineer-workflow").graph
+            self.assertIsNotNone(engineer_graph)
+
+            run_dir = host_root / ".agentswarm" / "runs" / "bp-run"
+            run_dir.mkdir(parents=True, exist_ok=True)
+            result = engineer_graph.invoke(
+                {
+                    "prompt": "Fix Blueprint dodge cancel bug in melee gameplay",
+                    "task_prompt": "Fix Blueprint dodge cancel bug in melee gameplay",
+                    "task_id": "task-1-fix-blueprint-dodge-cancel-bug",
+                    "run_dir": str(run_dir),
+                    "messages": [],
+                }
+            )
+
+            artifact_dir = run_dir / "tasks" / "task-1-fix-blueprint-dodge-cancel-bug" / "gameplay-engineer-workflow"
+            patch_note = host_root / "Content" / "Combat" / "BP_DodgeCancel.agentswarm_fix.md"
+
+            self.assertEqual(result["execution_track"], "bugfix")
+            self.assertFalse(result["requires_architecture_review"])
+            self.assertEqual(result["implementation_medium"], "blueprint")
+            self.assertEqual(result["review_round"], 0)
+            self.assertTrue(result["blueprint_manual_action_required"])
+            self.assertTrue((artifact_dir / "bug_context.md").exists())
+            self.assertTrue((artifact_dir / "blueprint_fix_instructions.md").exists())
+            self.assertTrue((artifact_dir / "blueprint_fix_manifest.md").exists())
+            self.assertTrue(patch_note.exists())
+            self.assertFalse((artifact_dir / "review_round_1.md").exists())
+            self.assertEqual(result["final_report"]["status"], "manual-validation-required")
+            self.assertIn("Manual Unreal Editor", result["workspace_write_summary"])
 
     def test_engineer_workflow_caps_review_rounds_when_llm_never_produces_an_approvable_plan(self) -> None:
         always_bad_registry = load_workflows(
@@ -470,15 +704,15 @@ class WorkflowDrivenRuntimeTests(unittest.TestCase):
 
             result = engineer_graph.invoke(
                 {
-                    "prompt": "Fix combat dodge cancel bug in melee gameplay",
-                    "task_prompt": "Fix combat dodge cancel bug in melee gameplay",
-                    "task_id": "task-1-fix-combat-dodge-cancel-bug",
+                    "prompt": "Add a melee combo extension feature",
+                    "task_prompt": "Add a melee combo extension feature",
+                    "task_id": "task-1-add-melee-combo-feature",
                     "run_dir": str(run_dir),
                     "messages": [],
                 }
             )
 
-            artifact_dir = run_dir / "tasks" / "task-1-fix-combat-dodge-cancel-bug" / "gameplay-engineer-workflow"
+            artifact_dir = run_dir / "tasks" / "task-1-add-melee-combo-feature" / "gameplay-engineer-workflow"
             review_round = (artifact_dir / "review_round_1.md").read_text(encoding="utf-8")
 
         self.assertEqual(result["review_score"], 95)
@@ -501,8 +735,12 @@ class WorkflowDrivenRuntimeTests(unittest.TestCase):
 
         mermaid = engineer_graph.get_graph(xray=1).draw_mermaid()
         self.assertIn("subgraph gameplay-reviewer-workflow", mermaid)
+        self.assertIn("subgraph agentswarm__find-gameplay-blueprints", mermaid)
+        self.assertIn("subgraph agentswarm__find-gameplay-code", mermaid)
         self.assertIn("subgraph agentswarm__find-gameplay-docs", mermaid)
+        self.assertIn("subgraph agentswarm__load-blueprint-context", mermaid)
         self.assertIn("subgraph agentswarm__load-markdown-context", mermaid)
+        self.assertIn("subgraph agentswarm__load-source-context", mermaid)
 
     def test_initialize_host_project_scaffolds_overlay_files_in_submodule_mode(self) -> None:
         with tempfile.TemporaryDirectory(prefix="agentswarm-host-") as temp_dir:

@@ -35,10 +35,31 @@ class EngineerState(MessagesState):
     run_dir: str
     task_type: str
     task_type_reason: str
+    execution_track: str
+    requires_architecture_review: bool
     doc_hits: list[str]
     doc_scope: str
     doc_context: str
+    source_hits: list[str]
+    test_hits: list[str]
+    code_scope: str
+    code_context: str
+    blueprint_hits: list[str]
+    blueprint_text_hits: list[str]
+    blueprint_scope: str
+    blueprint_context: str
+    blueprint_editable_targets: list[str]
+    implementation_medium: str
+    implementation_medium_reason: str
+    blueprint_fix_strategy: str
+    blueprint_manual_action_required: bool
+    workspace_source_file: str
+    workspace_test_file: str
+    workspace_write_enabled: bool
+    workspace_write_summary: str
     design_doc: str
+    bug_context_doc: str
+    architecture_plan_doc: str
     plan_doc: str
     review_round: int
     review_score: int
@@ -90,12 +111,29 @@ def _fallback_task_classification(task_prompt: str) -> tuple[str, str]:
     return task_type, reason
 
 
-def _compose_design_doc(task_prompt: str, task_type: str, doc_hits: list[str], doc_context: str) -> str:
+def _compose_design_doc(
+    task_prompt: str,
+    task_type: str,
+    implementation_medium: str,
+    implementation_medium_reason: str,
+    doc_hits: list[str],
+    doc_context: str,
+    source_hits: list[str],
+    test_hits: list[str],
+    code_context: str,
+    blueprint_hits: list[str],
+    blueprint_text_hits: list[str],
+    blueprint_context: str,
+    workspace_source_file: str,
+    workspace_test_file: str,
+) -> str:
     lines = [
         "# Gameplay Design Context",
         "",
         f"Task Prompt: {task_prompt}",
         f"Task Type: {task_type}",
+        f"Implementation Medium: {implementation_medium}",
+        f"Medium Rationale: {implementation_medium_reason}",
         "",
         "## Existing References",
     ]
@@ -117,8 +155,187 @@ def _compose_design_doc(task_prompt: str, task_type: str, doc_hits: list[str], d
             "- Describe expected player-facing behavior first, then implementation notes.",
         ]
     )
+    lines.extend(["", "## Codebase Touch Points"])
+    if source_hits:
+        lines.extend([f"- Source: {item}" for item in source_hits])
+    else:
+        lines.append("- No relevant host-project source files were matched.")
+    if test_hits:
+        lines.extend([f"- Test: {item}" for item in test_hits])
+    else:
+        lines.append("- No relevant host-project test files were matched.")
+    if blueprint_hits or blueprint_text_hits:
+        lines.extend(["", "## Blueprint Touch Points"])
+        if blueprint_hits:
+            lines.extend([f"- Asset: {item}" for item in blueprint_hits])
+        if blueprint_text_hits:
+            lines.extend([f"- Companion text: {item}" for item in blueprint_text_hits])
+    if workspace_source_file or workspace_test_file:
+        lines.extend(
+            [
+                "",
+                "## Planned Workspace Targets",
+                f"- Source target: {workspace_source_file or 'artifact-only'}",
+                f"- Test target: {workspace_test_file or 'artifact-only'}",
+            ]
+        )
     if doc_context:
         lines.extend(["", "## Reference Snippets", doc_context])
+    if code_context:
+        lines.extend(["", "## Source Snippets", code_context])
+    if blueprint_context:
+        lines.extend(["", "## Blueprint Context", blueprint_context])
+    return "\n".join(lines)
+
+
+def _fallback_implementation_medium(
+    task_prompt: str,
+    source_hits: list[str],
+    test_hits: list[str],
+    blueprint_hits: list[str],
+) -> tuple[str, str]:
+    normalized = normalize_text(task_prompt)
+    tokens = tokenize(normalized)
+    mentions_blueprint = any(token in tokens for token in {"blueprint", "uasset", "bp"})
+    mentions_cpp = "c++" in normalized or "cpp" in tokens
+    has_code = bool(source_hits or test_hits)
+    has_blueprints = bool(blueprint_hits)
+
+    if has_code and has_blueprints:
+        return "mixed", "Matched both source code files and Blueprint assets related to the task."
+    if has_blueprints and (mentions_blueprint or not has_code):
+        return "blueprint", "Matched Blueprint assets and did not find stronger code-side evidence."
+    if has_code:
+        reason = "Matched source/test files for a code-side gameplay fix."
+        if mentions_cpp:
+            reason = "The prompt references C++/cpp work and matched source/test files."
+        return "cpp", reason
+    if has_blueprints:
+        return "blueprint", "Only Blueprint assets were matched for this gameplay task."
+    if mentions_blueprint and not mentions_cpp:
+        return "blueprint", "The prompt explicitly references Blueprint work."
+    return "cpp", "Defaulted to the code-side implementation track because no Blueprint evidence was found."
+
+
+def _compose_bug_context_doc(
+    task_prompt: str,
+    implementation_medium: str,
+    implementation_medium_reason: str,
+    doc_hits: list[str],
+    source_hits: list[str],
+    test_hits: list[str],
+    blueprint_hits: list[str],
+    blueprint_text_hits: list[str],
+    blueprint_fix_strategy: str,
+    doc_context: str,
+    code_context: str,
+    blueprint_context: str,
+) -> str:
+    lines = [
+        "# Gameplay Bug Context",
+        "",
+        f"Task Prompt: {task_prompt}",
+        f"Execution Track: bugfix",
+        f"Implementation Medium: {implementation_medium}",
+        f"Medium Rationale: {implementation_medium_reason}",
+        f"Blueprint Fix Strategy: {blueprint_fix_strategy}",
+        "",
+        "## Investigation Summary",
+        "- Gather the current bug symptoms, the likely failing state transition, and the code or asset ownership before editing.",
+        "- Prefer the narrowest safe fix that restores intended gameplay behavior and keeps adjacent states stable.",
+        "",
+        "## Existing References",
+    ]
+    if doc_hits:
+        lines.extend(f"- {item}" for item in doc_hits)
+    else:
+        lines.append("- No matching gameplay or design docs were found.")
+
+    lines.extend(["", "## Code Signals"])
+    if source_hits:
+        lines.extend(f"- Source: {item}" for item in source_hits)
+    else:
+        lines.append("- No source files were matched.")
+    if test_hits:
+        lines.extend(f"- Test: {item}" for item in test_hits)
+    else:
+        lines.append("- No test files were matched.")
+
+    lines.extend(["", "## Blueprint Signals"])
+    if blueprint_hits:
+        lines.extend(f"- Asset: {item}" for item in blueprint_hits)
+    else:
+        lines.append("- No Blueprint assets were matched.")
+    if blueprint_text_hits:
+        lines.extend(f"- Companion text: {item}" for item in blueprint_text_hits)
+    else:
+        lines.append("- No readable Blueprint companion exports were matched.")
+
+    lines.extend(
+        [
+            "",
+            "## Fix Plan",
+            "- Confirm the exact repro path and the first state or node where behavior diverges from intent.",
+            "- Apply the narrowest change in the identified medium, then validate the primary bug path and neighboring transitions.",
+            "- Preserve or add regression coverage when the fix lands in source code.",
+        ]
+    )
+    if doc_context:
+        lines.extend(["", "## Reference Snippets", doc_context])
+    if code_context:
+        lines.extend(["", "## Source Snippets", code_context])
+    if blueprint_context:
+        lines.extend(["", "## Blueprint Context", blueprint_context])
+    return "\n".join(lines)
+
+
+def _compose_blueprint_fix_instructions(
+    task_prompt: str,
+    implementation_medium: str,
+    blueprint_hits: list[str],
+    blueprint_text_hits: list[str],
+    blueprint_fix_strategy: str,
+    bug_context_doc: str,
+    blueprint_context: str,
+) -> str:
+    lines = [
+        "# Blueprint Fix Instructions",
+        "",
+        f"Task Prompt: {task_prompt}",
+        f"Implementation Medium: {implementation_medium}",
+        f"Fix Strategy: {blueprint_fix_strategy}",
+        "",
+        "## Target Assets",
+    ]
+    if blueprint_hits:
+        lines.extend(f"- {item}" for item in blueprint_hits)
+    else:
+        lines.append("- No concrete Blueprint asset path was matched; start from the bug context and search the owning gameplay asset.")
+
+    lines.extend(["", "## Readable Blueprint Context"])
+    if blueprint_text_hits:
+        lines.extend(f"- Companion export: {item}" for item in blueprint_text_hits)
+    else:
+        lines.append("- No readable Blueprint companion export was available. Treat the `.uasset` as editor-only data.")
+
+    lines.extend(
+        [
+            "",
+            "## Recommended Change",
+            "- Open the matched Blueprint asset and inspect the event graph, state transition, or gameplay function named by the bug context.",
+            "- Align the failing branch, gate, or timing condition with the intended gameplay behavior described in the task prompt.",
+            "- Preserve adjacent transitions and add debug breadcrumbs or comments in any exported companion text when the project supports that workflow.",
+            "",
+            "## Validation",
+            "- Reproduce the original gameplay bug before editing so the failing behavior is explicit.",
+            "- Re-run the same gameplay path after the change and verify adjacent states, inputs, and timing windows still behave correctly.",
+            "- If source code also changed, run the automated tests for the code-side portion of the fix.",
+        ]
+    )
+    if bug_context_doc:
+        lines.extend(["", "## Bug Context", bug_context_doc])
+    if blueprint_context:
+        lines.extend(["", "## Blueprint Context", blueprint_context])
     return "\n".join(lines)
 
 
@@ -256,6 +473,58 @@ def _render_plan_doc(sections: dict[str, list[str]]) -> str:
             lines.append(f"- {REQUIRED_PLAN_SECTIONS[section]}")
         lines.append("")
     return "\n".join(lines).rstrip()
+
+
+def _workspace_roots_exist(scope_root: Path, relative_roots: tuple[str, ...]) -> bool:
+    return any((scope_root / relative_root).exists() for relative_root in relative_roots)
+
+
+def _build_workspace_target(
+    task_id: str,
+    hits: list[str],
+    relative_roots: tuple[str, ...],
+    *,
+    prefix: str,
+) -> str:
+    task_slug = slugify(task_id, fallback="gameplay-task").replace("-", "_")
+    if hits:
+        anchor = Path(hits[0])
+        return (anchor.parent / f"{prefix}_{task_slug}.py").as_posix()
+    base_root = Path(relative_roots[0] if relative_roots else ("tests" if prefix.startswith("test") else "src"))
+    return (base_root / f"{prefix}_{task_slug}.py").as_posix()
+
+
+def _resolve_workspace_targets(
+    task_id: str,
+    scope_root: Path,
+    source_hits: list[str],
+    test_hits: list[str],
+    source_roots: tuple[str, ...],
+    test_roots: tuple[str, ...],
+    *,
+    allow_workspace_writes: bool,
+) -> tuple[str, str]:
+    if not allow_workspace_writes:
+        return "", ""
+
+    source_file = _build_workspace_target(task_id, source_hits, source_roots, prefix="agentswarm_gameplay_change")
+    test_file = _build_workspace_target(task_id, test_hits, test_roots, prefix="test_agentswarm_gameplay_change")
+
+    # Keep the generated files inside the selected workspace scope.
+    for relative_path in [source_file, test_file]:
+        resolved_path = (scope_root / relative_path).resolve()
+        resolved_path.relative_to(scope_root.resolve())
+
+    return source_file, test_file
+
+
+def _write_workspace_file(scope_root: Path, relative_path: str, content: str) -> str:
+    resolved_root = scope_root.resolve()
+    target_path = (resolved_root / relative_path).resolve()
+    target_path.relative_to(resolved_root)
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    target_path.write_text(content, encoding="utf-8")
+    return str(target_path)
 
 
 def _revise_plan(
@@ -443,8 +712,12 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
     graph_name = metadata.name
     reviewer_graph = context.get_workflow_graph("gameplay-reviewer-workflow")
     tool_subgraphs = context.register_tools(metadata.tools, EngineerState)
+    blueprint_search_tool_name = context.get_tool("find-gameplay-blueprints").metadata.qualified_name
     doc_search_tool_name = context.get_tool("find-gameplay-docs").metadata.qualified_name
+    blueprint_context_tool_name = context.get_tool("load-blueprint-context").metadata.qualified_name
     doc_context_tool_name = context.get_tool("load-markdown-context").metadata.qualified_name
+    code_search_tool_name = context.get_tool("find-gameplay-code").metadata.qualified_name
+    code_context_tool_name = context.get_tool("load-source-context").metadata.qualified_name
     tool_node_names = {
         tool_name: to_graph_node_name(tool_name)
         for tool_name in tool_subgraphs
@@ -483,6 +756,28 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
         return {
             "task_type": task_type,
             "task_type_reason": task_type_reason,
+            "execution_track": task_type,
+            "requires_architecture_review": task_type == "feature",
+            "doc_hits": [],
+            "doc_scope": "host_project",
+            "doc_context": "",
+            "source_hits": [],
+            "test_hits": [],
+            "code_scope": "host_project",
+            "code_context": "",
+            "blueprint_hits": [],
+            "blueprint_text_hits": [],
+            "blueprint_scope": "host_project",
+            "blueprint_context": "",
+            "blueprint_editable_targets": [],
+            "implementation_medium": "",
+            "implementation_medium_reason": "",
+            "blueprint_fix_strategy": "not-applicable",
+            "blueprint_manual_action_required": False,
+            "workspace_source_file": "",
+            "workspace_test_file": "",
+            "workspace_write_enabled": False,
+            "workspace_write_summary": "",
             "review_round": 0,
             "review_score": 0,
             "review_feedback": "",
@@ -492,6 +787,16 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
             "review_improvement_actions": [],
             "review_approved": False,
             "code_attempt": 0,
+            "design_doc": "",
+            "bug_context_doc": "",
+            "architecture_plan_doc": "",
+            "plan_doc": "",
+            "generated_code": "",
+            "generated_tests": "",
+            "implementation_notes": "",
+            "compile_ok": False,
+            "tests_ok": False,
+            "test_output": "",
             "artifact_dir": str(artifact_dir),
         }
 
@@ -559,12 +864,251 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
             "pending_tool_call_id": "",
         }
 
+    def prepare_code_search(state: EngineerState) -> dict[str, Any]:
+        tool_name = code_search_tool_name
+        call_id = _build_tool_call_id(state, tool_name)
+        return {
+            "pending_tool_name": tool_name,
+            "pending_tool_call_id": call_id,
+            "messages": [
+                build_tool_call_message(
+                    tool_name,
+                    {"task_prompt": state["task_prompt"], "scope": "host_project"},
+                    call_id,
+                    content="Find the host-project source and test files most relevant to this task.",
+                )
+            ],
+        }
+
+    def capture_code_hits(state: EngineerState) -> dict[str, Any]:
+        artifact = _extract_tool_artifact(state, code_search_tool_name)
+        raw_source_hits = artifact.get("source_hits", [])
+        raw_test_hits = artifact.get("test_hits", [])
+        source_hits = [str(item) for item in raw_source_hits] if isinstance(raw_source_hits, list) else []
+        test_hits = [str(item) for item in raw_test_hits] if isinstance(raw_test_hits, list) else []
+        code_scope = str(artifact.get("scope") or "host_project")
+        scope_root = context.resolve_scope_root("agentswarm" if code_scope == "agentswarm" else "host_project")
+        workspace_write_enabled = (
+            code_scope == "host_project"
+            and _workspace_roots_exist(scope_root, context.config.source_roots)
+        )
+        workspace_source_file, workspace_test_file = _resolve_workspace_targets(
+            task_id=state["task_id"],
+            scope_root=scope_root,
+            source_hits=source_hits,
+            test_hits=test_hits,
+            source_roots=context.config.source_roots,
+            test_roots=context.config.test_roots,
+            allow_workspace_writes=workspace_write_enabled,
+        )
+        workspace_write_summary = (
+            "Workflow will write generated code into the host project source/test roots."
+            if workspace_write_enabled
+            else "No host-project source/test roots were available, so generated code will stay in workflow artifacts."
+        )
+        return {
+            "source_hits": source_hits,
+            "test_hits": test_hits,
+            "code_scope": code_scope,
+            "workspace_source_file": workspace_source_file,
+            "workspace_test_file": workspace_test_file,
+            "workspace_write_enabled": workspace_write_enabled,
+            "workspace_write_summary": workspace_write_summary,
+            "pending_tool_name": "",
+            "pending_tool_call_id": "",
+        }
+
+    def prepare_code_context_lookup(state: EngineerState) -> dict[str, Any]:
+        tool_name = code_context_tool_name
+        call_id = _build_tool_call_id(state, tool_name)
+        file_paths = [*state["source_hits"], *state["test_hits"]]
+        return {
+            "pending_tool_name": tool_name,
+            "pending_tool_call_id": call_id,
+            "messages": [
+                build_tool_call_message(
+                    tool_name,
+                    {"file_paths": file_paths, "max_chars": 4000, "scope": state["code_scope"]},
+                    call_id,
+                    content="Load source snippets for the matched gameplay code and tests.",
+                )
+            ],
+        }
+
+    def capture_code_context(state: EngineerState) -> dict[str, Any]:
+        artifact = _extract_tool_artifact(state, code_context_tool_name)
+        code_context = str(artifact.get("code_context") or "")
+        return {
+            "code_context": code_context,
+            "pending_tool_name": "",
+            "pending_tool_call_id": "",
+        }
+
+    def prepare_blueprint_search(state: EngineerState) -> dict[str, Any]:
+        tool_name = blueprint_search_tool_name
+        call_id = _build_tool_call_id(state, tool_name)
+        return {
+            "pending_tool_name": tool_name,
+            "pending_tool_call_id": call_id,
+            "messages": [
+                build_tool_call_message(
+                    tool_name,
+                    {"task_prompt": state["task_prompt"], "scope": "host_project"},
+                    call_id,
+                    content="Find Blueprint assets and companion text relevant to this gameplay task.",
+                )
+            ],
+        }
+
+    def capture_blueprint_hits(state: EngineerState) -> dict[str, Any]:
+        artifact = _extract_tool_artifact(state, blueprint_search_tool_name)
+        raw_blueprint_hits = artifact.get("blueprint_hits", [])
+        blueprint_hits: list[str] = []
+        blueprint_text_hits: list[str] = []
+        blueprint_editable_targets: list[str] = []
+        if isinstance(raw_blueprint_hits, list):
+            for item in raw_blueprint_hits:
+                if not isinstance(item, dict):
+                    continue
+                asset_path = str(item.get("asset_path") or "").strip()
+                if asset_path:
+                    blueprint_hits.append(asset_path)
+                companion_paths = item.get("companion_paths", [])
+                if isinstance(companion_paths, list):
+                    for companion_path in companion_paths:
+                        companion_value = str(companion_path).strip()
+                        if companion_value and companion_value not in blueprint_text_hits:
+                            blueprint_text_hits.append(companion_value)
+                            blueprint_editable_targets.append(companion_value)
+        blueprint_scope = str(artifact.get("scope") or "host_project")
+        return {
+            "blueprint_hits": blueprint_hits,
+            "blueprint_text_hits": blueprint_text_hits,
+            "blueprint_editable_targets": blueprint_editable_targets,
+            "blueprint_scope": blueprint_scope,
+            "pending_tool_name": "",
+            "pending_tool_call_id": "",
+        }
+
+    def prepare_blueprint_context_lookup(state: EngineerState) -> dict[str, Any]:
+        tool_name = blueprint_context_tool_name
+        call_id = _build_tool_call_id(state, tool_name)
+        return {
+            "pending_tool_name": tool_name,
+            "pending_tool_call_id": call_id,
+            "messages": [
+                build_tool_call_message(
+                    tool_name,
+                    {
+                        "asset_paths": state["blueprint_hits"],
+                        "max_chars": 4000,
+                        "scope": state["blueprint_scope"],
+                    },
+                    call_id,
+                    content="Load readable Blueprint context and note whether direct text editing is available.",
+                )
+            ],
+        }
+
+    def capture_blueprint_context(state: EngineerState) -> dict[str, Any]:
+        artifact = _extract_tool_artifact(state, blueprint_context_tool_name)
+        blueprint_context = str(artifact.get("blueprint_context") or "")
+        asset_contexts = artifact.get("asset_contexts", [])
+        editable_targets = list(state["blueprint_editable_targets"])
+        if isinstance(asset_contexts, list):
+            for item in asset_contexts:
+                if not isinstance(item, dict):
+                    continue
+                loaded_companion_path = str(item.get("loaded_companion_path") or "").strip()
+                if loaded_companion_path and loaded_companion_path not in editable_targets:
+                    editable_targets.append(loaded_companion_path)
+        return {
+            "blueprint_context": blueprint_context,
+            "blueprint_editable_targets": editable_targets,
+            "pending_tool_name": "",
+            "pending_tool_call_id": "",
+        }
+
+    def assess_implementation_strategy(state: EngineerState) -> dict[str, Any]:
+        implementation_medium, implementation_medium_reason = _fallback_implementation_medium(
+            task_prompt=state["task_prompt"],
+            source_hits=state["source_hits"],
+            test_hits=state["test_hits"],
+            blueprint_hits=state["blueprint_hits"],
+        )
+
+        if default_llm.is_enabled():
+            schema = {
+                "type": "object",
+                "properties": {
+                    "implementation_medium": {"type": "string", "enum": ["cpp", "blueprint", "mixed"]},
+                    "reason": {"type": "string"},
+                },
+                "required": ["implementation_medium", "reason"],
+                "additionalProperties": False,
+            }
+            try:
+                result = default_llm.generate_json(
+                    instructions=(
+                        "You are gameplay-engineer-workflow. Decide whether the gameplay work should primarily be "
+                        "handled in C++/code, Blueprint, or a mixed implementation. Prefer mixed only when both "
+                        "code and Blueprint evidence are materially relevant."
+                    ),
+                    input_text=(
+                        f"Task prompt:\n{state['task_prompt']}\n\n"
+                        f"Task type: {state['task_type']}\n\n"
+                        f"Source hits:\n{state['source_hits']}\n\n"
+                        f"Test hits:\n{state['test_hits']}\n\n"
+                        f"Blueprint hits:\n{state['blueprint_hits']}\n\n"
+                        f"Blueprint context:\n{state['blueprint_context'] or 'No readable Blueprint context.'}\n\n"
+                        f"Code context:\n{state['code_context'] or 'No matching source files.'}"
+                    ),
+                    schema_name="gameplay_implementation_medium",
+                    schema=schema,
+                )
+                implementation_medium = str(result["implementation_medium"])
+                implementation_medium_reason = str(result["reason"])
+            except LLMError:
+                pass
+
+        blueprint_fix_strategy = "not-applicable"
+        blueprint_manual_action_required = False
+        if implementation_medium in {"blueprint", "mixed"}:
+            blueprint_manual_action_required = True
+            blueprint_fix_strategy = (
+                "adjacent_patch_artifact"
+                if state["blueprint_editable_targets"]
+                else "instructions_only"
+            )
+
+        return {
+            "implementation_medium": implementation_medium,
+            "implementation_medium_reason": implementation_medium_reason,
+            "blueprint_fix_strategy": blueprint_fix_strategy,
+            "blueprint_manual_action_required": blueprint_manual_action_required,
+        }
+
+    def route_execution_track(state: EngineerState) -> str:
+        if state["execution_track"] == "feature":
+            return "build_design_doc"
+        return "build_bug_context_doc"
+
     def build_design_doc(state: EngineerState) -> dict[str, Any]:
         design_doc = _compose_design_doc(
             state["task_prompt"],
             state["task_type"],
+            state["implementation_medium"],
+            state["implementation_medium_reason"],
             state["doc_hits"],
             state["doc_context"],
+            state["source_hits"],
+            state["test_hits"],
+            state["code_context"],
+            state["blueprint_hits"],
+            state["blueprint_text_hits"],
+            state["blueprint_context"],
+            state["workspace_source_file"],
+            state["workspace_test_file"],
         )
         if default_llm.is_enabled():
             try:
@@ -579,7 +1123,16 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
                         f"Task type: {state['task_type']}\n"
                         f"Classification reason: {state['task_type_reason']}\n\n"
                         f"Doc hits:\n{state['doc_hits']}\n\n"
-                        f"Doc context:\n{state['doc_context'] or 'No matching docs.'}"
+                        f"Doc context:\n{state['doc_context'] or 'No matching docs.'}\n\n"
+                        f"Source hits:\n{state['source_hits']}\n\n"
+                        f"Test hits:\n{state['test_hits']}\n\n"
+                        f"Blueprint hits:\n{state['blueprint_hits']}\n\n"
+                        f"Implementation medium: {state['implementation_medium']}\n"
+                        f"Implementation medium reason: {state['implementation_medium_reason']}\n\n"
+                        f"Workspace targets:\nSource={state['workspace_source_file'] or 'artifact-only'}\n"
+                        f"Test={state['workspace_test_file'] or 'artifact-only'}\n\n"
+                        f"Code context:\n{state['code_context'] or 'No matching source files.'}\n\n"
+                        f"Blueprint context:\n{state['blueprint_context'] or 'No readable Blueprint context.'}"
                     ),
                 )
             except LLMError:
@@ -589,15 +1142,60 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
         (artifact_dir / "design_doc.md").write_text(design_doc, encoding="utf-8")
         return {"design_doc": design_doc}
 
+    def build_bug_context_doc(state: EngineerState) -> dict[str, Any]:
+        bug_context_doc = _compose_bug_context_doc(
+            task_prompt=state["task_prompt"],
+            implementation_medium=state["implementation_medium"],
+            implementation_medium_reason=state["implementation_medium_reason"],
+            doc_hits=state["doc_hits"],
+            source_hits=state["source_hits"],
+            test_hits=state["test_hits"],
+            blueprint_hits=state["blueprint_hits"],
+            blueprint_text_hits=state["blueprint_text_hits"],
+            blueprint_fix_strategy=state["blueprint_fix_strategy"],
+            doc_context=state["doc_context"],
+            code_context=state["code_context"],
+            blueprint_context=state["blueprint_context"],
+        )
+        if default_llm.is_enabled():
+            try:
+                bug_context_doc = default_llm.generate_text(
+                    instructions=(
+                        "You are gameplay-engineer-workflow. Write a concise markdown bug investigation brief. "
+                        "Include sections: Bug Summary, Current Signals, Likely Ownership, Fix Strategy, Validation. "
+                        "Focus on the reproduction context and whether the bug belongs to code, Blueprint, or both."
+                    ),
+                    input_text=(
+                        f"Task prompt:\n{state['task_prompt']}\n\n"
+                        f"Task type reason: {state['task_type_reason']}\n\n"
+                        f"Implementation medium: {state['implementation_medium']}\n"
+                        f"Implementation medium reason: {state['implementation_medium_reason']}\n\n"
+                        f"Source hits:\n{state['source_hits']}\n\n"
+                        f"Test hits:\n{state['test_hits']}\n\n"
+                        f"Blueprint hits:\n{state['blueprint_hits']}\n\n"
+                        f"Blueprint fix strategy: {state['blueprint_fix_strategy']}\n\n"
+                        f"Doc context:\n{state['doc_context'] or 'No matching docs.'}\n\n"
+                        f"Code context:\n{state['code_context'] or 'No matching source files.'}\n\n"
+                        f"Blueprint context:\n{state['blueprint_context'] or 'No readable Blueprint context.'}"
+                    ),
+                )
+            except LLMError:
+                pass
+
+        artifact_dir = Path(state["artifact_dir"])
+        (artifact_dir / "bug_context.md").write_text(bug_context_doc, encoding="utf-8")
+        return {"bug_context_doc": bug_context_doc}
+
     def plan_work(state: EngineerState) -> dict[str, Any]:
         plan_doc = _compose_initial_plan(state["task_prompt"], state["task_type"], state["doc_hits"])
         if default_llm.is_enabled():
             try:
                 plan_doc = default_llm.generate_text(
                     instructions=(
-                        "You are gameplay-engineer-workflow. Produce a markdown implementation plan for gameplay work. "
+                        "You are gameplay-engineer-workflow. Produce a markdown architecture and implementation plan for gameplay work. "
                         "The document must contain these exact sections: Overview, Task Type, Existing Docs, Implementation Steps, "
-                        "Unit Tests, Risks, Acceptance Criteria. Each section must have concrete bullets that are specific enough "
+                        "Unit Tests, Risks, Acceptance Criteria. Treat it as the architecture approval document for new gameplay features. "
+                        "Each section must have concrete bullets that are specific enough "
                         f"to pass a reviewer rubric with an approval bar of {REVIEW_APPROVAL_SCORE}/100."
                     ),
                     input_text=(
@@ -605,7 +1203,17 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
                         f"Task type: {state['task_type']}\n"
                         f"Task type reason: {state['task_type_reason']}\n\n"
                         f"Design doc:\n{state['design_doc']}\n\n"
-                        f"Relevant docs:\n{state['doc_context'] or 'No matching docs.'}"
+                        f"Relevant docs:\n{state['doc_context'] or 'No matching docs.'}\n\n"
+                        f"Relevant source files:\n{state['source_hits']}\n\n"
+                        f"Relevant test files:\n{state['test_hits']}\n\n"
+                        f"Blueprint hits:\n{state['blueprint_hits']}\n\n"
+                        f"Implementation medium: {state['implementation_medium']}\n"
+                        f"Blueprint fix strategy: {state['blueprint_fix_strategy']}\n\n"
+                        f"Workspace write mode: {state['workspace_write_summary']}\n"
+                        f"Workspace targets: source={state['workspace_source_file'] or 'artifact-only'}, "
+                        f"test={state['workspace_test_file'] or 'artifact-only'}\n\n"
+                        f"Code context:\n{state['code_context'] or 'No matching source files.'}\n\n"
+                        f"Blueprint context:\n{state['blueprint_context'] or 'No readable Blueprint context.'}"
                     ),
                 )
             except LLMError:
@@ -613,7 +1221,8 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
 
         artifact_dir = Path(state["artifact_dir"])
         (artifact_dir / "plan_doc.md").write_text(plan_doc, encoding="utf-8")
-        return {"plan_doc": plan_doc}
+        (artifact_dir / "architecture_plan.md").write_text(plan_doc, encoding="utf-8")
+        return {"plan_doc": plan_doc, "architecture_plan_doc": plan_doc}
 
     def request_review(state: EngineerState) -> dict[str, Any]:
         review_round = state["review_round"] + 1
@@ -730,6 +1339,13 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
                         f"Task type: {state['task_type']}\n"
                         f"Task type reason: {state['task_type_reason']}\n\n"
                         f"Current plan:\n{state['plan_doc']}\n\n"
+                        f"Relevant source files:\n{state['source_hits']}\n\n"
+                        f"Relevant test files:\n{state['test_hits']}\n\n"
+                        f"Workspace write mode: {state['workspace_write_summary']}\n"
+                        f"Workspace targets: source={state['workspace_source_file'] or 'artifact-only'}, "
+                        f"test={state['workspace_test_file'] or 'artifact-only'}\n\n"
+                        f"Code context:\n{state['code_context'] or 'No matching source files.'}\n\n"
+                        f"Blueprint context:\n{state['blueprint_context'] or 'No readable Blueprint context.'}\n\n"
                         f"Per-section review results:\n{state['review_section_reviews']}\n\n"
                         f"Blocking issues:\n{state['review_blocking_issues']}\n\n"
                         f"Improvement checklist:\n{state['review_improvement_actions']}\n\n"
@@ -742,7 +1358,65 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
 
         artifact_dir = Path(state["artifact_dir"])
         (artifact_dir / "plan_doc.md").write_text(revised_plan, encoding="utf-8")
-        return {"plan_doc": revised_plan}
+        (artifact_dir / "architecture_plan.md").write_text(revised_plan, encoding="utf-8")
+        return {"plan_doc": revised_plan, "architecture_plan_doc": revised_plan}
+
+    def _persist_generated_bundle(state: EngineerState, bundle: dict[str, str]) -> str:
+        artifact_dir = Path(state["artifact_dir"])
+        (artifact_dir / "gameplay_change.py").write_text(bundle["source_code"], encoding="utf-8")
+        (artifact_dir / "test_gameplay_change.py").write_text(bundle["test_code"], encoding="utf-8")
+
+        if not state["workspace_write_enabled"]:
+            summary = "Generated code was saved to workflow artifacts only."
+            (artifact_dir / "workspace_write_manifest.md").write_text(summary, encoding="utf-8")
+            return summary
+
+        workspace_root = context.resolve_scope_root("agentswarm" if state["code_scope"] == "agentswarm" else "host_project")
+        source_target = _write_workspace_file(workspace_root, state["workspace_source_file"], bundle["source_code"])
+        test_target = _write_workspace_file(workspace_root, state["workspace_test_file"], bundle["test_code"])
+        manifest_lines = [
+            "# Workspace Write Manifest",
+            "",
+            f"- Source file: {source_target}",
+            f"- Test file: {test_target}",
+        ]
+        (artifact_dir / "workspace_write_manifest.md").write_text("\n".join(manifest_lines), encoding="utf-8")
+        return f"Generated code was written to host project files: {source_target}, {test_target}."
+
+    def _persist_blueprint_instructions(state: EngineerState, instructions_doc: str) -> str:
+        artifact_dir = Path(state["artifact_dir"])
+        artifact_path = artifact_dir / "blueprint_fix_instructions.md"
+        artifact_path.write_text(instructions_doc, encoding="utf-8")
+
+        if not state["blueprint_editable_targets"]:
+            return (
+                "Blueprint fix instructions were saved to workflow artifacts only. "
+                "Manual Unreal Editor changes are still required because no readable Blueprint export was available."
+            )
+
+        workspace_root = context.resolve_scope_root(
+            "agentswarm" if state["blueprint_scope"] == "agentswarm" else "host_project"
+        )
+        patch_paths: list[str] = []
+        for relative_path in state["blueprint_editable_targets"]:
+            target_path = Path(relative_path)
+            patch_relative_path = (
+                target_path.parent / f"{target_path.stem}.agentswarm_fix.md"
+            ).as_posix()
+            patch_paths.append(_write_workspace_file(workspace_root, patch_relative_path, instructions_doc))
+
+        manifest_lines = [
+            "# Blueprint Fix Manifest",
+            "",
+            f"- Artifact instructions: {artifact_path}",
+            *[f"- Adjacent patch note: {item}" for item in patch_paths],
+        ]
+        (artifact_dir / "blueprint_fix_manifest.md").write_text("\n".join(manifest_lines), encoding="utf-8")
+        return (
+            "Blueprint fix instructions were saved to workflow artifacts and adjacent patch notes: "
+            + ", ".join(patch_paths)
+            + ". Manual Unreal Editor application is still required for the underlying `.uasset`."
+        )
 
     def _generate_code_bundle(state: EngineerState, error_context: str = "") -> dict[str, str]:
         fallback = _fallback_code_bundle(state["task_prompt"], state["task_type"], state["code_attempt"] + 1)
@@ -766,13 +1440,26 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
                     "You are gameplay-engineer-workflow code generation. Return Python source code and Python tests. "
                     "Do not use markdown fences. The source file must define build_gameplay_change_summary() -> dict. "
                     "The returned dict must include task_type, implementation_status set to 'ready-for-review', and unit_tests. "
-                    "The test file must be plain Python with assert statements and no external dependencies."
+                    "The test file must be plain Python with assert statements and no external dependencies. "
+                    "Ground the implementation in the provided host-project code context and workspace targets."
                 ),
                 input_text=(
                     f"Task prompt:\n{state['task_prompt']}\n\n"
+                    f"Execution track: {state['execution_track']}\n"
                     f"Task type: {state['task_type']}\n\n"
+                    f"Implementation medium: {state['implementation_medium']}\n"
+                    f"Implementation medium reason: {state['implementation_medium_reason']}\n\n"
                     f"Design doc:\n{state['design_doc']}\n\n"
+                    f"Bug context:\n{state['bug_context_doc'] or 'No dedicated bug context doc.'}\n\n"
                     f"Implementation plan:\n{state['plan_doc']}\n\n"
+                    f"Relevant source files:\n{state['source_hits']}\n\n"
+                    f"Relevant test files:\n{state['test_hits']}\n\n"
+                    f"Relevant Blueprint assets:\n{state['blueprint_hits']}\n\n"
+                    f"Workspace write mode: {state['workspace_write_summary']}\n"
+                    f"Workspace targets: source={state['workspace_source_file'] or 'artifact-only'}, "
+                    f"test={state['workspace_test_file'] or 'artifact-only'}\n\n"
+                    f"Code context:\n{state['code_context'] or 'No matching source files.'}\n\n"
+                    f"Blueprint context:\n{state['blueprint_context'] or 'No readable Blueprint context.'}\n\n"
                     f"Reviewer feedback:\n{state['review_feedback']}\n\n"
                     f"Previous self-test output:\n{error_context or 'None'}"
                 ),
@@ -792,18 +1479,86 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
             "implementation_notes": str(result["implementation_notes"]).strip() or "Codex generated the code bundle.",
         }
 
+    def _generate_blueprint_fix_doc(state: EngineerState) -> str:
+        instructions_doc = _compose_blueprint_fix_instructions(
+            task_prompt=state["task_prompt"],
+            implementation_medium=state["implementation_medium"],
+            blueprint_hits=state["blueprint_hits"],
+            blueprint_text_hits=state["blueprint_text_hits"],
+            blueprint_fix_strategy=state["blueprint_fix_strategy"],
+            bug_context_doc=state["bug_context_doc"],
+            blueprint_context=state["blueprint_context"],
+        )
+        if default_llm.is_enabled():
+            try:
+                instructions_doc = default_llm.generate_text(
+                    instructions=(
+                        "You are gameplay-engineer-workflow. Write a markdown Blueprint fix handoff. "
+                        "Be explicit about target assets, the likely graph or state to inspect, the intended change, "
+                        "and the manual validation steps. Do not claim the `.uasset` was edited directly."
+                    ),
+                    input_text=(
+                        f"Task prompt:\n{state['task_prompt']}\n\n"
+                        f"Execution track: {state['execution_track']}\n"
+                        f"Implementation medium: {state['implementation_medium']}\n"
+                        f"Fix strategy: {state['blueprint_fix_strategy']}\n\n"
+                        f"Bug context:\n{state['bug_context_doc'] or 'No dedicated bug context doc.'}\n\n"
+                        f"Blueprint hits:\n{state['blueprint_hits']}\n\n"
+                        f"Readable Blueprint context:\n{state['blueprint_context'] or 'No readable Blueprint context.'}\n\n"
+                        f"Code context:\n{state['code_context'] or 'No matching source files.'}"
+                    ),
+                )
+            except LLMError:
+                pass
+        return instructions_doc
+
     def implement_code(state: EngineerState) -> dict[str, Any]:
-        bundle = _generate_code_bundle(state)
         code_attempt = state["code_attempt"] + 1
-        artifact_dir = Path(state["artifact_dir"])
-        (artifact_dir / "gameplay_change.py").write_text(bundle["source_code"], encoding="utf-8")
-        (artifact_dir / "test_gameplay_change.py").write_text(bundle["test_code"], encoding="utf-8")
+        implementation_notes: list[str] = []
+        workspace_summaries: list[str] = []
+        generated_code = ""
+        generated_tests = ""
+
+        if state["implementation_medium"] != "blueprint":
+            bundle = _generate_code_bundle(state)
+            generated_code = bundle["source_code"]
+            generated_tests = bundle["test_code"]
+            implementation_notes.append(bundle["implementation_notes"])
+            workspace_summaries.append(_persist_generated_bundle(state, bundle))
+
+        if state["implementation_medium"] in {"blueprint", "mixed"}:
+            blueprint_doc = _generate_blueprint_fix_doc(state)
+            workspace_summaries.append(_persist_blueprint_instructions(state, blueprint_doc))
+            implementation_notes.append(
+                "Blueprint fix instructions were generated for manual application in the Unreal Editor."
+            )
+
+        compile_ok = False
+        tests_ok = False
+        test_output = ""
+        if generated_code and generated_tests:
+            test_output = "Awaiting source-code self-test."
+        elif state["implementation_medium"] == "blueprint":
+            test_output = (
+                "No automated compile/test harness is available for binary Blueprint assets. "
+                "Manual Unreal Editor validation is required."
+            )
+
         return {
             "code_attempt": code_attempt,
-            "generated_code": bundle["source_code"],
-            "generated_tests": bundle["test_code"],
-            "implementation_notes": bundle["implementation_notes"],
+            "generated_code": generated_code,
+            "generated_tests": generated_tests,
+            "implementation_notes": " ".join(note for note in implementation_notes if note).strip(),
+            "workspace_write_summary": " ".join(summary for summary in workspace_summaries if summary).strip(),
+            "compile_ok": compile_ok,
+            "tests_ok": tests_ok,
+            "test_output": test_output,
         }
+
+    def post_implementation_gate(state: EngineerState) -> str:
+        if state["generated_code"].strip() and state["generated_tests"].strip():
+            return "self_test"
+        return "prepare_delivery"
 
     def self_test(state: EngineerState) -> dict[str, Any]:
         compile_ok, tests_ok, test_output = _run_compile_and_tests(state["generated_code"], state["generated_tests"])
@@ -823,14 +1578,20 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
     def repair_code(state: EngineerState) -> dict[str, Any]:
         bundle = _generate_code_bundle(state, error_context=state["test_output"])
         code_attempt = state["code_attempt"] + 1
-        artifact_dir = Path(state["artifact_dir"])
-        (artifact_dir / "gameplay_change.py").write_text(bundle["source_code"], encoding="utf-8")
-        (artifact_dir / "test_gameplay_change.py").write_text(bundle["test_code"], encoding="utf-8")
+        workspace_summaries = [_persist_generated_bundle(state, bundle)]
+        implementation_notes = [bundle["implementation_notes"]]
+        if state["implementation_medium"] == "mixed":
+            blueprint_doc = _generate_blueprint_fix_doc(state)
+            workspace_summaries.append(_persist_blueprint_instructions(state, blueprint_doc))
+            implementation_notes.append(
+                "Blueprint fix instructions were regenerated so the mixed implementation handoff stays aligned."
+            )
         return {
             "code_attempt": code_attempt,
             "generated_code": bundle["source_code"],
             "generated_tests": bundle["test_code"],
-            "implementation_notes": bundle["implementation_notes"],
+            "implementation_notes": " ".join(note for note in implementation_notes if note).strip(),
+            "workspace_write_summary": " ".join(summary for summary in workspace_summaries if summary).strip(),
         }
 
     def prepare_delivery(state: EngineerState) -> dict[str, Any]:
@@ -839,16 +1600,28 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
         if state["task_type"] == "bugfix":
             commit_message = f"fix(gameplay): resolve {state['task_id']}"
         pr_title = f"[Gameplay] {state['task_prompt']}"
+        delivery_status = "completed"
+        if state["implementation_medium"] == "blueprint":
+            delivery_status = "manual-validation-required"
         pr_body = "\n".join(
             [
                 "# Pull Request Draft",
                 "",
                 f"Workflow: {metadata.name}",
                 f"Task: {state['task_prompt']}",
+                f"Execution track: {state['execution_track']}",
+                f"Requires architecture review: {state['requires_architecture_review']}",
                 f"Review score: {state['review_score']}",
                 f"Review approved: {state['review_approved']}",
                 f"Task type rationale: {state['task_type_reason']}",
+                f"Implementation medium: {state['implementation_medium']}",
+                f"Implementation medium rationale: {state['implementation_medium_reason']}",
+                f"Blueprint fix strategy: {state['blueprint_fix_strategy']}",
+                f"Blueprint manual action required: {state['blueprint_manual_action_required']}",
                 f"Implementation notes: {state['implementation_notes']}",
+                f"Workspace write mode: {state['workspace_write_summary']}",
+                f"Workspace source target: {state['workspace_source_file'] or 'artifact-only'}",
+                f"Workspace test target: {state['workspace_test_file'] or 'artifact-only'}",
                 "",
                 "## Validation",
                 f"- {state['test_output']}",
@@ -858,23 +1631,40 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
         (artifact_dir / "pull_request.md").write_text(pr_body, encoding="utf-8")
 
         final_report = {
-            "status": "completed",
+            "status": delivery_status,
             "task_type": state["task_type"],
+            "execution_track": state["execution_track"],
+            "requires_architecture_review": state["requires_architecture_review"],
             "review_rounds": state["review_round"],
             "review_score": state["review_score"],
             "review_approved": state["review_approved"],
             "compile_ok": state["compile_ok"],
             "tests_ok": state["tests_ok"],
+            "implementation_medium": state["implementation_medium"],
+            "implementation_medium_reason": state["implementation_medium_reason"],
+            "blueprint_hits": state["blueprint_hits"],
+            "blueprint_fix_strategy": state["blueprint_fix_strategy"],
+            "blueprint_manual_action_required": state["blueprint_manual_action_required"],
             "commit_message": commit_message,
             "pr_title": pr_title,
             "artifact_dir": str(artifact_dir),
+            "workspace_write_enabled": state["workspace_write_enabled"],
+            "workspace_source_file": state["workspace_source_file"],
+            "workspace_test_file": state["workspace_test_file"],
+            "workspace_write_summary": state["workspace_write_summary"],
             "llm_profile": context.llm_manager.describe(metadata.llm_profile),
             "codegen_profile": context.llm_manager.describe("codegen"),
         }
-        summary = (
-            f"{metadata.name} completed {state['task_type']} flow in "
-            f"{state['review_round']} review round(s) and {state['code_attempt']} code attempt(s)."
-        )
+        if delivery_status == "manual-validation-required":
+            summary = (
+                f"{metadata.name} prepared a manual Blueprint validation handoff for the {state['execution_track']} "
+                f"track after {state['review_round']} review round(s) and {state['code_attempt']} implementation attempt(s)."
+            )
+        else:
+            summary = (
+                f"{metadata.name} completed the {state['execution_track']} track in "
+                f"{state['review_round']} review round(s) and {state['code_attempt']} implementation attempt(s)."
+            )
         return {"final_report": final_report, "summary": summary}
 
     def prepare_review_blocked_delivery(state: EngineerState) -> dict[str, Any]:
@@ -906,12 +1696,23 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
         final_report = {
             "status": "review-blocked",
             "task_type": state["task_type"],
+            "execution_track": state["execution_track"],
+            "requires_architecture_review": state["requires_architecture_review"],
             "review_rounds": state["review_round"],
             "review_score": state["review_score"],
             "review_approved": state["review_approved"],
             "compile_ok": False,
             "tests_ok": False,
+            "implementation_medium": state["implementation_medium"],
+            "implementation_medium_reason": state["implementation_medium_reason"],
+            "blueprint_hits": state["blueprint_hits"],
+            "blueprint_fix_strategy": state["blueprint_fix_strategy"],
+            "blueprint_manual_action_required": state["blueprint_manual_action_required"],
             "artifact_dir": str(artifact_dir),
+            "workspace_write_enabled": state["workspace_write_enabled"],
+            "workspace_source_file": state["workspace_source_file"],
+            "workspace_test_file": state["workspace_test_file"],
+            "workspace_write_summary": state["workspace_write_summary"],
             "llm_profile": context.llm_manager.describe(metadata.llm_profile),
             "codegen_profile": context.llm_manager.describe("codegen"),
             "missing_sections": missing_sections,
@@ -955,8 +1756,64 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
         trace_graph_node(graph_name=graph_name, node_name="capture_doc_context", node_fn=capture_doc_context),
     )
     graph.add_node(
+        "prepare_code_search",
+        trace_graph_node(graph_name=graph_name, node_name="prepare_code_search", node_fn=prepare_code_search),
+    )
+    graph.add_node(
+        "capture_code_hits",
+        trace_graph_node(graph_name=graph_name, node_name="capture_code_hits", node_fn=capture_code_hits),
+    )
+    graph.add_node(
+        "prepare_code_context_lookup",
+        trace_graph_node(
+            graph_name=graph_name,
+            node_name="prepare_code_context_lookup",
+            node_fn=prepare_code_context_lookup,
+        ),
+    )
+    graph.add_node(
+        "capture_code_context",
+        trace_graph_node(graph_name=graph_name, node_name="capture_code_context", node_fn=capture_code_context),
+    )
+    graph.add_node(
+        "prepare_blueprint_search",
+        trace_graph_node(graph_name=graph_name, node_name="prepare_blueprint_search", node_fn=prepare_blueprint_search),
+    )
+    graph.add_node(
+        "capture_blueprint_hits",
+        trace_graph_node(graph_name=graph_name, node_name="capture_blueprint_hits", node_fn=capture_blueprint_hits),
+    )
+    graph.add_node(
+        "prepare_blueprint_context_lookup",
+        trace_graph_node(
+            graph_name=graph_name,
+            node_name="prepare_blueprint_context_lookup",
+            node_fn=prepare_blueprint_context_lookup,
+        ),
+    )
+    graph.add_node(
+        "capture_blueprint_context",
+        trace_graph_node(
+            graph_name=graph_name,
+            node_name="capture_blueprint_context",
+            node_fn=capture_blueprint_context,
+        ),
+    )
+    graph.add_node(
+        "assess_implementation_strategy",
+        trace_graph_node(
+            graph_name=graph_name,
+            node_name="assess_implementation_strategy",
+            node_fn=assess_implementation_strategy,
+        ),
+    )
+    graph.add_node(
         "build_design_doc",
         trace_graph_node(graph_name=graph_name, node_name="build_design_doc", node_fn=build_design_doc),
+    )
+    graph.add_node(
+        "build_bug_context_doc",
+        trace_graph_node(graph_name=graph_name, node_name="build_bug_context_doc", node_fn=build_bug_context_doc),
     )
     graph.add_node(
         "plan_work",
@@ -982,6 +1839,14 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
     graph.add_node(
         "implement_code",
         trace_graph_node(graph_name=graph_name, node_name="implement_code", node_fn=implement_code),
+    )
+    graph.add_node(
+        "post_implementation_gate",
+        trace_graph_node(
+            graph_name=graph_name,
+            node_name="post_implementation_gate",
+            node_fn=lambda state: {},
+        ),
     )
     graph.add_node(
         "self_test",
@@ -1034,7 +1899,67 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
         },
     )
     graph.add_edge(tool_node_names[doc_context_tool_name], "capture_doc_context")
-    graph.add_edge("capture_doc_context", "build_design_doc")
+    graph.add_edge("capture_doc_context", "prepare_code_search")
+    graph.add_conditional_edges(
+        "prepare_code_search",
+        trace_route_decision(graph_name=graph_name, router_name="route_tool_request", route_fn=route_tool_request),
+        {
+            **{
+                tool_node_names[tool_name]: tool_node_names[tool_name]
+                for tool_name in tool_subgraphs
+            },
+            "tool_request_error": "tool_request_error",
+        },
+    )
+    graph.add_edge(tool_node_names[code_search_tool_name], "capture_code_hits")
+    graph.add_edge("capture_code_hits", "prepare_code_context_lookup")
+    graph.add_conditional_edges(
+        "prepare_code_context_lookup",
+        trace_route_decision(graph_name=graph_name, router_name="route_tool_request", route_fn=route_tool_request),
+        {
+            **{
+                tool_node_names[tool_name]: tool_node_names[tool_name]
+                for tool_name in tool_subgraphs
+            },
+            "tool_request_error": "tool_request_error",
+        },
+    )
+    graph.add_edge(tool_node_names[code_context_tool_name], "capture_code_context")
+    graph.add_edge("capture_code_context", "prepare_blueprint_search")
+    graph.add_conditional_edges(
+        "prepare_blueprint_search",
+        trace_route_decision(graph_name=graph_name, router_name="route_tool_request", route_fn=route_tool_request),
+        {
+            **{
+                tool_node_names[tool_name]: tool_node_names[tool_name]
+                for tool_name in tool_subgraphs
+            },
+            "tool_request_error": "tool_request_error",
+        },
+    )
+    graph.add_edge(tool_node_names[blueprint_search_tool_name], "capture_blueprint_hits")
+    graph.add_edge("capture_blueprint_hits", "prepare_blueprint_context_lookup")
+    graph.add_conditional_edges(
+        "prepare_blueprint_context_lookup",
+        trace_route_decision(graph_name=graph_name, router_name="route_tool_request", route_fn=route_tool_request),
+        {
+            **{
+                tool_node_names[tool_name]: tool_node_names[tool_name]
+                for tool_name in tool_subgraphs
+            },
+            "tool_request_error": "tool_request_error",
+        },
+    )
+    graph.add_edge(tool_node_names[blueprint_context_tool_name], "capture_blueprint_context")
+    graph.add_edge("capture_blueprint_context", "assess_implementation_strategy")
+    graph.add_conditional_edges(
+        "assess_implementation_strategy",
+        trace_route_decision(graph_name=graph_name, router_name="route_execution_track", route_fn=route_execution_track),
+        {
+            "build_design_doc": "build_design_doc",
+            "build_bug_context_doc": "build_bug_context_doc",
+        },
+    )
     graph.add_edge("build_design_doc", "plan_work")
     graph.add_edge("plan_work", "request_review")
     graph.add_edge("request_review", "enter_review_subgraph")
@@ -1050,7 +1975,20 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
         },
     )
     graph.add_edge("revise_plan", "request_review")
-    graph.add_edge("implement_code", "self_test")
+    graph.add_edge("build_bug_context_doc", "implement_code")
+    graph.add_edge("implement_code", "post_implementation_gate")
+    graph.add_conditional_edges(
+        "post_implementation_gate",
+        trace_route_decision(
+            graph_name=graph_name,
+            router_name="post_implementation_gate",
+            route_fn=post_implementation_gate,
+        ),
+        {
+            "self_test": "self_test",
+            "prepare_delivery": "prepare_delivery",
+        },
+    )
     graph.add_conditional_edges(
         "self_test",
         trace_route_decision(graph_name=graph_name, router_name="test_gate", route_fn=test_gate),
