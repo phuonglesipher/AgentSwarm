@@ -419,6 +419,207 @@ class ContextOnlyInvestigationLLMManager:
         return ["default", "codegen"]
 
 
+class InvestigationRetryLLMClient:
+    def __init__(self) -> None:
+        self._investigation_calls = 0
+
+    def is_enabled(self) -> bool:
+        return True
+
+    def describe(self) -> str:
+        return "investigation retry test client"
+
+    def generate_text(self, *, instructions: str, input_text: str, effort: str | None = None) -> str:
+        del effort, input_text
+        if "Write a concise markdown bug investigation brief" in instructions:
+            return "\n".join(
+                [
+                    "# Gameplay Bug Context",
+                    "",
+                    "## Bug Summary",
+                    "- Investigation converged on the runtime module after one retry.",
+                ]
+            )
+        raise AssertionError(f"Unexpected generate_text instructions: {instructions}")
+
+    def generate_json(
+        self,
+        *,
+        instructions: str,
+        input_text: str,
+        schema_name: str,
+        schema: dict,
+        effort: str | None = None,
+    ) -> dict:
+        del instructions, input_text, schema, effort
+        if schema_name == "gameplay_task_classification":
+            return {
+                "task_type": "bugfix",
+                "reason": "The request is about fixing unintended movement behavior.",
+            }
+        if schema_name == "gameplay_engineering_context":
+            self._investigation_calls += 1
+            if self._investigation_calls == 1:
+                return {
+                    "source_hits": [],
+                    "test_hits": [],
+                    "blueprint_hits": [],
+                    "blueprint_text_hits": [],
+                    "code_context": "",
+                    "blueprint_context": "",
+                }
+            return {
+                "source_hits": ["src/runtime.py"],
+                "test_hits": ["tests/test_runtime.py"],
+                "blueprint_hits": [],
+                "blueprint_text_hits": [],
+                "code_context": "Movement ownership appears to live in src/runtime.py and its regression tests.",
+                "blueprint_context": "",
+            }
+        if schema_name == "gameplay_implementation_medium":
+            return {
+                "implementation_medium": "cpp",
+                "reason": "The strongest surviving evidence points to code-side movement logic.",
+            }
+        raise AssertionError(f"Unexpected schema_name: {schema_name}")
+
+
+class InvestigationRetryLLMManager:
+    def __init__(self) -> None:
+        self._default_client = InvestigationRetryLLMClient()
+        self._codegen_client = DisabledLLMClient()
+
+    def resolve(self, profile: str | None = None):
+        if profile == "codegen":
+            return self._codegen_client
+        return self._default_client
+
+    def is_enabled(self, profile: str | None = None) -> bool:
+        return self.resolve(profile).is_enabled()
+
+    def describe(self, profile: str | None = None) -> str:
+        return f"{profile or 'default'}: {self.resolve(profile).describe()}"
+
+    def available_profiles(self) -> list[str]:
+        return ["default", "codegen"]
+
+
+class RepairDefaultLLMClient:
+    def is_enabled(self) -> bool:
+        return True
+
+    def describe(self) -> str:
+        return "repair default test client"
+
+    def generate_text(self, *, instructions: str, input_text: str, effort: str | None = None) -> str:
+        del effort, input_text
+        if "Write a concise markdown bug investigation brief" in instructions:
+            return "\n".join(
+                [
+                    "# Gameplay Bug Context",
+                    "",
+                    "## Bug Summary",
+                    "- Runtime ownership and validation path are clear enough to attempt a fix.",
+                ]
+            )
+        raise AssertionError(f"Unexpected generate_text instructions: {instructions}")
+
+    def generate_json(
+        self,
+        *,
+        instructions: str,
+        input_text: str,
+        schema_name: str,
+        schema: dict,
+        effort: str | None = None,
+    ) -> dict:
+        del instructions, input_text, schema, effort
+        if schema_name == "gameplay_task_classification":
+            return {
+                "task_type": "bugfix",
+                "reason": "The prompt fixes broken gameplay behavior.",
+            }
+        if schema_name == "gameplay_engineering_context":
+            return {
+                "source_hits": ["src/runtime.py"],
+                "test_hits": ["tests/test_runtime.py"],
+                "blueprint_hits": [],
+                "blueprint_text_hits": [],
+                "code_context": "The bug is likely in src/runtime.py and should be validated by tests/test_runtime.py.",
+                "blueprint_context": "",
+            }
+        if schema_name == "gameplay_implementation_medium":
+            return {
+                "implementation_medium": "cpp",
+                "reason": "The task is fully code-owned in this fixture.",
+            }
+        raise AssertionError(f"Unexpected schema_name: {schema_name}")
+
+
+class AlwaysFailingCodegenLLMClient:
+    def is_enabled(self) -> bool:
+        return True
+
+    def describe(self) -> str:
+        return "always failing codegen test client"
+
+    def generate_text(self, *, instructions: str, input_text: str, effort: str | None = None) -> str:
+        raise AssertionError("Codegen profile should not call generate_text in this test")
+
+    def generate_json(
+        self,
+        *,
+        instructions: str,
+        input_text: str,
+        schema_name: str,
+        schema: dict,
+        effort: str | None = None,
+    ) -> dict:
+        del instructions, input_text, schema, effort
+        if schema_name != "gameplay_code_bundle":
+            raise AssertionError(f"Unexpected schema_name: {schema_name}")
+        return {
+            "source_code": "\n".join(
+                [
+                    "from __future__ import annotations",
+                    "",
+                    "def build_gameplay_change_summary() -> dict:",
+                    '    return {"implementation_status": "broken"}',
+                ]
+            ),
+            "test_code": "\n".join(
+                [
+                    "from gameplay_change import build_gameplay_change_summary",
+                    "",
+                    "def test_build_gameplay_change_summary():",
+                    "    summary = build_gameplay_change_summary()",
+                    '    assert summary["implementation_status"] == "ready-for-review"',
+                ]
+            ),
+            "implementation_notes": "Intentional failing bundle for repair loop regression coverage.",
+        }
+
+
+class StuckRepairLLMManager:
+    def __init__(self) -> None:
+        self._default_client = RepairDefaultLLMClient()
+        self._codegen_client = AlwaysFailingCodegenLLMClient()
+
+    def resolve(self, profile: str | None = None):
+        if profile == "codegen":
+            return self._codegen_client
+        return self._default_client
+
+    def is_enabled(self, profile: str | None = None) -> bool:
+        return self.resolve(profile).is_enabled()
+
+    def describe(self, profile: str | None = None) -> str:
+        return f"{profile or 'default'}: {self.resolve(profile).describe()}"
+
+    def available_profiles(self) -> list[str]:
+        return ["default", "codegen"]
+
+
 class WorkflowDrivenRuntimeTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
@@ -503,6 +704,8 @@ class WorkflowDrivenRuntimeTests(unittest.TestCase):
         self.assertTrue(result["blocking_issues"])
         self.assertTrue(result["improvement_actions"])
         self.assertEqual(len(result["section_reviews"]), 7)
+        self.assertEqual(result["loop_status"], "retry")
+        self.assertTrue(result["loop_should_continue"])
         self.assertIn("## Section Scores", result["feedback"])
 
     def test_main_graph_runs_end_to_end_without_llm(self) -> None:
@@ -1031,6 +1234,94 @@ class WorkflowDrivenRuntimeTests(unittest.TestCase):
             self.assertEqual(result["final_report"]["status"], "manual-validation-required")
             self.assertIn("Manual Unreal Editor", result["workspace_write_summary"])
 
+    def test_engineer_workflow_retries_investigation_until_context_is_reliable(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="agentswarm-host-investigation-loop-") as temp_dir:
+            host_root = Path(temp_dir) / "host-project"
+            (host_root / "src").mkdir(parents=True, exist_ok=True)
+            (host_root / "tests").mkdir(parents=True, exist_ok=True)
+            (host_root / "src" / "runtime.py").write_text("def update_runtime():\n    return 'ok'\n", encoding="utf-8")
+            (host_root / "tests" / "test_runtime.py").write_text(
+                "def test_runtime_smoke():\n    assert True\n",
+                encoding="utf-8",
+            )
+
+            paths, _ = initialize_host_project(agent_root=self.project_root, host_root=host_root)
+            config = load_agentswarm_config(paths)
+            manifest = load_project_manifest(paths)
+            registry = load_workflows(
+                project_root=self.project_root,
+                workflows_root=self.workflows_root,
+                llm_manager=InvestigationRetryLLMManager(),
+                runtime_paths=paths,
+                config=config,
+                manifest=manifest,
+            )
+            engineer_graph = registry.get("gameplay-engineer-workflow").graph
+            self.assertIsNotNone(engineer_graph)
+
+            run_dir = host_root / ".agentswarm" / "runs" / "investigation-loop"
+            run_dir.mkdir(parents=True, exist_ok=True)
+            result = engineer_graph.invoke(
+                {
+                    "prompt": "Fix player movement regression",
+                    "task_prompt": "Fix player movement regression",
+                    "task_id": "task-1-fix-player-movement-regression",
+                    "run_dir": str(run_dir),
+                    "messages": [],
+                }
+            )
+
+            artifact_dir = Path(result["artifact_dir"])
+            self.assertEqual(result["investigation_round"], 2)
+            self.assertEqual(result["investigation_loop_status"], "passed")
+            self.assertTrue((artifact_dir / "engineer_investigation_round_1.md").exists())
+            self.assertTrue((artifact_dir / "investigation_review_round_2.md").exists())
+            self.assertEqual(result["final_report"]["investigation_loop_status"], "passed")
+
+    def test_engineer_workflow_stops_after_repair_loop_stagnates(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="agentswarm-host-repair-loop-") as temp_dir:
+            host_root = Path(temp_dir) / "host-project"
+            (host_root / "src").mkdir(parents=True, exist_ok=True)
+            (host_root / "tests").mkdir(parents=True, exist_ok=True)
+            (host_root / "src" / "runtime.py").write_text("def update_runtime():\n    return 'ok'\n", encoding="utf-8")
+            (host_root / "tests" / "test_runtime.py").write_text(
+                "def test_runtime_smoke():\n    assert True\n",
+                encoding="utf-8",
+            )
+
+            paths, _ = initialize_host_project(agent_root=self.project_root, host_root=host_root)
+            config = load_agentswarm_config(paths)
+            manifest = load_project_manifest(paths)
+            registry = load_workflows(
+                project_root=self.project_root,
+                workflows_root=self.workflows_root,
+                llm_manager=StuckRepairLLMManager(),
+                runtime_paths=paths,
+                config=config,
+                manifest=manifest,
+            )
+            engineer_graph = registry.get("gameplay-engineer-workflow").graph
+            self.assertIsNotNone(engineer_graph)
+
+            run_dir = host_root / ".agentswarm" / "runs" / "repair-loop"
+            run_dir.mkdir(parents=True, exist_ok=True)
+            result = engineer_graph.invoke(
+                {
+                    "prompt": "Fix player movement regression",
+                    "task_prompt": "Fix player movement regression",
+                    "task_id": "task-1-fix-player-movement-regression",
+                    "run_dir": str(run_dir),
+                    "messages": [],
+                }
+            )
+
+            artifact_dir = Path(result["artifact_dir"])
+            self.assertEqual(result["final_report"]["status"], "repair-blocked")
+            self.assertEqual(result["repair_loop_status"], "stagnated")
+            self.assertEqual(result["final_report"]["repair_loop_status"], "stagnated")
+            self.assertTrue((artifact_dir / "repair_abort.md").exists())
+            self.assertTrue((artifact_dir / "repair_round_3.md").exists())
+
     def test_engineer_workflow_caps_review_rounds_when_llm_never_produces_an_approvable_plan(self) -> None:
         always_bad_registry = load_workflows(
             project_root=self.project_root,
@@ -1059,6 +1350,7 @@ class WorkflowDrivenRuntimeTests(unittest.TestCase):
 
         self.assertEqual(result["review_round"], 3)
         self.assertEqual(result["final_report"]["status"], "review-blocked")
+        self.assertEqual(result["final_report"]["review_loop_status"], "stagnated")
         self.assertFalse(result["final_report"]["compile_ok"])
         self.assertFalse(result["final_report"]["tests_ok"])
         self.assertIn("never reached approval", result["summary"])
@@ -1093,7 +1385,9 @@ class WorkflowDrivenRuntimeTests(unittest.TestCase):
         self.assertTrue(result["review_approved"])
         self.assertEqual(result["review_round"], 1)
         self.assertEqual(result["final_report"]["status"], "completed")
+        self.assertEqual(result["final_report"]["review_loop_status"], "passed")
         self.assertIn("Approved: True", review_round)
+        self.assertIn("Loop Status: passed", review_round)
         self.assertIn("Task Type: 5/10", review_round)
 
     def test_main_graph_xray_mermaid_includes_workflow_subgraphs(self) -> None:

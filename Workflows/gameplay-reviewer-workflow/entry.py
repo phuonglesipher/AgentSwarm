@@ -9,6 +9,7 @@ from typing_extensions import NotRequired, TypedDict
 from core.graph_logging import trace_graph_node
 from core.llm import LLMError
 from core.models import WorkflowContext, WorkflowMetadata
+from core.quality_loop import QualityLoopSpec, evaluate_quality_loop
 
 
 class SectionReview(TypedDict):
@@ -34,6 +35,13 @@ class ReviewerState(TypedDict):
     improvement_actions: list[str]
     approved: bool
     summary: str
+    loop_status: NotRequired[str]
+    loop_reason: NotRequired[str]
+    loop_threshold: NotRequired[int]
+    loop_max_rounds: NotRequired[int]
+    loop_should_continue: NotRequired[bool]
+    loop_completed: NotRequired[bool]
+    loop_stagnated_rounds: NotRequired[int]
 
 
 SECTION_WEIGHTS = {
@@ -47,6 +55,7 @@ SECTION_WEIGHTS = {
 }
 SECTION_ORDER = list(SECTION_WEIGHTS)
 APPROVAL_SCORE = 90
+MAX_REVIEW_ROUNDS = 3
 BLOCKING_SECTIONS = {
     "Implementation Steps",
     "Unit Tests",
@@ -126,6 +135,16 @@ SECTION_GUIDANCE = {
         ],
     },
 }
+PLAN_REVIEW_LOOP_SPEC = QualityLoopSpec(
+    loop_id="gameplay-plan-review",
+    threshold=APPROVAL_SCORE,
+    max_rounds=MAX_REVIEW_ROUNDS,
+    require_blocker_free=True,
+    require_missing_section_free=True,
+    require_explicit_approval=True,
+    min_score_delta=1,
+    stagnation_limit=2,
+)
 
 
 def _parse_plan_sections(plan_doc: str) -> dict[str, str]:
@@ -433,12 +452,20 @@ def _fallback_review(task_prompt: str, plan_doc: str, review_round: int) -> dict
     score = sum(review["score"] for review in section_reviews)
     blocking_issues = _derive_blocking_issues(section_reviews)
     improvement_actions = _derive_improvement_actions(section_reviews)
-    approved = score >= APPROVAL_SCORE and not blocking_issues
+    progress = evaluate_quality_loop(
+        PLAN_REVIEW_LOOP_SPEC,
+        round_index=review_round,
+        score=score,
+        approved=score >= APPROVAL_SCORE,
+        missing_sections=missing_sections,
+        blocking_issues=blocking_issues,
+        improvement_actions=improvement_actions,
+    )
     feedback = _compose_feedback(
         task_prompt=task_prompt,
         review_round=review_round,
         score=score,
-        approved=approved,
+        approved=progress.approved,
         blocking_issues=blocking_issues,
         improvement_actions=improvement_actions,
         section_reviews=section_reviews,
@@ -450,11 +477,18 @@ def _fallback_review(task_prompt: str, plan_doc: str, review_round: int) -> dict
         "section_reviews": section_reviews,
         "blocking_issues": blocking_issues,
         "improvement_actions": improvement_actions,
-        "approved": approved,
+        "approved": progress.approved,
         "summary": (
             f"Reviewer scored the plan at {score}/100 and "
-            f"{'approved it' if approved else 'requested revisions'}."
+            f"{'approved it' if progress.approved else 'requested revisions'}."
         ),
+        "loop_status": progress.status,
+        "loop_reason": progress.reason,
+        "loop_threshold": progress.threshold,
+        "loop_max_rounds": progress.max_rounds,
+        "loop_should_continue": progress.should_continue,
+        "loop_completed": progress.completed,
+        "loop_stagnated_rounds": progress.stagnated_rounds,
     }
 
 
@@ -600,12 +634,20 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
         blocking_issues.extend(str(item) for item in result.get("blocking_issues", []) if isinstance(item, str))
         blocking_issues = _dedupe_preserve_order(blocking_issues)
         improvement_actions = _derive_improvement_actions(merged_reviews, result.get("improvement_actions", []))
-        approved = score >= APPROVAL_SCORE and not blocking_issues
+        progress = evaluate_quality_loop(
+            PLAN_REVIEW_LOOP_SPEC,
+            round_index=state["review_round"],
+            score=score,
+            approved=bool(result.get("approved")),
+            missing_sections=missing_sections,
+            blocking_issues=blocking_issues,
+            improvement_actions=improvement_actions,
+        )
         feedback = _compose_feedback(
             task_prompt=state["task_prompt"],
             review_round=state["review_round"],
             score=score,
-            approved=approved,
+            approved=progress.approved,
             blocking_issues=blocking_issues,
             improvement_actions=improvement_actions,
             section_reviews=merged_reviews,
@@ -618,11 +660,18 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
             "section_reviews": merged_reviews,
             "blocking_issues": blocking_issues,
             "improvement_actions": improvement_actions,
-            "approved": approved,
+            "approved": progress.approved,
             "summary": (
                 f"Reviewer scored the plan at {max(0, min(score, 100))}/100 and "
-                f"{'approved it' if approved else 'requested revisions'}."
+                f"{'approved it' if progress.approved else 'requested revisions'}."
             ),
+            "loop_status": progress.status,
+            "loop_reason": progress.reason,
+            "loop_threshold": progress.threshold,
+            "loop_max_rounds": progress.max_rounds,
+            "loop_should_continue": progress.should_continue,
+            "loop_completed": progress.completed,
+            "loop_stagnated_rounds": progress.stagnated_rounds,
         }
 
     graph = StateGraph(ReviewerState)

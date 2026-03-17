@@ -18,6 +18,7 @@ from core.graph_ids import to_graph_node_name
 from core.graph_logging import log_graph_payload_event, trace_graph_node, trace_route_decision
 from core.llm import LLMError
 from core.models import WorkflowContext, WorkflowMetadata
+from core.quality_loop import QualityLoopSpec, evaluate_quality_loop
 from core.tool_graph import build_tool_call_message, find_latest_tool_message
 from core.text_utils import keyword_tokens, normalize_text, slugify, tokenize
 
@@ -64,6 +65,16 @@ class EngineerState(MessagesState):
     bug_context_doc: str
     architecture_plan_doc: str
     plan_doc: str
+    investigation_round: int
+    investigation_score: int
+    investigation_feedback: str
+    investigation_missing_sections: list[str]
+    investigation_blocking_issues: list[str]
+    investigation_improvement_actions: list[str]
+    investigation_approved: bool
+    investigation_loop_status: str
+    investigation_loop_reason: str
+    investigation_loop_stagnated_rounds: int
     review_round: int
     review_score: int
     review_feedback: str
@@ -72,6 +83,9 @@ class EngineerState(MessagesState):
     review_blocking_issues: list[str]
     review_improvement_actions: list[str]
     review_approved: bool
+    review_loop_status: str
+    review_loop_reason: str
+    review_loop_stagnated_rounds: int
     code_attempt: int
     generated_code: str
     generated_tests: str
@@ -79,9 +93,32 @@ class EngineerState(MessagesState):
     compile_ok: bool
     tests_ok: bool
     test_output: str
+    repair_round: int
+    repair_score: int
+    repair_feedback: str
+    repair_missing_sections: list[str]
+    repair_blocking_issues: list[str]
+    repair_improvement_actions: list[str]
+    repair_approved: bool
+    repair_loop_status: str
+    repair_loop_reason: str
+    repair_loop_stagnated_rounds: int
     artifact_dir: str
     final_report: dict[str, Any]
     summary: str
+    active_loop_id: str
+    active_loop_round: int
+    active_loop_score: int
+    active_loop_threshold: int
+    active_loop_max_rounds: int
+    active_loop_status: str
+    active_loop_reason: str
+    active_loop_should_continue: bool
+    active_loop_completed: bool
+    active_loop_stagnated_rounds: int
+    active_loop_missing_sections: list[str]
+    active_loop_blocking_issues: list[str]
+    active_loop_improvement_actions: list[str]
     score: NotRequired[int]
     feedback: NotRequired[str]
     section_reviews: NotRequired[list[SectionReview]]
@@ -104,6 +141,36 @@ REQUIRED_PLAN_SECTIONS = {
 PLAN_SECTION_ORDER = list(REQUIRED_PLAN_SECTIONS)
 REVIEW_APPROVAL_SCORE = 90
 MAX_REVIEW_ROUNDS = 3
+ARCHITECTURE_REVIEW_LOOP_SPEC = QualityLoopSpec(
+    loop_id="architecture-plan-review",
+    threshold=REVIEW_APPROVAL_SCORE,
+    max_rounds=MAX_REVIEW_ROUNDS,
+    require_blocker_free=True,
+    require_missing_section_free=True,
+    require_explicit_approval=True,
+    min_score_delta=1,
+    stagnation_limit=2,
+)
+INVESTIGATION_LOOP_SPEC = QualityLoopSpec(
+    loop_id="investigation-confidence",
+    threshold=55,
+    max_rounds=3,
+    require_blocker_free=True,
+    require_missing_section_free=False,
+    require_explicit_approval=True,
+    min_score_delta=5,
+    stagnation_limit=2,
+)
+REPAIR_LOOP_SPEC = QualityLoopSpec(
+    loop_id="repair-validation",
+    threshold=100,
+    max_rounds=3,
+    require_blocker_free=True,
+    require_missing_section_free=True,
+    require_explicit_approval=True,
+    min_score_delta=10,
+    stagnation_limit=2,
+)
 SOURCE_EXTENSIONS = {
     ".py",
     ".lua",
@@ -1089,6 +1156,282 @@ def _fallback_code_bundle(task_prompt: str, task_type: str, attempt: int) -> dic
     }
 
 
+def _has_meaningful_context(value: str) -> bool:
+    text = str(value or "").strip()
+    if not text:
+        return False
+    normalized = normalize_text(text)
+    placeholder_prefixes = (
+        "no concise",
+        "no readable",
+        "no matching",
+        "no dedicated",
+        "none.",
+        "none",
+    )
+    return not any(normalized.startswith(prefix) for prefix in placeholder_prefixes)
+
+
+def _compose_loop_feedback(
+    *,
+    title: str,
+    round_index: int,
+    score: int,
+    threshold: int,
+    approved: bool,
+    blocking_issues: list[str],
+    improvement_actions: list[str],
+    sections: list[tuple[str, bool, str]],
+    loop_reason: str = "",
+) -> str:
+    decision = "Approved" if approved else "Needs another pass"
+    lines = [
+        f"# {title}",
+        "",
+        f"- Round: {round_index}",
+        f"- Decision: {decision}",
+        f"- Score: {score}/{threshold}",
+        "",
+        "## Checks",
+    ]
+    lines.extend(
+        [
+            f"- {label}: {'pass' if passed else 'needs-work'} - {rationale}"
+            for label, passed, rationale in sections
+        ]
+        or ["- No checks were recorded."]
+    )
+    lines.extend(["", "## Blocking Issues"])
+    lines.extend([f"- {item}" for item in blocking_issues] or ["- None."])
+    lines.extend(["", "## Improvement Checklist"])
+    lines.extend([f"- {item}" for item in improvement_actions] or ["- None."])
+    if loop_reason.strip():
+        lines.extend(["", "## Loop Gate", loop_reason.strip()])
+    return "\n".join(lines)
+
+
+def _evaluate_investigation_quality(state: EngineerState) -> tuple[dict[str, Any], list[tuple[str, bool, str]]]:
+    has_references = bool(state["doc_hits"]) or _has_meaningful_context(state["doc_context"])
+    has_file_hits = any(
+        [
+            state["source_hits"],
+            state["test_hits"],
+            state["blueprint_hits"],
+            state["blueprint_text_hits"],
+        ]
+    )
+    has_context_summary = _has_meaningful_context(state["code_context"]) or _has_meaningful_context(
+        state["blueprint_context"]
+    )
+    has_medium = bool(state["implementation_medium"].strip()) and bool(state["implementation_medium_reason"].strip())
+    has_validation_path = bool(state["test_hits"]) or bool(state["workspace_test_file"]) or state[
+        "blueprint_manual_action_required"
+    ]
+
+    checks = [
+        (
+            "References",
+            has_references,
+            "Gameplay docs or doc context were gathered for the task."
+            if has_references
+            else "Gather at least one supporting gameplay doc or summarize the relevant design context.",
+        ),
+        (
+            "File Hits",
+            has_file_hits,
+            "Relevant host-project files or Blueprint exports were identified."
+            if has_file_hits
+            else "Identify the likely gameplay-owned source files, tests, or Blueprint assets before implementation.",
+        ),
+        (
+            "Context Summary",
+            has_context_summary,
+            "The investigation contains a concise ownership or root-cause summary."
+            if has_context_summary
+            else "Summarize the likely gameplay ownership, state flow, or root cause before implementation.",
+        ),
+        (
+            "Implementation Medium",
+            has_medium,
+            "The workflow classified the work as code, Blueprint, or mixed with rationale."
+            if has_medium
+            else "Decide whether the change belongs in code, Blueprint, or a mixed implementation and explain why.",
+        ),
+        (
+            "Validation Path",
+            has_validation_path,
+            "The workflow has a concrete validation path or manual Blueprint handoff."
+            if has_validation_path
+            else "Identify the automated test target or manual validation path for the gameplay change.",
+        ),
+    ]
+    weights = {
+        "References": 20,
+        "File Hits": 30,
+        "Context Summary": 25,
+        "Implementation Medium": 15,
+        "Validation Path": 10,
+    }
+    score = sum(weights[label] for label, passed, _ in checks if passed)
+    missing_sections = [label for label, passed, _ in checks if not passed]
+    blocking_issues: list[str] = []
+    if not has_references and not has_file_hits:
+        blocking_issues.append("Identify at least one relevant gameplay document or host-project file before coding.")
+    improvement_actions = [rationale for _, passed, rationale in checks if not passed]
+    progress = evaluate_quality_loop(
+        INVESTIGATION_LOOP_SPEC,
+        round_index=state["investigation_round"],
+        score=score,
+        approved=score >= INVESTIGATION_LOOP_SPEC.threshold and not blocking_issues,
+        missing_sections=missing_sections,
+        blocking_issues=blocking_issues,
+        improvement_actions=improvement_actions,
+        previous_score=state["investigation_score"] if state["investigation_round"] > 1 else None,
+        prior_stagnated_rounds=state["investigation_loop_stagnated_rounds"] if state["investigation_round"] > 1 else 0,
+    )
+    feedback = _compose_loop_feedback(
+        title="Investigation Confidence Review",
+        round_index=state["investigation_round"],
+        score=progress.score,
+        threshold=progress.threshold,
+        approved=progress.approved,
+        blocking_issues=list(progress.blocking_issues),
+        improvement_actions=list(progress.improvement_actions),
+        sections=checks,
+        loop_reason=progress.reason,
+    )
+    return (
+        {
+            "investigation_score": progress.score,
+            "investigation_feedback": feedback,
+            "investigation_missing_sections": list(progress.missing_sections),
+            "investigation_blocking_issues": list(progress.blocking_issues),
+            "investigation_improvement_actions": list(progress.improvement_actions),
+            "investigation_approved": progress.approved,
+            "investigation_loop_status": progress.status,
+            "investigation_loop_reason": progress.reason,
+            "investigation_loop_stagnated_rounds": progress.stagnated_rounds,
+            "active_loop_id": progress.loop_id,
+            "active_loop_round": progress.round_index,
+            "active_loop_score": progress.score,
+            "active_loop_threshold": progress.threshold,
+            "active_loop_max_rounds": progress.max_rounds,
+            "active_loop_status": progress.status,
+            "active_loop_reason": progress.reason,
+            "active_loop_should_continue": progress.should_continue,
+            "active_loop_completed": progress.completed,
+            "active_loop_stagnated_rounds": progress.stagnated_rounds,
+            "active_loop_missing_sections": list(progress.missing_sections),
+            "active_loop_blocking_issues": list(progress.blocking_issues),
+            "active_loop_improvement_actions": list(progress.improvement_actions),
+        },
+        checks,
+    )
+
+
+def _derive_repair_actions(test_output: str, *, compile_ok: bool, tests_ok: bool) -> list[str]:
+    if compile_ok and tests_ok:
+        return []
+
+    normalized = normalize_text(test_output)
+    if "compile error" in normalized:
+        return ["Fix the compile or import error reported by the self-test harness before retrying."]
+    if "no generated test functions" in normalized:
+        return ["Generate concrete automated tests so the self-test harness can validate the gameplay change."]
+    if "unit test failed" in normalized or "assertion failed" in normalized:
+        return ["Update the implementation so the failing gameplay assertion passes under self-test."]
+    if "execution failed" in normalized:
+        return ["Fix the runtime failure reported by the self-test harness before retrying."]
+    return ["Use the latest self-test output to repair the gameplay implementation before retrying."]
+
+
+def _summarize_repair_issue(test_output: str) -> str:
+    first_line = next((line.strip() for line in str(test_output).splitlines() if line.strip()), "")
+    return first_line or "Self-test failed without a specific diagnostic."
+
+
+def _evaluate_repair_quality(state: EngineerState) -> tuple[dict[str, Any], list[tuple[str, bool, str]]]:
+    compile_pass = bool(state["compile_ok"])
+    tests_pass = bool(state["tests_ok"])
+    checks = [
+        (
+            "Compilation",
+            compile_pass,
+            "The generated gameplay code compiled in the self-test harness."
+            if compile_pass
+            else "Fix the compile-time failure before retrying the implementation.",
+        ),
+        (
+            "Automated Validation",
+            tests_pass,
+            "The generated gameplay tests passed in the self-test harness."
+            if tests_pass
+            else "Fix the failing generated tests so the gameplay behavior passes validation.",
+        ),
+    ]
+    score = 0
+    if compile_pass:
+        score += 40
+    if tests_pass:
+        score += 60
+    missing_sections = [label for label, passed, _ in checks if not passed]
+    blocking_issues = [] if (compile_pass and tests_pass) else [_summarize_repair_issue(state["test_output"])]
+    improvement_actions = _derive_repair_actions(
+        state["test_output"],
+        compile_ok=compile_pass,
+        tests_ok=tests_pass,
+    )
+    progress = evaluate_quality_loop(
+        REPAIR_LOOP_SPEC,
+        round_index=state["repair_round"],
+        score=score,
+        approved=compile_pass and tests_pass,
+        missing_sections=missing_sections,
+        blocking_issues=blocking_issues,
+        improvement_actions=improvement_actions,
+        previous_score=state["repair_score"] if state["repair_round"] > 1 else None,
+        prior_stagnated_rounds=state["repair_loop_stagnated_rounds"] if state["repair_round"] > 1 else 0,
+    )
+    feedback = _compose_loop_feedback(
+        title="Implementation Repair Review",
+        round_index=state["repair_round"],
+        score=progress.score,
+        threshold=progress.threshold,
+        approved=progress.approved,
+        blocking_issues=list(progress.blocking_issues),
+        improvement_actions=list(progress.improvement_actions),
+        sections=checks,
+        loop_reason=progress.reason,
+    )
+    return (
+        {
+            "repair_score": progress.score,
+            "repair_feedback": feedback,
+            "repair_missing_sections": list(progress.missing_sections),
+            "repair_blocking_issues": list(progress.blocking_issues),
+            "repair_improvement_actions": list(progress.improvement_actions),
+            "repair_approved": progress.approved,
+            "repair_loop_status": progress.status,
+            "repair_loop_reason": progress.reason,
+            "repair_loop_stagnated_rounds": progress.stagnated_rounds,
+            "active_loop_id": progress.loop_id,
+            "active_loop_round": progress.round_index,
+            "active_loop_score": progress.score,
+            "active_loop_threshold": progress.threshold,
+            "active_loop_max_rounds": progress.max_rounds,
+            "active_loop_status": progress.status,
+            "active_loop_reason": progress.reason,
+            "active_loop_should_continue": progress.should_continue,
+            "active_loop_completed": progress.completed,
+            "active_loop_stagnated_rounds": progress.stagnated_rounds,
+            "active_loop_missing_sections": list(progress.missing_sections),
+            "active_loop_blocking_issues": list(progress.blocking_issues),
+            "active_loop_improvement_actions": list(progress.improvement_actions),
+        },
+        checks,
+    )
+
+
 def _build_tool_call_id(state: EngineerState, tool_name: str) -> str:
     message_count = len(state.get("messages", []))
     return f"{state['task_id']}-{tool_name}-{message_count + 1}"
@@ -1302,6 +1645,16 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
             "workspace_test_file": "",
             "workspace_write_enabled": False,
             "workspace_write_summary": "",
+            "investigation_round": 0,
+            "investigation_score": 0,
+            "investigation_feedback": "",
+            "investigation_missing_sections": [],
+            "investigation_blocking_issues": [],
+            "investigation_improvement_actions": [],
+            "investigation_approved": False,
+            "investigation_loop_status": "idle",
+            "investigation_loop_reason": "",
+            "investigation_loop_stagnated_rounds": 0,
             "review_round": 0,
             "review_score": 0,
             "review_feedback": "",
@@ -1310,6 +1663,9 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
             "review_blocking_issues": [],
             "review_improvement_actions": [],
             "review_approved": False,
+            "review_loop_status": "idle",
+            "review_loop_reason": "",
+            "review_loop_stagnated_rounds": 0,
             "code_attempt": 0,
             "design_doc": "",
             "bug_context_doc": "",
@@ -1321,7 +1677,30 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
             "compile_ok": False,
             "tests_ok": False,
             "test_output": "",
+            "repair_round": 0,
+            "repair_score": 0,
+            "repair_feedback": "",
+            "repair_missing_sections": [],
+            "repair_blocking_issues": [],
+            "repair_improvement_actions": [],
+            "repair_approved": False,
+            "repair_loop_status": "idle",
+            "repair_loop_reason": "",
+            "repair_loop_stagnated_rounds": 0,
             "artifact_dir": str(artifact_dir),
+            "active_loop_id": "",
+            "active_loop_round": 0,
+            "active_loop_score": 0,
+            "active_loop_threshold": 0,
+            "active_loop_max_rounds": 0,
+            "active_loop_status": "idle",
+            "active_loop_reason": "",
+            "active_loop_should_continue": False,
+            "active_loop_completed": False,
+            "active_loop_stagnated_rounds": 0,
+            "active_loop_missing_sections": [],
+            "active_loop_blocking_issues": [],
+            "active_loop_improvement_actions": [],
         }
 
     def prepare_doc_search(state: EngineerState) -> dict[str, Any]:
@@ -1388,6 +1767,22 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
             "pending_tool_call_id": "",
         }
 
+    def request_investigation(state: EngineerState) -> dict[str, Any]:
+        investigation_round = state["investigation_round"] + 1
+        return {
+            "investigation_round": investigation_round,
+            "active_loop_id": INVESTIGATION_LOOP_SPEC.loop_id,
+            "active_loop_round": investigation_round,
+            "active_loop_threshold": INVESTIGATION_LOOP_SPEC.threshold,
+            "active_loop_max_rounds": INVESTIGATION_LOOP_SPEC.max_rounds,
+            "active_loop_status": "running",
+            "active_loop_reason": (
+                f"Running investigation round {investigation_round}/{INVESTIGATION_LOOP_SPEC.max_rounds}."
+            ),
+            "active_loop_should_continue": False,
+            "active_loop_completed": False,
+        }
+
     def simulate_engineer_investigation(state: EngineerState) -> dict[str, Any]:
         scope_root = context.resolve_scope_root("host_project")
         exclude_roots = context.config.exclude_roots
@@ -1433,11 +1828,15 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
                         f"Host project root: {context.host_root}\n"
                         f"Source roots: {context.config.source_roots}\n"
                         f"Test roots: {context.config.test_roots}\n"
+                        f"Investigation round: {state['investigation_round']}\n\n"
                         f"Task prompt:\n{state['task_prompt']}\n\n"
                         f"Task type: {state['task_type']}\n"
                         f"Task type reason: {state['task_type_reason']}\n\n"
                         f"Relevant gameplay docs:\n{state['doc_hits']}\n\n"
                         f"Doc context:\n{state['doc_context'] or 'No matching docs.'}\n\n"
+                        f"Previous investigation blockers:\n{state['investigation_blocking_issues'] or 'None'}\n\n"
+                        f"Previous investigation checklist:\n{state['investigation_improvement_actions'] or 'None'}\n\n"
+                        f"Previous investigation feedback:\n{state['investigation_feedback'] or 'None'}\n\n"
                         "Do not modify files. Investigate like a gameplay engineer preparing the next implementation prompt."
                     ),
                     schema_name="gameplay_engineering_context",
@@ -1544,6 +1943,9 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
         artifact_dir = Path(state["artifact_dir"])
         artifact_dir.mkdir(parents=True, exist_ok=True)
         (artifact_dir / "engineer_investigation.md").write_text("\n".join(investigation_lines), encoding="utf-8")
+        (
+            artifact_dir / f"engineer_investigation_round_{state['investigation_round']}.md"
+        ).write_text("\n".join(investigation_lines), encoding="utf-8")
 
         return {
             "source_hits": source_hits,
@@ -1622,6 +2024,40 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
             "blueprint_fix_strategy": blueprint_fix_strategy,
             "blueprint_manual_action_required": blueprint_manual_action_required,
         }
+
+    def evaluate_investigation(state: EngineerState) -> dict[str, Any]:
+        progress_update, checks = _evaluate_investigation_quality(state)
+        artifact_dir = Path(state["artifact_dir"])
+        artifact_dir.mkdir(parents=True, exist_ok=True)
+        review_lines = [
+            progress_update["investigation_feedback"],
+            "",
+            "## Current Evidence",
+            *([f"- Source hit: {item}" for item in state["source_hits"]] or ["- Source hit: None."]),
+            *([f"- Test hit: {item}" for item in state["test_hits"]] or ["- Test hit: None."]),
+            *([f"- Blueprint hit: {item}" for item in state["blueprint_hits"]] or ["- Blueprint hit: None."]),
+            *(
+                [f"- Blueprint text hit: {item}" for item in state["blueprint_text_hits"]]
+                or ["- Blueprint text hit: None."]
+            ),
+            "",
+            "## Investigation Checks",
+            *[
+                f"- {label}: {'pass' if passed else 'needs-work'} - {rationale}"
+                for label, passed, rationale in checks
+            ],
+        ]
+        (
+            artifact_dir / f"investigation_review_round_{state['investigation_round']}.md"
+        ).write_text("\n".join(review_lines), encoding="utf-8")
+        return progress_update
+
+    def investigation_gate(state: EngineerState) -> str:
+        if state["investigation_loop_status"] == "passed":
+            return route_execution_track(state)
+        if state["active_loop_should_continue"]:
+            return "request_investigation"
+        return "prepare_investigation_blocked_delivery"
 
     def route_execution_track(state: EngineerState) -> str:
         if state["execution_track"] == "feature":
@@ -1721,6 +2157,72 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
         (artifact_dir / "bug_context.md").write_text(bug_context_doc, encoding="utf-8")
         return {"bug_context_doc": bug_context_doc}
 
+    def prepare_investigation_blocked_delivery(state: EngineerState) -> dict[str, Any]:
+        artifact_dir = Path(state["artifact_dir"])
+        artifact_dir.mkdir(parents=True, exist_ok=True)
+        blocked_doc = "\n".join(
+            [
+                "# Investigation Blocked",
+                "",
+                f"Workflow stopped after {state['investigation_round']} investigation round(s).",
+                f"Loop status: {state['investigation_loop_status']}",
+                f"Loop reason: {state['investigation_loop_reason']}",
+                "",
+                "## Blocking Issues",
+                *([f"- {item}" for item in state["investigation_blocking_issues"]] or ["- None."]),
+                "",
+                "## Improvement Checklist",
+                *([f"- {item}" for item in state["investigation_improvement_actions"]] or ["- None."]),
+                "",
+                "## Latest Feedback",
+                state["investigation_feedback"] or "No additional investigation feedback was recorded.",
+            ]
+        )
+        (artifact_dir / "investigation_abort.md").write_text(blocked_doc, encoding="utf-8")
+        final_report = {
+            "status": "investigation-blocked",
+            "task_type": state["task_type"],
+            "execution_track": state["execution_track"],
+            "requires_architecture_review": state["requires_architecture_review"],
+            "investigation_rounds": state["investigation_round"],
+            "investigation_score": state["investigation_score"],
+            "investigation_approved": state["investigation_approved"],
+            "investigation_loop_status": state["investigation_loop_status"],
+            "investigation_loop_reason": state["investigation_loop_reason"],
+            "investigation_loop_stagnated_rounds": state["investigation_loop_stagnated_rounds"],
+            "review_rounds": state["review_round"],
+            "review_score": state["review_score"],
+            "review_approved": state["review_approved"],
+            "review_loop_status": state["review_loop_status"],
+            "review_loop_reason": state["review_loop_reason"],
+            "review_loop_stagnated_rounds": state["review_loop_stagnated_rounds"],
+            "repair_rounds": state["repair_round"],
+            "repair_score": state["repair_score"],
+            "repair_approved": state["repair_approved"],
+            "repair_loop_status": state["repair_loop_status"],
+            "repair_loop_reason": state["repair_loop_reason"],
+            "repair_loop_stagnated_rounds": state["repair_loop_stagnated_rounds"],
+            "artifact_dir": str(artifact_dir),
+            "workspace_write_enabled": state["workspace_write_enabled"],
+            "workspace_source_file": state["workspace_source_file"],
+            "workspace_test_file": state["workspace_test_file"],
+            "workspace_write_summary": state["workspace_write_summary"],
+            "implementation_medium": state["implementation_medium"],
+            "implementation_medium_reason": state["implementation_medium_reason"],
+            "blueprint_hits": state["blueprint_hits"],
+            "blueprint_fix_strategy": state["blueprint_fix_strategy"],
+            "blueprint_manual_action_required": state["blueprint_manual_action_required"],
+            "missing_sections": state["investigation_missing_sections"],
+            "blocking_issues": state["investigation_blocking_issues"],
+            "improvement_actions": state["investigation_improvement_actions"],
+            "investigation_feedback": state["investigation_feedback"],
+        }
+        summary = (
+            f"{metadata.name} stopped after {state['investigation_round']} investigation round(s) because the "
+            f"context never became reliable enough to proceed. See investigation_abort.md for the latest findings."
+        )
+        return {"final_report": final_report, "summary": summary}
+
     def plan_work(state: EngineerState) -> dict[str, Any]:
         plan_doc = _compose_initial_plan(state["task_prompt"], state["task_type"], state["doc_hits"])
         if default_llm.is_enabled():
@@ -1761,7 +2263,19 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
 
     def request_review(state: EngineerState) -> dict[str, Any]:
         review_round = state["review_round"] + 1
-        return {"review_round": review_round}
+        return {
+            "review_round": review_round,
+            "active_loop_id": ARCHITECTURE_REVIEW_LOOP_SPEC.loop_id,
+            "active_loop_round": review_round,
+            "active_loop_threshold": ARCHITECTURE_REVIEW_LOOP_SPEC.threshold,
+            "active_loop_max_rounds": ARCHITECTURE_REVIEW_LOOP_SPEC.max_rounds,
+            "active_loop_status": "running",
+            "active_loop_reason": (
+                f"Running architecture review round {review_round}/{ARCHITECTURE_REVIEW_LOOP_SPEC.max_rounds}."
+            ),
+            "active_loop_should_continue": False,
+            "active_loop_completed": False,
+        }
 
     def enter_review_subgraph(state: EngineerState) -> dict[str, Any]:
         review_request = {
@@ -1782,15 +2296,36 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
         return {}
 
     def capture_review_result(state: EngineerState) -> dict[str, Any]:
+        section_reviews = list(state.get("section_reviews", []))
+        blocking_issues = list(state.get("blocking_issues", []))
+        improvement_actions = list(state.get("improvement_actions", []))
+        previous_score = state["review_score"] if state["review_round"] > 1 else None
+        prior_stagnated_rounds = state["active_loop_stagnated_rounds"] if state["review_round"] > 1 else 0
+        progress = evaluate_quality_loop(
+            ARCHITECTURE_REVIEW_LOOP_SPEC,
+            round_index=state["review_round"],
+            score=state["score"],
+            approved=bool(state["approved"]),
+            missing_sections=state["missing_sections"],
+            blocking_issues=blocking_issues,
+            improvement_actions=improvement_actions,
+            previous_score=previous_score,
+            prior_stagnated_rounds=prior_stagnated_rounds,
+        )
         review_result = {
-            "score": state["score"],
+            "score": progress.score,
             "feedback": state["feedback"],
-            "missing_sections": state["missing_sections"],
-            "section_reviews": state.get("section_reviews", []),
-            "blocking_issues": state.get("blocking_issues", []),
-            "improvement_actions": state.get("improvement_actions", []),
-            "approved": state["approved"],
+            "missing_sections": list(progress.missing_sections),
+            "section_reviews": section_reviews,
+            "blocking_issues": list(progress.blocking_issues),
+            "improvement_actions": list(progress.improvement_actions),
+            "approved": progress.approved,
             "summary": state["summary"],
+            "loop_status": progress.status,
+            "loop_reason": progress.reason,
+            "loop_should_continue": progress.should_continue,
+            "loop_completed": progress.completed,
+            "loop_stagnated_rounds": progress.stagnated_rounds,
         }
         log_graph_payload_event(
             state=state,
@@ -1801,20 +2336,19 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
             payload=review_result,
         )
         artifact_dir = Path(state["artifact_dir"])
-        section_reviews = list(state.get("section_reviews", []))
-        blocking_issues = list(state.get("blocking_issues", []))
-        improvement_actions = list(state.get("improvement_actions", []))
         feedback_lines = [
             f"# Review Round {state['review_round']}",
             "",
-            f"- Score: {state['score']}",
-            f"- Approved: {state['approved']}",
+            f"- Score: {progress.score}",
+            f"- Approved: {progress.approved}",
+            f"- Loop Status: {progress.status}",
+            f"- Loop Reason: {progress.reason}",
             "",
             "## Blocking Issues",
-            *([f"- {item}" for item in blocking_issues] or ["- None."]),
+            *([f"- {item}" for item in progress.blocking_issues] or ["- None."]),
             "",
             "## Improvement Checklist",
-            *([f"- {item}" for item in improvement_actions] or ["- None."]),
+            *([f"- {item}" for item in progress.improvement_actions] or ["- None."]),
             "",
             "## Section Scores",
             *(
@@ -1836,21 +2370,37 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
             encoding="utf-8",
         )
         return {
-            "review_score": state["score"],
+            "review_score": progress.score,
             "review_feedback": state["feedback"],
-            "missing_sections": state["missing_sections"],
+            "missing_sections": list(progress.missing_sections),
             "review_section_reviews": section_reviews,
-            "review_blocking_issues": blocking_issues,
-            "review_improvement_actions": improvement_actions,
-            "review_approved": state["approved"],
+            "review_blocking_issues": list(progress.blocking_issues),
+            "review_improvement_actions": list(progress.improvement_actions),
+            "review_approved": progress.approved,
+            "review_loop_status": progress.status,
+            "review_loop_reason": progress.reason,
+            "review_loop_stagnated_rounds": progress.stagnated_rounds,
+            "active_loop_id": progress.loop_id,
+            "active_loop_round": progress.round_index,
+            "active_loop_score": progress.score,
+            "active_loop_threshold": progress.threshold,
+            "active_loop_max_rounds": progress.max_rounds,
+            "active_loop_status": progress.status,
+            "active_loop_reason": progress.reason,
+            "active_loop_should_continue": progress.should_continue,
+            "active_loop_completed": progress.completed,
+            "active_loop_stagnated_rounds": progress.stagnated_rounds,
+            "active_loop_missing_sections": list(progress.missing_sections),
+            "active_loop_blocking_issues": list(progress.blocking_issues),
+            "active_loop_improvement_actions": list(progress.improvement_actions),
         }
 
     def review_gate(state: EngineerState) -> str:
-        if not state["review_approved"]:
-            if state["review_round"] >= MAX_REVIEW_ROUNDS:
-                return "prepare_review_blocked_delivery"
+        if state["active_loop_status"] == "passed":
+            return "implement_code"
+        if state["active_loop_should_continue"]:
             return "revise_plan"
-        return "implement_code"
+        return "prepare_review_blocked_delivery"
 
     def revise_plan(state: EngineerState) -> dict[str, Any]:
         revised_plan = _revise_plan(
@@ -1884,6 +2434,7 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
                         f"Per-section review results:\n{state['review_section_reviews']}\n\n"
                         f"Blocking issues:\n{state['review_blocking_issues']}\n\n"
                         f"Improvement checklist:\n{state['review_improvement_actions']}\n\n"
+                        f"Loop gate reason:\n{state['active_loop_reason']}\n\n"
                         f"Reviewer feedback:\n{state['review_feedback']}\n\n"
                         f"Design doc:\n{state['design_doc']}"
                     ),
@@ -2010,7 +2561,9 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
                     f"Current test target contents:\n{current_test_target or 'No existing test target contents.'}\n\n"
                     f"Code context:\n{state['code_context'] or 'No matching source files.'}\n\n"
                     f"Blueprint context:\n{state['blueprint_context'] or 'No readable Blueprint context.'}\n\n"
+                    f"Investigation feedback:\n{state['investigation_feedback'] or 'None'}\n\n"
                     f"Reviewer feedback:\n{state['review_feedback']}\n\n"
+                    f"Repair feedback:\n{state['repair_feedback'] or 'None'}\n\n"
                     f"Previous self-test output:\n{error_context or 'None'}"
                 ),
                 schema_name="gameplay_code_bundle",
@@ -2107,8 +2660,22 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
 
     def post_implementation_gate(state: EngineerState) -> str:
         if state["generated_code"].strip() and state["generated_tests"].strip():
-            return "self_test"
+            return "request_repair_validation"
         return "prepare_delivery"
+
+    def request_repair_validation(state: EngineerState) -> dict[str, Any]:
+        repair_round = state["repair_round"] + 1
+        return {
+            "repair_round": repair_round,
+            "active_loop_id": REPAIR_LOOP_SPEC.loop_id,
+            "active_loop_round": repair_round,
+            "active_loop_threshold": REPAIR_LOOP_SPEC.threshold,
+            "active_loop_max_rounds": REPAIR_LOOP_SPEC.max_rounds,
+            "active_loop_status": "running",
+            "active_loop_reason": f"Running repair validation round {repair_round}/{REPAIR_LOOP_SPEC.max_rounds}.",
+            "active_loop_should_continue": False,
+            "active_loop_completed": False,
+        }
 
     def self_test(state: EngineerState) -> dict[str, Any]:
         compile_ok, tests_ok, test_output = _run_compile_and_tests(
@@ -2126,10 +2693,34 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
             "test_output": test_output,
         }
 
-    def test_gate(state: EngineerState) -> str:
-        if state["compile_ok"] and state["tests_ok"]:
+    def capture_repair_validation(state: EngineerState) -> dict[str, Any]:
+        progress_update, checks = _evaluate_repair_quality(state)
+        artifact_dir = Path(state["artifact_dir"])
+        artifact_dir.mkdir(parents=True, exist_ok=True)
+        repair_lines = [
+            progress_update["repair_feedback"],
+            "",
+            "## Validation Output",
+            state["test_output"] or "No self-test output was captured.",
+            "",
+            "## Validation Checks",
+            *[
+                f"- {label}: {'pass' if passed else 'needs-work'} - {rationale}"
+                for label, passed, rationale in checks
+            ],
+        ]
+        (artifact_dir / f"repair_round_{state['repair_round']}.md").write_text(
+            "\n".join(repair_lines),
+            encoding="utf-8",
+        )
+        return progress_update
+
+    def repair_gate(state: EngineerState) -> str:
+        if state["repair_loop_status"] == "passed":
             return "prepare_delivery"
-        return "repair_code"
+        if state["active_loop_should_continue"]:
+            return "repair_code"
+        return "prepare_repair_blocked_delivery"
 
     def repair_code(state: EngineerState) -> dict[str, Any]:
         bundle = _generate_code_bundle(state, error_context=state["test_output"])
@@ -2149,6 +2740,73 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
             "implementation_notes": " ".join(note for note in implementation_notes if note).strip(),
             "workspace_write_summary": " ".join(summary for summary in workspace_summaries if summary).strip(),
         }
+
+    def prepare_repair_blocked_delivery(state: EngineerState) -> dict[str, Any]:
+        artifact_dir = Path(state["artifact_dir"])
+        artifact_dir.mkdir(parents=True, exist_ok=True)
+        blocked_doc = "\n".join(
+            [
+                "# Repair Blocked",
+                "",
+                f"Workflow stopped after {state['repair_round']} repair validation round(s).",
+                f"Loop status: {state['repair_loop_status']}",
+                f"Loop reason: {state['repair_loop_reason']}",
+                "",
+                "## Blocking Issues",
+                *([f"- {item}" for item in state["repair_blocking_issues"]] or ["- None."]),
+                "",
+                "## Improvement Checklist",
+                *([f"- {item}" for item in state["repair_improvement_actions"]] or ["- None."]),
+                "",
+                "## Latest Self-Test Output",
+                state["test_output"] or "No self-test output was captured.",
+            ]
+        )
+        (artifact_dir / "repair_abort.md").write_text(blocked_doc, encoding="utf-8")
+        final_report = {
+            "status": "repair-blocked",
+            "task_type": state["task_type"],
+            "execution_track": state["execution_track"],
+            "requires_architecture_review": state["requires_architecture_review"],
+            "investigation_rounds": state["investigation_round"],
+            "investigation_score": state["investigation_score"],
+            "investigation_approved": state["investigation_approved"],
+            "investigation_loop_status": state["investigation_loop_status"],
+            "investigation_loop_reason": state["investigation_loop_reason"],
+            "investigation_loop_stagnated_rounds": state["investigation_loop_stagnated_rounds"],
+            "review_rounds": state["review_round"],
+            "review_score": state["review_score"],
+            "review_approved": state["review_approved"],
+            "review_loop_status": state["review_loop_status"],
+            "review_loop_reason": state["review_loop_reason"],
+            "review_loop_stagnated_rounds": state["review_loop_stagnated_rounds"],
+            "compile_ok": state["compile_ok"],
+            "tests_ok": state["tests_ok"],
+            "repair_rounds": state["repair_round"],
+            "repair_score": state["repair_score"],
+            "repair_approved": state["repair_approved"],
+            "repair_loop_status": state["repair_loop_status"],
+            "repair_loop_reason": state["repair_loop_reason"],
+            "repair_loop_stagnated_rounds": state["repair_loop_stagnated_rounds"],
+            "repair_feedback": state["repair_feedback"],
+            "repair_blocking_issues": state["repair_blocking_issues"],
+            "repair_improvement_actions": state["repair_improvement_actions"],
+            "artifact_dir": str(artifact_dir),
+            "workspace_write_enabled": state["workspace_write_enabled"],
+            "workspace_source_file": state["workspace_source_file"],
+            "workspace_test_file": state["workspace_test_file"],
+            "workspace_write_summary": state["workspace_write_summary"],
+            "implementation_medium": state["implementation_medium"],
+            "implementation_medium_reason": state["implementation_medium_reason"],
+            "blueprint_hits": state["blueprint_hits"],
+            "blueprint_fix_strategy": state["blueprint_fix_strategy"],
+            "blueprint_manual_action_required": state["blueprint_manual_action_required"],
+        }
+        summary = (
+            f"{metadata.name} stopped after {state['repair_round']} repair validation round(s) because the "
+            f"implementation never passed self-test. See repair_abort.md for the latest validation output."
+        )
+        return {"final_report": final_report, "summary": summary}
 
     def prepare_delivery(state: EngineerState) -> dict[str, Any]:
         artifact_dir = Path(state["artifact_dir"])
@@ -2194,8 +2852,23 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
             "review_rounds": state["review_round"],
             "review_score": state["review_score"],
             "review_approved": state["review_approved"],
+            "review_loop_status": state["review_loop_status"],
+            "review_loop_reason": state["review_loop_reason"],
+            "review_loop_stagnated_rounds": state["review_loop_stagnated_rounds"],
+            "investigation_rounds": state["investigation_round"],
+            "investigation_score": state["investigation_score"],
+            "investigation_approved": state["investigation_approved"],
+            "investigation_loop_status": state["investigation_loop_status"],
+            "investigation_loop_reason": state["investigation_loop_reason"],
+            "investigation_loop_stagnated_rounds": state["investigation_loop_stagnated_rounds"],
             "compile_ok": state["compile_ok"],
             "tests_ok": state["tests_ok"],
+            "repair_rounds": state["repair_round"],
+            "repair_score": state["repair_score"],
+            "repair_approved": state["repair_approved"],
+            "repair_loop_status": state["repair_loop_status"],
+            "repair_loop_reason": state["repair_loop_reason"],
+            "repair_loop_stagnated_rounds": state["repair_loop_stagnated_rounds"],
             "implementation_medium": state["implementation_medium"],
             "implementation_medium_reason": state["implementation_medium_reason"],
             "blueprint_hits": state["blueprint_hits"],
@@ -2233,6 +2906,8 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
                 "# Review Blocked",
                 "",
                 f"Workflow stopped after {state['review_round']} review round(s).",
+                f"Loop status: {state['active_loop_status']}",
+                f"Loop reason: {state['active_loop_reason']}",
                 "",
                 "## Latest Feedback",
                 state["review_feedback"],
@@ -2257,8 +2932,23 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
             "review_rounds": state["review_round"],
             "review_score": state["review_score"],
             "review_approved": state["review_approved"],
+            "review_loop_status": state["review_loop_status"],
+            "review_loop_reason": state["review_loop_reason"],
+            "review_loop_stagnated_rounds": state["review_loop_stagnated_rounds"],
+            "investigation_rounds": state["investigation_round"],
+            "investigation_score": state["investigation_score"],
+            "investigation_approved": state["investigation_approved"],
+            "investigation_loop_status": state["investigation_loop_status"],
+            "investigation_loop_reason": state["investigation_loop_reason"],
+            "investigation_loop_stagnated_rounds": state["investigation_loop_stagnated_rounds"],
             "compile_ok": False,
             "tests_ok": False,
+            "repair_rounds": state["repair_round"],
+            "repair_score": state["repair_score"],
+            "repair_approved": state["repair_approved"],
+            "repair_loop_status": state["repair_loop_status"],
+            "repair_loop_reason": state["repair_loop_reason"],
+            "repair_loop_stagnated_rounds": state["repair_loop_stagnated_rounds"],
             "implementation_medium": state["implementation_medium"],
             "implementation_medium_reason": state["implementation_medium_reason"],
             "blueprint_hits": state["blueprint_hits"],
@@ -2278,7 +2968,7 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
         }
         summary = (
             f"{metadata.name} stopped after {state['review_round']} review round(s) because the plan never reached "
-            f"approval. See review_abort.md for the latest reviewer feedback."
+            f"approval. Loop status: {state['active_loop_status']}. See review_abort.md for the latest reviewer feedback."
         )
         return {"final_report": final_report, "summary": summary}
 
@@ -2312,6 +3002,10 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
         trace_graph_node(graph_name=graph_name, node_name="capture_doc_context", node_fn=capture_doc_context),
     )
     graph.add_node(
+        "request_investigation",
+        trace_graph_node(graph_name=graph_name, node_name="request_investigation", node_fn=request_investigation),
+    )
+    graph.add_node(
         "simulate_engineer_investigation",
         trace_graph_node(
             graph_name=graph_name,
@@ -2328,12 +3022,24 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
         ),
     )
     graph.add_node(
+        "evaluate_investigation",
+        trace_graph_node(graph_name=graph_name, node_name="evaluate_investigation", node_fn=evaluate_investigation),
+    )
+    graph.add_node(
         "build_design_doc",
         trace_graph_node(graph_name=graph_name, node_name="build_design_doc", node_fn=build_design_doc),
     )
     graph.add_node(
         "build_bug_context_doc",
         trace_graph_node(graph_name=graph_name, node_name="build_bug_context_doc", node_fn=build_bug_context_doc),
+    )
+    graph.add_node(
+        "prepare_investigation_blocked_delivery",
+        trace_graph_node(
+            graph_name=graph_name,
+            node_name="prepare_investigation_blocked_delivery",
+            node_fn=prepare_investigation_blocked_delivery,
+        ),
     )
     graph.add_node(
         "plan_work",
@@ -2369,8 +3075,24 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
         ),
     )
     graph.add_node(
+        "request_repair_validation",
+        trace_graph_node(
+            graph_name=graph_name,
+            node_name="request_repair_validation",
+            node_fn=request_repair_validation,
+        ),
+    )
+    graph.add_node(
         "self_test",
         trace_graph_node(graph_name=graph_name, node_name="self_test", node_fn=self_test),
+    )
+    graph.add_node(
+        "capture_repair_validation",
+        trace_graph_node(
+            graph_name=graph_name,
+            node_name="capture_repair_validation",
+            node_fn=capture_repair_validation,
+        ),
     )
     graph.add_node(
         "repair_code",
@@ -2379,6 +3101,14 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
     graph.add_node(
         "prepare_delivery",
         trace_graph_node(graph_name=graph_name, node_name="prepare_delivery", node_fn=prepare_delivery),
+    )
+    graph.add_node(
+        "prepare_repair_blocked_delivery",
+        trace_graph_node(
+            graph_name=graph_name,
+            node_name="prepare_repair_blocked_delivery",
+            node_fn=prepare_repair_blocked_delivery,
+        ),
     )
     graph.add_node(
         "prepare_review_blocked_delivery",
@@ -2419,14 +3149,18 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
         },
     )
     graph.add_edge(tool_node_names[doc_context_tool_name], "capture_doc_context")
-    graph.add_edge("capture_doc_context", "simulate_engineer_investigation")
+    graph.add_edge("capture_doc_context", "request_investigation")
+    graph.add_edge("request_investigation", "simulate_engineer_investigation")
     graph.add_edge("simulate_engineer_investigation", "assess_implementation_strategy")
+    graph.add_edge("assess_implementation_strategy", "evaluate_investigation")
     graph.add_conditional_edges(
-        "assess_implementation_strategy",
-        trace_route_decision(graph_name=graph_name, router_name="route_execution_track", route_fn=route_execution_track),
+        "evaluate_investigation",
+        trace_route_decision(graph_name=graph_name, router_name="investigation_gate", route_fn=investigation_gate),
         {
+            "request_investigation": "request_investigation",
             "build_design_doc": "build_design_doc",
             "build_bug_context_doc": "build_bug_context_doc",
+            "prepare_investigation_blocked_delivery": "prepare_investigation_blocked_delivery",
         },
     )
     graph.add_edge("build_design_doc", "plan_work")
@@ -2454,19 +3188,24 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
             route_fn=post_implementation_gate,
         ),
         {
-            "self_test": "self_test",
+            "request_repair_validation": "request_repair_validation",
             "prepare_delivery": "prepare_delivery",
         },
     )
+    graph.add_edge("request_repair_validation", "self_test")
+    graph.add_edge("self_test", "capture_repair_validation")
     graph.add_conditional_edges(
-        "self_test",
-        trace_route_decision(graph_name=graph_name, router_name="test_gate", route_fn=test_gate),
+        "capture_repair_validation",
+        trace_route_decision(graph_name=graph_name, router_name="repair_gate", route_fn=repair_gate),
         {
             "repair_code": "repair_code",
             "prepare_delivery": "prepare_delivery",
+            "prepare_repair_blocked_delivery": "prepare_repair_blocked_delivery",
         },
     )
-    graph.add_edge("repair_code", "self_test")
+    graph.add_edge("repair_code", "request_repair_validation")
     graph.add_edge("prepare_delivery", END)
     graph.add_edge("prepare_review_blocked_delivery", END)
+    graph.add_edge("prepare_investigation_blocked_delivery", END)
+    graph.add_edge("prepare_repair_blocked_delivery", END)
     return graph
