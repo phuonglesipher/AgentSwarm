@@ -33,6 +33,27 @@ class ProjectManifest:
     raw: dict[str, Any] = field(default_factory=dict)
 
 
+def _merge_root_lists(base: tuple[str, ...], additions: tuple[str, ...]) -> tuple[str, ...]:
+    merged = list(base)
+    seen = {item.replace("\\", "/").strip("/").lower() for item in base}
+    for item in additions:
+        normalized = item.replace("\\", "/").strip("/").lower()
+        if normalized in seen:
+            continue
+        merged.append(item)
+        seen.add(normalized)
+    return tuple(merged)
+
+
+def _looks_like_unreal_project(host_root: Path) -> bool:
+    try:
+        if any(host_root.glob("*.uproject")):
+            return True
+    except OSError:
+        return False
+    return (host_root / "Source").exists() and (host_root / "Content").exists()
+
+
 def _load_yaml_file(path: Path) -> dict[str, Any]:
     if not path.exists():
         return {}
@@ -56,16 +77,39 @@ def _to_tuple_of_strings(value: Any, fallback: tuple[str, ...]) -> tuple[str, ..
 def load_agentswarm_config(paths: RuntimePaths) -> AgentSwarmConfig:
     data = _load_yaml_file(paths.config_path)
     defaults = AgentSwarmConfig()
+    source_roots = _to_tuple_of_strings(data.get("source_roots"), defaults.source_roots)
+    doc_roots = _to_tuple_of_strings(data.get("doc_roots"), defaults.doc_roots)
+    test_roots = _to_tuple_of_strings(data.get("test_roots"), defaults.test_roots)
+    exclude_roots = _to_tuple_of_strings(data.get("exclude_roots"), defaults.exclude_roots)
+
+    if _looks_like_unreal_project(paths.host_root):
+        source_roots = _merge_root_lists(source_roots, ("Source", "Plugins"))
+        doc_roots = _merge_root_lists(doc_roots, ("docs/architecture",))
+        test_roots = _merge_root_lists(test_roots, ("Source",))
+        exclude_roots = _merge_root_lists(
+            exclude_roots,
+            (
+                "Intermediate",
+                "Binaries",
+                "DerivedDataCache",
+                "Saved",
+                "Plugins/Marketplace",
+                "node_modules",
+                ".vs",
+                ".idea",
+            ),
+        )
+
     return AgentSwarmConfig(
         version=int(data.get("version", defaults.version)),
         agent_root_name=str(data.get("agent_root", defaults.agent_root_name)),
         target_scope=str(data.get("target_scope", defaults.target_scope)),
         workflow_sources=_to_tuple_of_strings(data.get("workflow_sources"), defaults.workflow_sources),
         tool_sources=_to_tuple_of_strings(data.get("tool_sources"), defaults.tool_sources),
-        source_roots=_to_tuple_of_strings(data.get("source_roots"), defaults.source_roots),
-        doc_roots=_to_tuple_of_strings(data.get("doc_roots"), defaults.doc_roots),
-        test_roots=_to_tuple_of_strings(data.get("test_roots"), defaults.test_roots),
-        exclude_roots=_to_tuple_of_strings(data.get("exclude_roots"), defaults.exclude_roots),
+        source_roots=source_roots,
+        doc_roots=doc_roots,
+        test_roots=test_roots,
+        exclude_roots=exclude_roots,
         memory_namespaces=_to_tuple_of_strings(data.get("memory_namespaces"), defaults.memory_namespaces),
     )
 

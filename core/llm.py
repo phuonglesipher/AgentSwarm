@@ -156,6 +156,7 @@ class CodexCLIConfig:
     command: str
     model: str
     timeout_seconds: int
+    working_directory: str | None = None
 
 
 class CodexCliLLMClient(LLMClient):
@@ -163,13 +164,23 @@ class CodexCliLLMClient(LLMClient):
         self.config = config
         self._disabled_reason: str | None = None
 
+    def _resolve_command_path(self) -> str | None:
+        resolved = shutil.which(self.config.command)
+        if resolved:
+            return resolved
+
+        candidate = Path(self.config.command)
+        if candidate.exists():
+            return str(candidate)
+        return None
+
     def is_enabled(self) -> bool:
-        return self._disabled_reason is None and shutil.which(self.config.command) is not None
+        return self._disabled_reason is None and self._resolve_command_path() is not None
 
     def describe(self) -> str:
         if self._disabled_reason:
             return f"codex_cli/{self.config.model}: disabled ({self._disabled_reason})"
-        if shutil.which(self.config.command) is None:
+        if self._resolve_command_path() is None:
             return f"codex_cli/{self.config.model}: disabled (codex command not found)"
         return f"codex_cli/{self.config.model}: available"
 
@@ -193,14 +204,18 @@ class CodexCliLLMClient(LLMClient):
         return _parse_json_object(output)
 
     def _run_codex(self, *, prompt: str, schema: dict[str, Any] | None) -> str:
-        if not self.is_enabled():
+        resolved_command = self._resolve_command_path()
+        if not resolved_command or not self.is_enabled():
             raise LLMError(self.describe())
+        effective_cwd = (
+            str(Path(self.config.working_directory).resolve()) if self.config.working_directory else os.getcwd()
+        )
 
         with tempfile.TemporaryDirectory(prefix="codex-llm-") as temp_dir:
             temp_path = Path(temp_dir)
             output_path = temp_path / "last_message.txt"
             command = [
-                self.config.command,
+                resolved_command,
                 "exec",
                 "--skip-git-repo-check",
                 "--ephemeral",
@@ -212,6 +227,8 @@ class CodexCliLLMClient(LLMClient):
                 self.config.model,
                 "-o",
                 str(output_path),
+                "--cd",
+                effective_cwd,
             ]
 
             if schema is not None:
@@ -219,15 +236,18 @@ class CodexCliLLMClient(LLMClient):
                 schema_path.write_text(json.dumps(schema["schema"], indent=2), encoding="utf-8")
                 command.extend(["--output-schema", str(schema_path)])
 
-            command.append(prompt)
+            command.append("-")
 
             try:
                 completed = subprocess.run(
                     command,
                     check=False,
-                    cwd=os.getcwd(),
+                    cwd=effective_cwd,
                     capture_output=True,
+                    input=prompt,
                     text=True,
+                    encoding="utf-8",
+                    errors="replace",
                     timeout=self.config.timeout_seconds,
                 )
             except subprocess.TimeoutExpired as exc:
@@ -288,7 +308,7 @@ class LLMManager:
         self._default_profile = default_profile
 
     @classmethod
-    def from_env(cls) -> "LLMManager":
+    def from_env(cls, *, working_directory: str | None = None) -> "LLMManager":
         provider = os.getenv("LLM_PROVIDER")
         if not provider:
             provider = "codex_cli" if shutil.which(os.getenv("CODEX_COMMAND", "codex")) else "responses_api"
@@ -296,10 +316,18 @@ class LLMManager:
 
         profiles: dict[str, LLMClient] = {}
         for profile in _discover_profiles(provider):
-            profiles[profile] = _build_client_for_profile(provider=provider, profile=profile)
+            profiles[profile] = _build_client_for_profile(
+                provider=provider,
+                profile=profile,
+                working_directory=working_directory,
+            )
 
         if "default" not in profiles:
-            profiles["default"] = _build_client_for_profile(provider=provider, profile="default")
+            profiles["default"] = _build_client_for_profile(
+                provider=provider,
+                profile="default",
+                working_directory=working_directory,
+            )
         return cls(profiles=profiles)
 
     def resolve(self, profile: str | None = None) -> LLMClient:
@@ -336,7 +364,12 @@ def _discover_profiles(provider: str) -> list[str]:
     return sorted(profiles)
 
 
-def _build_client_for_profile(provider: str, profile: str) -> LLMClient:
+def _build_client_for_profile(
+    provider: str,
+    profile: str,
+    *,
+    working_directory: str | None = None,
+) -> LLMClient:
     if provider == "codex_cli":
         return CodexCliLLMClient(
             CodexCLIConfig(
@@ -350,6 +383,7 @@ def _build_client_for_profile(provider: str, profile: str) -> LLMClient:
                     legacy_profile_prefix="OPENAI_MODEL_",
                 ),
                 timeout_seconds=int(os.getenv("CODEX_TIMEOUT_SECONDS", "300")),
+                working_directory=working_directory,
             )
         )
 

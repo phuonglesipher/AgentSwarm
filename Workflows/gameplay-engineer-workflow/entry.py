@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import io
+import os
 from pathlib import Path
+import re
 import sys
 import tempfile
 from typing import Any
@@ -16,7 +19,7 @@ from core.graph_logging import log_graph_payload_event, trace_graph_node, trace_
 from core.llm import LLMError
 from core.models import WorkflowContext, WorkflowMetadata
 from core.tool_graph import build_tool_call_message, find_latest_tool_message
-from core.text_utils import normalize_text, slugify, tokenize
+from core.text_utils import keyword_tokens, normalize_text, slugify, tokenize
 
 
 class SectionReview(TypedDict):
@@ -101,6 +104,45 @@ REQUIRED_PLAN_SECTIONS = {
 PLAN_SECTION_ORDER = list(REQUIRED_PLAN_SECTIONS)
 REVIEW_APPROVAL_SCORE = 90
 MAX_REVIEW_ROUNDS = 3
+SOURCE_EXTENSIONS = {
+    ".py",
+    ".lua",
+    ".gd",
+    ".cs",
+    ".cpp",
+    ".cc",
+    ".c",
+    ".h",
+    ".hpp",
+    ".inl",
+}
+TEST_FILE_NAMES = ("test_", "_test", "tests", "spec_", "_spec")
+BLUEPRINT_ASSET_EXTENSION = ".uasset"
+BLUEPRINT_TEXT_EXTENSIONS = {
+    ".copy",
+    ".csv",
+    ".export",
+    ".ini",
+    ".json",
+    ".md",
+    ".txt",
+    ".utxt",
+    ".yaml",
+    ".yml",
+}
+BLUEPRINT_NAME_PREFIXES = (
+    "abp_",
+    "bp_",
+    "bpi_",
+    "wbp_",
+)
+BLUEPRINT_PATH_HINTS = (
+    "blueprint",
+    "blueprints",
+    "widget",
+    "widgets",
+    "umg",
+)
 
 
 def _fallback_task_classification(task_prompt: str) -> tuple[str, str]:
@@ -109,6 +151,403 @@ def _fallback_task_classification(task_prompt: str) -> tuple[str, str]:
     task_type = "bugfix" if bugfix_keywords & tokenize(normalized) else "feature"
     reason = "Detected bug-fix vocabulary in the task prompt." if task_type == "bugfix" else "Defaulted to feature flow."
     return task_type, reason
+
+
+def _expanded_tokens(value: str) -> set[str]:
+    spaced = re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", value)
+    normalized = re.sub(r"[_./\\-]+", " ", spaced)
+    return tokenize(normalized)
+
+
+def _short_slug(value: str, *, fallback: str, max_length: int) -> str:
+    slug = slugify(value, fallback=fallback)
+    if len(slug) <= max_length:
+        return slug
+
+    digest = hashlib.sha1(normalize_text(value).encode("utf-8")).hexdigest()[:8]
+    keep_length = max(1, max_length - len(digest) - 1)
+    trimmed = slug[:keep_length].rstrip("-") or fallback
+    return f"{trimmed}-{digest}"
+
+
+def _artifact_task_dir_name(task_id: str) -> str:
+    normalized = str(task_id).strip()
+    digest = hashlib.sha1(normalized.encode("utf-8")).hexdigest()[:6]
+    match = re.match(r"task-(\d+)(?:-(.*))?$", normalized)
+    if match:
+        task_index = match.group(1)
+        suffix_source = match.group(2) or normalized
+        suffix = _short_slug(suffix_source, fallback=f"task-{task_index}", max_length=14)
+        return f"task-{task_index}-{suffix}-{digest}"
+    suffix = _short_slug(normalized, fallback="task", max_length=14)
+    return f"{suffix}-{digest}"
+
+
+def _should_skip_path(path: Path, scope_root: Path, exclude_roots: tuple[str, ...]) -> bool:
+    try:
+        relative = path.relative_to(scope_root).as_posix()
+    except ValueError:
+        return True
+
+    relative_lower = relative.lower()
+    for excluded in exclude_roots:
+        normalized = excluded.replace("\\", "/").strip("/").lower()
+        if not normalized:
+            continue
+        if relative_lower == normalized or relative_lower.startswith(f"{normalized}/"):
+            return True
+    return False
+
+
+def _safe_read_text(path: Path, max_chars: int) -> str:
+    try:
+        return path.read_text(encoding="utf-8", errors="ignore")[:max_chars]
+    except OSError:
+        return ""
+
+
+def _read_text(path: Path) -> str:
+    try:
+        return path.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return ""
+
+
+def _extract_relative_path_candidates(raw_path: str, *, allowed_suffixes: set[str] | None = None) -> list[str]:
+    value = str(raw_path).strip().replace("\\", "/")
+    if not value:
+        return []
+
+    candidates: list[str] = []
+
+    def add(candidate: str) -> None:
+        normalized = candidate.strip().strip("`'\"").strip("()[]{}").replace("\\", "/")
+        if normalized and normalized not in candidates:
+            candidates.append(normalized)
+
+    add(value)
+    add(re.sub(r"^[*\-\s]+", "", value))
+
+    markdown_match = re.search(r"\[[^\]]+\]\(([^)]+)\)", value)
+    if markdown_match:
+        add(markdown_match.group(1))
+
+    for separator in [" - ", " — ", " – ", "\n", "\t", " ("]:
+        if separator in value:
+            add(value.split(separator, 1)[0])
+
+    suffixes = allowed_suffixes or (SOURCE_EXTENSIONS | BLUEPRINT_TEXT_EXTENSIONS | {BLUEPRINT_ASSET_EXTENSION, ".md"})
+    suffix_pattern = "|".join(re.escape(suffix) for suffix in sorted(suffixes, key=len, reverse=True))
+    if suffix_pattern:
+        path_pattern = re.compile(
+            rf"((?:[A-Za-z]:)?(?:[A-Za-z0-9_. -]+/)+[A-Za-z0-9_. -]+(?:{suffix_pattern}))",
+            re.IGNORECASE,
+        )
+        for match in path_pattern.finditer(value):
+            add(match.group(1))
+
+    return candidates
+
+
+def _resolve_existing_relative_path(
+    scope_root: Path,
+    raw_path: str,
+    exclude_roots: tuple[str, ...],
+    *,
+    allowed_suffixes: set[str] | None = None,
+) -> str:
+    resolved_root = scope_root.resolve()
+    for candidate_value in _extract_relative_path_candidates(raw_path, allowed_suffixes=allowed_suffixes):
+        candidate = Path(candidate_value)
+        try:
+            resolved_candidate = candidate.resolve() if candidate.is_absolute() else (resolved_root / candidate).resolve()
+            relative_path = resolved_candidate.relative_to(resolved_root).as_posix()
+        except (OSError, ValueError):
+            continue
+
+        if allowed_suffixes is not None and Path(relative_path).suffix.lower() not in allowed_suffixes:
+            continue
+        if not (resolved_root / relative_path).exists():
+            continue
+        if _should_skip_path(resolved_root / relative_path, resolved_root, exclude_roots):
+            continue
+        return relative_path
+    return ""
+
+
+def _normalize_relative_hits(
+    scope_root: Path,
+    raw_hits: Any,
+    exclude_roots: tuple[str, ...],
+    *,
+    allowed_suffixes: set[str] | None = None,
+    max_hits: int = 5,
+) -> list[str]:
+    if not isinstance(raw_hits, list):
+        return []
+    hits: list[str] = []
+    for item in raw_hits:
+        relative_path = _resolve_existing_relative_path(
+            scope_root,
+            str(item),
+            exclude_roots,
+            allowed_suffixes=allowed_suffixes,
+        )
+        if relative_path and relative_path not in hits:
+            hits.append(relative_path)
+        if len(hits) >= max_hits:
+            break
+    return hits
+
+
+def _resolve_code_roots(scope_root: Path, relative_roots: tuple[str, ...]) -> list[Path]:
+    candidate_roots = [scope_root / relative_root for relative_root in relative_roots]
+    existing = [path for path in candidate_roots if path.exists()]
+    return existing or [scope_root]
+
+
+def _score_code_path(path: Path, scope_root: Path, prompt_tokens: set[str]) -> int:
+    try:
+        relative_path = path.relative_to(scope_root).as_posix()
+    except ValueError:
+        return 0
+    haystack = f"{relative_path} {_safe_read_text(path, 6000)}"
+    return len(prompt_tokens & _expanded_tokens(haystack))
+
+
+def _find_local_code_hits(
+    *,
+    task_prompt: str,
+    scope_root: Path,
+    source_roots: tuple[str, ...],
+    test_roots: tuple[str, ...],
+    exclude_roots: tuple[str, ...],
+    max_hits: int = 5,
+) -> tuple[list[str], list[str]]:
+    prompt_tokens = keyword_tokens(task_prompt) or _expanded_tokens(task_prompt)
+    if not prompt_tokens:
+        return [], []
+
+    source_scored: list[tuple[int, str]] = []
+    for root in _resolve_code_roots(scope_root, source_roots):
+        if not root.exists():
+            continue
+        for path in root.rglob("*"):
+            if not path.is_file():
+                continue
+            if path.suffix.lower() not in SOURCE_EXTENSIONS:
+                continue
+            if _should_skip_path(path, scope_root, exclude_roots):
+                continue
+            relative_lower = path.relative_to(scope_root).as_posix().lower()
+            if "/tests/" in f"/{relative_lower}/":
+                continue
+            score = _score_code_path(path, scope_root, prompt_tokens)
+            if score <= 0:
+                continue
+            source_scored.append((score, path.relative_to(scope_root).as_posix()))
+
+    test_scored: list[tuple[int, str]] = []
+    for root in _resolve_code_roots(scope_root, test_roots):
+        if not root.exists():
+            continue
+        for path in root.rglob("*"):
+            if not path.is_file():
+                continue
+            if path.suffix.lower() not in SOURCE_EXTENSIONS:
+                continue
+            if _should_skip_path(path, scope_root, exclude_roots):
+                continue
+            lower_name = path.name.lower()
+            relative_lower = path.relative_to(scope_root).as_posix().lower()
+            if not any(marker in lower_name for marker in TEST_FILE_NAMES) and "/tests/" not in f"/{relative_lower}/":
+                continue
+            score = _score_code_path(path, scope_root, prompt_tokens)
+            if score <= 0:
+                continue
+            test_scored.append((score, path.relative_to(scope_root).as_posix()))
+
+    source_scored.sort(key=lambda item: (-item[0], item[1].lower()))
+    test_scored.sort(key=lambda item: (-item[0], item[1].lower()))
+    source_hits = [path for _, path in source_scored[:max_hits]]
+    test_hits = [path for _, path in test_scored[:max_hits]]
+    return source_hits, test_hits
+
+
+def _resolve_content_roots(scope_root: Path) -> list[Path]:
+    roots: list[Path] = []
+
+    content_root = scope_root / "Content"
+    if content_root.exists():
+        roots.append(content_root)
+
+    plugins_root = scope_root / "Plugins"
+    if plugins_root.exists():
+        for plugin_file in sorted(plugins_root.rglob("*.uplugin")):
+            plugin_content = plugin_file.parent / "Content"
+            if plugin_content.exists():
+                roots.append(plugin_content)
+
+    unique_roots = sorted({path.resolve() for path in roots}, key=lambda item: item.as_posix().lower())
+    return unique_roots or [scope_root]
+
+
+def _find_companion_paths(asset_path: Path) -> list[Path]:
+    try:
+        sibling_paths = [path for path in asset_path.parent.iterdir() if path.is_file()]
+    except OSError:
+        return []
+
+    asset_name = asset_path.name.lower()
+    asset_stem = asset_path.stem.lower()
+    candidates: list[tuple[int, str, Path]] = []
+    for path in sibling_paths:
+        if path == asset_path or path.suffix.lower() not in BLUEPRINT_TEXT_EXTENSIONS:
+            continue
+        companion_name = path.name.lower()
+        companion_stem = path.stem.lower()
+        score = 0
+        if companion_stem == asset_stem:
+            score = 40
+        elif companion_name.startswith(f"{asset_name}."):
+            score = 35
+        elif companion_name.startswith(f"{asset_stem}."):
+            score = 30
+        elif companion_stem.startswith(f"{asset_stem}_") or companion_stem.startswith(f"{asset_stem}-"):
+            score = 25
+        if score > 0:
+            candidates.append((score, companion_name, path))
+
+    candidates.sort(key=lambda item: (-item[0], item[1]))
+    return [path for _, _, path in candidates]
+
+
+def _is_blueprint_candidate(asset_path: Path, companion_paths: list[Path]) -> bool:
+    relative_lower = asset_path.as_posix().lower()
+    stem_lower = asset_path.stem.lower()
+    if companion_paths:
+        return True
+    if any(stem_lower.startswith(prefix) for prefix in BLUEPRINT_NAME_PREFIXES):
+        return True
+    return any(f"/{hint}/" in f"/{relative_lower}/" for hint in BLUEPRINT_PATH_HINTS)
+
+
+def _score_blueprint_asset(
+    asset_path: Path,
+    scope_root: Path,
+    companion_paths: list[Path],
+    prompt_tokens: set[str],
+) -> int:
+    try:
+        relative_asset_path = asset_path.relative_to(scope_root).as_posix()
+    except ValueError:
+        return 0
+
+    path_matches = len(prompt_tokens & _expanded_tokens(relative_asset_path))
+    companion_matches = 0
+    for companion_path in companion_paths[:2]:
+        try:
+            relative_companion_path = companion_path.relative_to(scope_root).as_posix()
+        except ValueError:
+            relative_companion_path = companion_path.as_posix()
+        companion_matches += len(
+            prompt_tokens & _expanded_tokens(f"{relative_companion_path} {_safe_read_text(companion_path, 6000)}")
+        )
+
+    base_score = path_matches + (companion_matches * 2)
+    if base_score == 0:
+        return 0
+    if companion_paths:
+        base_score += 2
+    if _is_blueprint_candidate(asset_path, companion_paths):
+        base_score += 1
+    return base_score
+
+
+def _find_local_blueprint_hits(
+    *,
+    task_prompt: str,
+    scope_root: Path,
+    exclude_roots: tuple[str, ...],
+    max_hits: int = 5,
+) -> tuple[list[str], list[str]]:
+    prompt_tokens = keyword_tokens(task_prompt) or _expanded_tokens(task_prompt)
+    if not prompt_tokens:
+        return [], []
+
+    scored_hits: list[tuple[int, str, str, list[str]]] = []
+    for root in _resolve_content_roots(scope_root):
+        if not root.exists():
+            continue
+        for asset_path in root.rglob(f"*{BLUEPRINT_ASSET_EXTENSION}"):
+            if not asset_path.is_file():
+                continue
+            if _should_skip_path(asset_path, scope_root, exclude_roots):
+                continue
+            companion_paths = _find_companion_paths(asset_path)
+            if not _is_blueprint_candidate(asset_path, companion_paths):
+                continue
+            score = _score_blueprint_asset(asset_path, scope_root, companion_paths, prompt_tokens)
+            if score <= 0:
+                continue
+            relative_asset_path = asset_path.relative_to(scope_root).as_posix()
+            relative_companions = [path.relative_to(scope_root).as_posix() for path in companion_paths]
+            scored_hits.append((score, relative_asset_path.lower(), relative_asset_path, relative_companions))
+
+    scored_hits.sort(key=lambda item: (-item[0], item[1]))
+    blueprint_hits: list[str] = []
+    blueprint_text_hits: list[str] = []
+    for _, _, asset_path, companion_paths in scored_hits[:max_hits]:
+        blueprint_hits.append(asset_path)
+        for companion_path in companion_paths:
+            if companion_path not in blueprint_text_hits:
+                blueprint_text_hits.append(companion_path)
+    return blueprint_hits, blueprint_text_hits
+
+
+def _summarize_text_context(
+    scope_root: Path,
+    relative_paths: list[str],
+    *,
+    max_files: int = 4,
+    max_chars_per_file: int = 900,
+    max_total_chars: int = 4000,
+) -> str:
+    sections: list[str] = []
+    total_chars = 0
+    for relative_path in relative_paths[:max_files]:
+        file_text = _safe_read_text(scope_root / relative_path, max_chars_per_file).strip()
+        if not file_text:
+            continue
+        section = f"# {relative_path}\n{file_text}"
+        if total_chars and total_chars + len(section) > max_total_chars:
+            break
+        sections.append(section)
+        total_chars += len(section)
+    return "\n\n".join(sections)
+
+
+def _summarize_blueprint_context(
+    scope_root: Path,
+    blueprint_hits: list[str],
+    blueprint_text_hits: list[str],
+) -> str:
+    text_summary = _summarize_text_context(
+        scope_root,
+        blueprint_text_hits,
+        max_files=3,
+        max_chars_per_file=900,
+        max_total_chars=3200,
+    )
+    if text_summary:
+        return text_summary
+    if blueprint_hits:
+        sections = [
+            f"# {item}\nCompanion text not available for direct inspection."
+            for item in blueprint_hits[:3]
+        ]
+        return "\n\n".join(sections)
+    return ""
 
 
 def _compose_design_doc(
@@ -193,13 +632,14 @@ def _fallback_implementation_medium(
     source_hits: list[str],
     test_hits: list[str],
     blueprint_hits: list[str],
+    blueprint_text_hits: list[str],
 ) -> tuple[str, str]:
     normalized = normalize_text(task_prompt)
     tokens = tokenize(normalized)
     mentions_blueprint = any(token in tokens for token in {"blueprint", "uasset", "bp"})
     mentions_cpp = "c++" in normalized or "cpp" in tokens
     has_code = bool(source_hits or test_hits)
-    has_blueprints = bool(blueprint_hits)
+    has_blueprints = bool(blueprint_hits or blueprint_text_hits)
 
     if has_code and has_blueprints:
         return "mixed", "Matched both source code files and Blueprint assets related to the task."
@@ -479,18 +919,32 @@ def _workspace_roots_exist(scope_root: Path, relative_roots: tuple[str, ...]) ->
     return any((scope_root / relative_root).exists() for relative_root in relative_roots)
 
 
+def _select_workspace_root(scope_root: Path, relative_roots: tuple[str, ...], *, fallback: str) -> Path:
+    for relative_root in relative_roots:
+        candidate = Path(relative_root)
+        if (scope_root / candidate).exists():
+            return candidate
+    if relative_roots:
+        return Path(relative_roots[0])
+    return Path(fallback)
+
+
 def _build_workspace_target(
+    scope_root: Path,
     task_id: str,
     hits: list[str],
     relative_roots: tuple[str, ...],
     *,
     prefix: str,
 ) -> str:
-    task_slug = slugify(task_id, fallback="gameplay-task").replace("-", "_")
     if hits:
-        anchor = Path(hits[0])
-        return (anchor.parent / f"{prefix}_{task_slug}.py").as_posix()
-    base_root = Path(relative_roots[0] if relative_roots else ("tests" if prefix.startswith("test") else "src"))
+        return Path(hits[0]).as_posix()
+    task_slug = _short_slug(task_id, fallback="gameplay-task", max_length=18).replace("-", "_")
+    base_root = _select_workspace_root(
+        scope_root,
+        relative_roots,
+        fallback="tests" if prefix.startswith("test") else "src",
+    )
     return (base_root / f"{prefix}_{task_slug}.py").as_posix()
 
 
@@ -507,8 +961,20 @@ def _resolve_workspace_targets(
     if not allow_workspace_writes:
         return "", ""
 
-    source_file = _build_workspace_target(task_id, source_hits, source_roots, prefix="agentswarm_gameplay_change")
-    test_file = _build_workspace_target(task_id, test_hits, test_roots, prefix="test_agentswarm_gameplay_change")
+    source_file = _build_workspace_target(
+        scope_root,
+        task_id,
+        source_hits,
+        source_roots,
+        prefix="agentswarm_gameplay_change",
+    )
+    test_file = _build_workspace_target(
+        scope_root,
+        task_id,
+        test_hits,
+        test_roots,
+        prefix="test_agentswarm_gameplay_change",
+    )
 
     # Keep the generated files inside the selected workspace scope.
     for relative_path in [source_file, test_file]:
@@ -525,6 +991,30 @@ def _write_workspace_file(scope_root: Path, relative_path: str, content: str) ->
     target_path.parent.mkdir(parents=True, exist_ok=True)
     target_path.write_text(content, encoding="utf-8")
     return str(target_path)
+
+
+def _mirror_existing_workspace_bundle(
+    *,
+    scope_root: Path,
+    source_relative_path: str,
+    test_relative_path: str,
+) -> dict[str, str] | None:
+    if not source_relative_path or not test_relative_path:
+        return None
+
+    source_code = _read_text(scope_root / source_relative_path)
+    test_code = _read_text(scope_root / test_relative_path)
+    if not source_code.strip() or not test_code.strip():
+        return None
+
+    return {
+        "source_code": source_code,
+        "test_code": test_code,
+        "implementation_notes": (
+            "Deterministic fallback mirrored the matched host-project source and test files so the "
+            "workflow could validate existing workspace targets without inventing a shadow module."
+        ),
+    }
 
 
 def _revise_plan(
@@ -627,16 +1117,46 @@ def _load_module_from_path(module_name: str, module_path: Path):
     return module
 
 
-def _run_compile_and_tests(source_code: str, test_code: str) -> tuple[bool, bool, str]:
-    try:
-        compile(source_code, "gameplay_change.py", "exec")
-    except SyntaxError as exc:
-        return False, False, f"Compile error in gameplay_change.py: {exc}"
+def _normalize_runtime_relative_path(relative_path: str, fallback: str) -> Path:
+    value = str(relative_path or "").strip().replace("\\", "/")
+    if not value:
+        return Path(fallback)
+
+    candidate = Path(value)
+    if candidate.is_absolute():
+        return Path(fallback)
+
+    parts: list[str] = []
+    for part in candidate.parts:
+        if part in {"", "."}:
+            continue
+        if part == "..":
+            return Path(fallback)
+        parts.append(part)
+    if not parts:
+        return Path(fallback)
+    return Path(*parts)
+
+
+def _run_compile_and_tests(
+    source_code: str,
+    test_code: str,
+    *,
+    source_relative_path: str = "gameplay_change.py",
+    test_relative_path: str = "test_gameplay_change.py",
+) -> tuple[bool, bool, str]:
+    source_runtime_path = _normalize_runtime_relative_path(source_relative_path, "gameplay_change.py")
+    test_runtime_path = _normalize_runtime_relative_path(test_relative_path, "test_gameplay_change.py")
 
     try:
-        compile(test_code, "test_gameplay_change.py", "exec")
+        compile(source_code, source_runtime_path.as_posix(), "exec")
     except SyntaxError as exc:
-        return False, False, f"Compile error in test_gameplay_change.py: {exc}"
+        return False, False, f"Compile error in {source_runtime_path.name}: {exc}"
+
+    try:
+        compile(test_code, test_runtime_path.as_posix(), "exec")
+    except SyntaxError as exc:
+        return False, False, f"Compile error in {test_runtime_path.name}: {exc}"
 
     aliased_module_names = [
         "gameplay_change",
@@ -648,16 +1168,20 @@ def _run_compile_and_tests(source_code: str, test_code: str) -> tuple[bool, bool
     generated_test_module_name = "_generated_test_gameplay_change"
     previous_generated_test_module = sys.modules.get(generated_test_module_name)
     original_sys_path = list(sys.path)
+    previous_source_env = os.environ.get("GAMEPLAY_CHANGE_SOURCE_PATH")
 
     try:
         with tempfile.TemporaryDirectory(prefix="gameplay-selftest-") as temp_dir:
             temp_path = Path(temp_dir)
-            source_path = temp_path / "gameplay_change.py"
-            test_path = temp_path / "test_gameplay_change.py"
+            source_path = temp_path / source_runtime_path
+            test_path = temp_path / test_runtime_path
+            source_path.parent.mkdir(parents=True, exist_ok=True)
+            test_path.parent.mkdir(parents=True, exist_ok=True)
             source_path.write_text(source_code, encoding="utf-8")
             test_path.write_text(test_code, encoding="utf-8")
 
             sys.path.insert(0, str(temp_path))
+            os.environ["GAMEPLAY_CHANGE_SOURCE_PATH"] = str(source_path)
 
             source_module = _load_module_from_path("gameplay_change", source_path)
             for alias in aliased_module_names:
@@ -694,6 +1218,10 @@ def _run_compile_and_tests(source_code: str, test_code: str) -> tuple[bool, bool
         return True, False, f"Unit test execution failed: {exc}"
     finally:
         sys.path[:] = original_sys_path
+        if previous_source_env is None:
+            os.environ.pop("GAMEPLAY_CHANGE_SOURCE_PATH", None)
+        else:
+            os.environ["GAMEPLAY_CHANGE_SOURCE_PATH"] = previous_source_env
         for name, previous_module in previous_modules.items():
             if previous_module is None:
                 sys.modules.pop(name, None)
@@ -712,19 +1240,15 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
     graph_name = metadata.name
     reviewer_graph = context.get_workflow_graph("gameplay-reviewer-workflow")
     tool_subgraphs = context.register_tools(metadata.tools, EngineerState)
-    blueprint_search_tool_name = context.get_tool("find-gameplay-blueprints").metadata.qualified_name
     doc_search_tool_name = context.get_tool("find-gameplay-docs").metadata.qualified_name
-    blueprint_context_tool_name = context.get_tool("load-blueprint-context").metadata.qualified_name
     doc_context_tool_name = context.get_tool("load-markdown-context").metadata.qualified_name
-    code_search_tool_name = context.get_tool("find-gameplay-code").metadata.qualified_name
-    code_context_tool_name = context.get_tool("load-source-context").metadata.qualified_name
     tool_node_names = {
         tool_name: to_graph_node_name(tool_name)
         for tool_name in tool_subgraphs
     }
 
     def classify_request(state: EngineerState) -> dict[str, Any]:
-        artifact_dir = Path(state["run_dir"]) / "tasks" / state["task_id"] / metadata.name
+        artifact_dir = Path(state["run_dir"]) / "tasks" / _artifact_task_dir_name(state["task_id"]) / metadata.name
         artifact_dir.mkdir(parents=True, exist_ok=True)
         task_type, task_type_reason = _fallback_task_classification(state["task_prompt"])
 
@@ -864,34 +1388,115 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
             "pending_tool_call_id": "",
         }
 
-    def prepare_code_search(state: EngineerState) -> dict[str, Any]:
-        tool_name = code_search_tool_name
-        call_id = _build_tool_call_id(state, tool_name)
-        return {
-            "pending_tool_name": tool_name,
-            "pending_tool_call_id": call_id,
-            "messages": [
-                build_tool_call_message(
-                    tool_name,
-                    {"task_prompt": state["task_prompt"], "scope": "host_project"},
-                    call_id,
-                    content="Find the host-project source and test files most relevant to this task.",
-                )
-            ],
-        }
+    def simulate_engineer_investigation(state: EngineerState) -> dict[str, Any]:
+        scope_root = context.resolve_scope_root("host_project")
+        exclude_roots = context.config.exclude_roots
+        source_hits: list[str] = []
+        test_hits: list[str] = []
+        blueprint_hits: list[str] = []
+        blueprint_text_hits: list[str] = []
+        code_context = ""
+        blueprint_context = ""
 
-    def capture_code_hits(state: EngineerState) -> dict[str, Any]:
-        artifact = _extract_tool_artifact(state, code_search_tool_name)
-        raw_source_hits = artifact.get("source_hits", [])
-        raw_test_hits = artifact.get("test_hits", [])
-        source_hits = [str(item) for item in raw_source_hits] if isinstance(raw_source_hits, list) else []
-        test_hits = [str(item) for item in raw_test_hits] if isinstance(raw_test_hits, list) else []
-        code_scope = str(artifact.get("scope") or "host_project")
-        scope_root = context.resolve_scope_root("agentswarm" if code_scope == "agentswarm" else "host_project")
-        workspace_write_enabled = (
-            code_scope == "host_project"
-            and _workspace_roots_exist(scope_root, context.config.source_roots)
-        )
+        if default_llm.is_enabled():
+            schema = {
+                "type": "object",
+                "properties": {
+                    "source_hits": {"type": "array", "items": {"type": "string"}},
+                    "test_hits": {"type": "array", "items": {"type": "string"}},
+                    "blueprint_hits": {"type": "array", "items": {"type": "string"}},
+                    "blueprint_text_hits": {"type": "array", "items": {"type": "string"}},
+                    "code_context": {"type": "string"},
+                    "blueprint_context": {"type": "string"},
+                },
+                "required": [
+                    "source_hits",
+                    "test_hits",
+                    "blueprint_hits",
+                    "blueprint_text_hits",
+                    "code_context",
+                    "blueprint_context",
+                ],
+                "additionalProperties": False,
+            }
+            try:
+                result = default_llm.generate_json(
+                    instructions=(
+                        "You are gameplay-engineer-workflow. Simulate how a senior gameplay engineer would investigate "
+                        "this task from the host project root. Search the host project yourself and return only the most "
+                        "relevant host-project filesystem paths plus concise context summaries. Prefer gameplay-owned code "
+                        "and assets. Avoid generated, third-party, marketplace, or unrelated framework files unless they are "
+                        "directly responsible for the bug or feature. Return relative filesystem paths such as "
+                        "`Source/...`, `Plugins/...`, `Content/...`, `src/...`, or `tests/...`, not Unreal `/Game/...` refs."
+                    ),
+                    input_text=(
+                        f"Host project root: {context.host_root}\n"
+                        f"Source roots: {context.config.source_roots}\n"
+                        f"Test roots: {context.config.test_roots}\n"
+                        f"Task prompt:\n{state['task_prompt']}\n\n"
+                        f"Task type: {state['task_type']}\n"
+                        f"Task type reason: {state['task_type_reason']}\n\n"
+                        f"Relevant gameplay docs:\n{state['doc_hits']}\n\n"
+                        f"Doc context:\n{state['doc_context'] or 'No matching docs.'}\n\n"
+                        "Do not modify files. Investigate like a gameplay engineer preparing the next implementation prompt."
+                    ),
+                    schema_name="gameplay_engineering_context",
+                    schema=schema,
+                )
+                source_hits = _normalize_relative_hits(
+                    scope_root,
+                    result.get("source_hits"),
+                    exclude_roots,
+                    allowed_suffixes=SOURCE_EXTENSIONS,
+                )
+                test_hits = _normalize_relative_hits(
+                    scope_root,
+                    result.get("test_hits"),
+                    exclude_roots,
+                    allowed_suffixes=SOURCE_EXTENSIONS,
+                )
+                blueprint_hits = _normalize_relative_hits(
+                    scope_root,
+                    result.get("blueprint_hits"),
+                    exclude_roots,
+                    allowed_suffixes={BLUEPRINT_ASSET_EXTENSION},
+                )
+                blueprint_text_hits = _normalize_relative_hits(
+                    scope_root,
+                    result.get("blueprint_text_hits"),
+                    exclude_roots,
+                    allowed_suffixes=BLUEPRINT_TEXT_EXTENSIONS,
+                )
+                code_context = str(result.get("code_context") or "").strip()
+                blueprint_context = str(result.get("blueprint_context") or "").strip()
+            except (AssertionError, KeyError, TypeError, ValueError, LLMError):
+                source_hits = []
+                test_hits = []
+                blueprint_hits = []
+                blueprint_text_hits = []
+                code_context = ""
+                blueprint_context = ""
+
+        if not any([source_hits, test_hits, blueprint_hits, blueprint_text_hits]):
+            source_hits, test_hits = _find_local_code_hits(
+                task_prompt=state["task_prompt"],
+                scope_root=scope_root,
+                source_roots=context.config.source_roots,
+                test_roots=context.config.test_roots,
+                exclude_roots=exclude_roots,
+            )
+            blueprint_hits, blueprint_text_hits = _find_local_blueprint_hits(
+                task_prompt=state["task_prompt"],
+                scope_root=scope_root,
+                exclude_roots=exclude_roots,
+            )
+
+        if not code_context:
+            code_context = _summarize_text_context(scope_root, [*source_hits, *test_hits])
+        if not blueprint_context:
+            blueprint_context = _summarize_blueprint_context(scope_root, blueprint_hits, blueprint_text_hits)
+
+        workspace_write_enabled = _workspace_roots_exist(scope_root, context.config.source_roots)
         workspace_source_file, workspace_test_file = _resolve_workspace_targets(
             task_id=state["task_id"],
             scope_root=scope_root,
@@ -902,129 +1507,58 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
             allow_workspace_writes=workspace_write_enabled,
         )
         workspace_write_summary = (
-            "Workflow will write generated code into the host project source/test roots."
+            (
+                "Workflow will update the matched host-project source/test files in place."
+                if workspace_source_file in source_hits or workspace_test_file in test_hits
+                else "Workflow will write generated code into the host project source/test roots."
+            )
             if workspace_write_enabled
             else "No host-project source/test roots were available, so generated code will stay in workflow artifacts."
         )
+        blueprint_editable_targets = list(blueprint_text_hits)
+
+        investigation_lines = [
+            "# Engineer Investigation",
+            "",
+            f"Task Prompt: {state['task_prompt']}",
+            f"Task Type: {state['task_type']}",
+            "",
+            "## Source Hits",
+            *([f"- {item}" for item in source_hits] or ["- None."]),
+            "",
+            "## Test Hits",
+            *([f"- {item}" for item in test_hits] or ["- None."]),
+            "",
+            "## Blueprint Hits",
+            *([f"- {item}" for item in blueprint_hits] or ["- None."]),
+            "",
+            "## Blueprint Companion Text",
+            *([f"- {item}" for item in blueprint_text_hits] or ["- None."]),
+            "",
+            "## Code Context",
+            code_context or "No concise code context was produced.",
+            "",
+            "## Blueprint Context",
+            blueprint_context or "No readable Blueprint context was produced.",
+        ]
+        artifact_dir = Path(state["artifact_dir"])
+        artifact_dir.mkdir(parents=True, exist_ok=True)
+        (artifact_dir / "engineer_investigation.md").write_text("\n".join(investigation_lines), encoding="utf-8")
+
         return {
             "source_hits": source_hits,
             "test_hits": test_hits,
-            "code_scope": code_scope,
+            "code_scope": "host_project",
+            "code_context": code_context,
+            "blueprint_hits": blueprint_hits,
+            "blueprint_text_hits": blueprint_text_hits,
+            "blueprint_scope": "host_project",
+            "blueprint_context": blueprint_context,
+            "blueprint_editable_targets": blueprint_editable_targets,
             "workspace_source_file": workspace_source_file,
             "workspace_test_file": workspace_test_file,
             "workspace_write_enabled": workspace_write_enabled,
             "workspace_write_summary": workspace_write_summary,
-            "pending_tool_name": "",
-            "pending_tool_call_id": "",
-        }
-
-    def prepare_code_context_lookup(state: EngineerState) -> dict[str, Any]:
-        tool_name = code_context_tool_name
-        call_id = _build_tool_call_id(state, tool_name)
-        file_paths = [*state["source_hits"], *state["test_hits"]]
-        return {
-            "pending_tool_name": tool_name,
-            "pending_tool_call_id": call_id,
-            "messages": [
-                build_tool_call_message(
-                    tool_name,
-                    {"file_paths": file_paths, "max_chars": 4000, "scope": state["code_scope"]},
-                    call_id,
-                    content="Load source snippets for the matched gameplay code and tests.",
-                )
-            ],
-        }
-
-    def capture_code_context(state: EngineerState) -> dict[str, Any]:
-        artifact = _extract_tool_artifact(state, code_context_tool_name)
-        code_context = str(artifact.get("code_context") or "")
-        return {
-            "code_context": code_context,
-            "pending_tool_name": "",
-            "pending_tool_call_id": "",
-        }
-
-    def prepare_blueprint_search(state: EngineerState) -> dict[str, Any]:
-        tool_name = blueprint_search_tool_name
-        call_id = _build_tool_call_id(state, tool_name)
-        return {
-            "pending_tool_name": tool_name,
-            "pending_tool_call_id": call_id,
-            "messages": [
-                build_tool_call_message(
-                    tool_name,
-                    {"task_prompt": state["task_prompt"], "scope": "host_project"},
-                    call_id,
-                    content="Find Blueprint assets and companion text relevant to this gameplay task.",
-                )
-            ],
-        }
-
-    def capture_blueprint_hits(state: EngineerState) -> dict[str, Any]:
-        artifact = _extract_tool_artifact(state, blueprint_search_tool_name)
-        raw_blueprint_hits = artifact.get("blueprint_hits", [])
-        blueprint_hits: list[str] = []
-        blueprint_text_hits: list[str] = []
-        blueprint_editable_targets: list[str] = []
-        if isinstance(raw_blueprint_hits, list):
-            for item in raw_blueprint_hits:
-                if not isinstance(item, dict):
-                    continue
-                asset_path = str(item.get("asset_path") or "").strip()
-                if asset_path:
-                    blueprint_hits.append(asset_path)
-                companion_paths = item.get("companion_paths", [])
-                if isinstance(companion_paths, list):
-                    for companion_path in companion_paths:
-                        companion_value = str(companion_path).strip()
-                        if companion_value and companion_value not in blueprint_text_hits:
-                            blueprint_text_hits.append(companion_value)
-                            blueprint_editable_targets.append(companion_value)
-        blueprint_scope = str(artifact.get("scope") or "host_project")
-        return {
-            "blueprint_hits": blueprint_hits,
-            "blueprint_text_hits": blueprint_text_hits,
-            "blueprint_editable_targets": blueprint_editable_targets,
-            "blueprint_scope": blueprint_scope,
-            "pending_tool_name": "",
-            "pending_tool_call_id": "",
-        }
-
-    def prepare_blueprint_context_lookup(state: EngineerState) -> dict[str, Any]:
-        tool_name = blueprint_context_tool_name
-        call_id = _build_tool_call_id(state, tool_name)
-        return {
-            "pending_tool_name": tool_name,
-            "pending_tool_call_id": call_id,
-            "messages": [
-                build_tool_call_message(
-                    tool_name,
-                    {
-                        "asset_paths": state["blueprint_hits"],
-                        "max_chars": 4000,
-                        "scope": state["blueprint_scope"],
-                    },
-                    call_id,
-                    content="Load readable Blueprint context and note whether direct text editing is available.",
-                )
-            ],
-        }
-
-    def capture_blueprint_context(state: EngineerState) -> dict[str, Any]:
-        artifact = _extract_tool_artifact(state, blueprint_context_tool_name)
-        blueprint_context = str(artifact.get("blueprint_context") or "")
-        asset_contexts = artifact.get("asset_contexts", [])
-        editable_targets = list(state["blueprint_editable_targets"])
-        if isinstance(asset_contexts, list):
-            for item in asset_contexts:
-                if not isinstance(item, dict):
-                    continue
-                loaded_companion_path = str(item.get("loaded_companion_path") or "").strip()
-                if loaded_companion_path and loaded_companion_path not in editable_targets:
-                    editable_targets.append(loaded_companion_path)
-        return {
-            "blueprint_context": blueprint_context,
-            "blueprint_editable_targets": editable_targets,
             "pending_tool_name": "",
             "pending_tool_call_id": "",
         }
@@ -1035,6 +1569,7 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
             source_hits=state["source_hits"],
             test_hits=state["test_hits"],
             blueprint_hits=state["blueprint_hits"],
+            blueprint_text_hits=state["blueprint_text_hits"],
         )
 
         if default_llm.is_enabled():
@@ -1363,6 +1898,7 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
 
     def _persist_generated_bundle(state: EngineerState, bundle: dict[str, str]) -> str:
         artifact_dir = Path(state["artifact_dir"])
+        artifact_dir.mkdir(parents=True, exist_ok=True)
         (artifact_dir / "gameplay_change.py").write_text(bundle["source_code"], encoding="utf-8")
         (artifact_dir / "test_gameplay_change.py").write_text(bundle["test_code"], encoding="utf-8")
 
@@ -1381,10 +1917,11 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
             f"- Test file: {test_target}",
         ]
         (artifact_dir / "workspace_write_manifest.md").write_text("\n".join(manifest_lines), encoding="utf-8")
-        return f"Generated code was written to host project files: {source_target}, {test_target}."
+        return f"Generated code updated host project files: {source_target}, {test_target}."
 
     def _persist_blueprint_instructions(state: EngineerState, instructions_doc: str) -> str:
         artifact_dir = Path(state["artifact_dir"])
+        artifact_dir.mkdir(parents=True, exist_ok=True)
         artifact_path = artifact_dir / "blueprint_fix_instructions.md"
         artifact_path.write_text(instructions_doc, encoding="utf-8")
 
@@ -1419,10 +1956,18 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
         )
 
     def _generate_code_bundle(state: EngineerState, error_context: str = "") -> dict[str, str]:
-        fallback = _fallback_code_bundle(state["task_prompt"], state["task_type"], state["code_attempt"] + 1)
+        workspace_root = context.resolve_scope_root("agentswarm" if state["code_scope"] == "agentswarm" else "host_project")
+        fallback = _mirror_existing_workspace_bundle(
+            scope_root=workspace_root,
+            source_relative_path=state["workspace_source_file"],
+            test_relative_path=state["workspace_test_file"],
+        ) or _fallback_code_bundle(state["task_prompt"], state["task_type"], state["code_attempt"] + 1)
         codegen_llm = context.get_llm("codegen")
         if not codegen_llm.is_enabled():
             return fallback
+
+        current_source_target = _safe_read_text(workspace_root / state["workspace_source_file"], 8000).strip()
+        current_test_target = _safe_read_text(workspace_root / state["workspace_test_file"], 8000).strip()
 
         schema = {
             "type": "object",
@@ -1437,11 +1982,14 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
         try:
             result = codegen_llm.generate_json(
                 instructions=(
-                    "You are gameplay-engineer-workflow code generation. Return Python source code and Python tests. "
-                    "Do not use markdown fences. The source file must define build_gameplay_change_summary() -> dict. "
-                    "The returned dict must include task_type, implementation_status set to 'ready-for-review', and unit_tests. "
-                    "The test file must be plain Python with assert statements and no external dependencies. "
-                    "Ground the implementation in the provided host-project code context and workspace targets."
+                    "You are gameplay-engineer-workflow code generation. Return the full updated contents of the "
+                    "target Python source file and the target Python test file. Do not use markdown fences. "
+                    "If workspace targets point at existing host-project files, update those files in place and preserve "
+                    "their gameplay-facing API unless the task explicitly requires an API change. Do not create a "
+                    "parallel helper module, summary wrapper, or shadow implementation when a concrete host-project "
+                    "target exists. The test file must be plain Python with assert statements or unittest and no "
+                    "external dependencies. Ground the implementation in the provided host-project code context and "
+                    "workspace targets."
                 ),
                 input_text=(
                     f"Task prompt:\n{state['task_prompt']}\n\n"
@@ -1458,6 +2006,8 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
                     f"Workspace write mode: {state['workspace_write_summary']}\n"
                     f"Workspace targets: source={state['workspace_source_file'] or 'artifact-only'}, "
                     f"test={state['workspace_test_file'] or 'artifact-only'}\n\n"
+                    f"Current source target contents:\n{current_source_target or 'No existing source target contents.'}\n\n"
+                    f"Current test target contents:\n{current_test_target or 'No existing test target contents.'}\n\n"
                     f"Code context:\n{state['code_context'] or 'No matching source files.'}\n\n"
                     f"Blueprint context:\n{state['blueprint_context'] or 'No readable Blueprint context.'}\n\n"
                     f"Reviewer feedback:\n{state['review_feedback']}\n\n"
@@ -1561,8 +2111,14 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
         return "prepare_delivery"
 
     def self_test(state: EngineerState) -> dict[str, Any]:
-        compile_ok, tests_ok, test_output = _run_compile_and_tests(state["generated_code"], state["generated_tests"])
+        compile_ok, tests_ok, test_output = _run_compile_and_tests(
+            state["generated_code"],
+            state["generated_tests"],
+            source_relative_path=state["workspace_source_file"] or "gameplay_change.py",
+            test_relative_path=state["workspace_test_file"] or "test_gameplay_change.py",
+        )
         artifact_dir = Path(state["artifact_dir"])
+        artifact_dir.mkdir(parents=True, exist_ok=True)
         (artifact_dir / "self_test.txt").write_text(test_output, encoding="utf-8")
         return {
             "compile_ok": compile_ok,
@@ -1756,47 +2312,11 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
         trace_graph_node(graph_name=graph_name, node_name="capture_doc_context", node_fn=capture_doc_context),
     )
     graph.add_node(
-        "prepare_code_search",
-        trace_graph_node(graph_name=graph_name, node_name="prepare_code_search", node_fn=prepare_code_search),
-    )
-    graph.add_node(
-        "capture_code_hits",
-        trace_graph_node(graph_name=graph_name, node_name="capture_code_hits", node_fn=capture_code_hits),
-    )
-    graph.add_node(
-        "prepare_code_context_lookup",
+        "simulate_engineer_investigation",
         trace_graph_node(
             graph_name=graph_name,
-            node_name="prepare_code_context_lookup",
-            node_fn=prepare_code_context_lookup,
-        ),
-    )
-    graph.add_node(
-        "capture_code_context",
-        trace_graph_node(graph_name=graph_name, node_name="capture_code_context", node_fn=capture_code_context),
-    )
-    graph.add_node(
-        "prepare_blueprint_search",
-        trace_graph_node(graph_name=graph_name, node_name="prepare_blueprint_search", node_fn=prepare_blueprint_search),
-    )
-    graph.add_node(
-        "capture_blueprint_hits",
-        trace_graph_node(graph_name=graph_name, node_name="capture_blueprint_hits", node_fn=capture_blueprint_hits),
-    )
-    graph.add_node(
-        "prepare_blueprint_context_lookup",
-        trace_graph_node(
-            graph_name=graph_name,
-            node_name="prepare_blueprint_context_lookup",
-            node_fn=prepare_blueprint_context_lookup,
-        ),
-    )
-    graph.add_node(
-        "capture_blueprint_context",
-        trace_graph_node(
-            graph_name=graph_name,
-            node_name="capture_blueprint_context",
-            node_fn=capture_blueprint_context,
+            node_name="simulate_engineer_investigation",
+            node_fn=simulate_engineer_investigation,
         ),
     )
     graph.add_node(
@@ -1899,59 +2419,8 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
         },
     )
     graph.add_edge(tool_node_names[doc_context_tool_name], "capture_doc_context")
-    graph.add_edge("capture_doc_context", "prepare_code_search")
-    graph.add_conditional_edges(
-        "prepare_code_search",
-        trace_route_decision(graph_name=graph_name, router_name="route_tool_request", route_fn=route_tool_request),
-        {
-            **{
-                tool_node_names[tool_name]: tool_node_names[tool_name]
-                for tool_name in tool_subgraphs
-            },
-            "tool_request_error": "tool_request_error",
-        },
-    )
-    graph.add_edge(tool_node_names[code_search_tool_name], "capture_code_hits")
-    graph.add_edge("capture_code_hits", "prepare_code_context_lookup")
-    graph.add_conditional_edges(
-        "prepare_code_context_lookup",
-        trace_route_decision(graph_name=graph_name, router_name="route_tool_request", route_fn=route_tool_request),
-        {
-            **{
-                tool_node_names[tool_name]: tool_node_names[tool_name]
-                for tool_name in tool_subgraphs
-            },
-            "tool_request_error": "tool_request_error",
-        },
-    )
-    graph.add_edge(tool_node_names[code_context_tool_name], "capture_code_context")
-    graph.add_edge("capture_code_context", "prepare_blueprint_search")
-    graph.add_conditional_edges(
-        "prepare_blueprint_search",
-        trace_route_decision(graph_name=graph_name, router_name="route_tool_request", route_fn=route_tool_request),
-        {
-            **{
-                tool_node_names[tool_name]: tool_node_names[tool_name]
-                for tool_name in tool_subgraphs
-            },
-            "tool_request_error": "tool_request_error",
-        },
-    )
-    graph.add_edge(tool_node_names[blueprint_search_tool_name], "capture_blueprint_hits")
-    graph.add_edge("capture_blueprint_hits", "prepare_blueprint_context_lookup")
-    graph.add_conditional_edges(
-        "prepare_blueprint_context_lookup",
-        trace_route_decision(graph_name=graph_name, router_name="route_tool_request", route_fn=route_tool_request),
-        {
-            **{
-                tool_node_names[tool_name]: tool_node_names[tool_name]
-                for tool_name in tool_subgraphs
-            },
-            "tool_request_error": "tool_request_error",
-        },
-    )
-    graph.add_edge(tool_node_names[blueprint_context_tool_name], "capture_blueprint_context")
-    graph.add_edge("capture_blueprint_context", "assess_implementation_strategy")
+    graph.add_edge("capture_doc_context", "simulate_engineer_investigation")
+    graph.add_edge("simulate_engineer_investigation", "assess_implementation_strategy")
     graph.add_conditional_edges(
         "assess_implementation_strategy",
         trace_route_decision(graph_name=graph_name, router_name="route_execution_track", route_fn=route_execution_track),

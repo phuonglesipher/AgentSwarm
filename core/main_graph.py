@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 import re
 from typing import Any
@@ -12,7 +13,7 @@ from core.graph_ids import to_graph_node_name
 from core.graph_logging import trace_graph_node, trace_route_decision
 from core.llm import LLMError, LLMManager
 from core.registry import WorkflowRegistry
-from core.text_utils import slugify
+from core.text_utils import normalize_text, slugify
 
 
 class MainTask(TypedDict):
@@ -60,6 +61,37 @@ def _split_prompt(prompt: str) -> list[str]:
 
 def _fallback_plan_tasks(prompt: str) -> list[str]:
     return _split_prompt(prompt)
+
+
+def _prefer_single_task(prompt: str) -> bool:
+    normalized = " ".join(prompt.split())
+    if not normalized:
+        return True
+    if "\n" in prompt or ";" in prompt:
+        return False
+
+    lowered = normalize_text(f" {normalized} ")
+    multi_markers = (
+        " compare ",
+        " versus ",
+        " vs ",
+        " and then ",
+        " after that ",
+        " separately ",
+        " step 1",
+        " step 2",
+        " first,",
+        " second,",
+    )
+    return not any(marker in lowered for marker in multi_markers)
+
+
+def _compact_task_id(index: int, description: str) -> str:
+    slug = slugify(description, fallback="request")
+    digest = hashlib.sha1(normalize_text(description).encode("utf-8")).hexdigest()[:6]
+    if len(slug) > 18:
+        slug = slug[:18].rstrip("-")
+    return f"task-{index}-{slug}-{digest}"
 
 
 def _fallback_route_task(registry: WorkflowRegistry, description: str) -> str | None:
@@ -329,9 +361,13 @@ def build_main_graph(
         else:
             planning_notes.append("Task planning used deterministic fallback.")
 
+        if len(descriptions) > 1 and _prefer_single_task(state["prompt"]):
+            descriptions = [state["prompt"].strip()]
+            planning_notes.append("Collapsed planner output to one task because the prompt describes a single request.")
+
         tasks: list[MainTask] = []
         for index, description in enumerate(descriptions, start=1):
-            task_id = f"task-{index}-{slugify(description, fallback='request')}"
+            task_id = _compact_task_id(index, description)
             tasks.append(
                 {
                     "id": task_id,

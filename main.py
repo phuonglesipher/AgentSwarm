@@ -53,7 +53,7 @@ def main() -> None:
     config = load_agentswarm_config(runtime_paths)
     manifest = load_project_manifest(runtime_paths)
     run_dir = _build_run_dir(runtime_paths)
-    llm_manager = LLMManager.from_env()
+    llm_manager = LLMManager.from_env(working_directory=str(runtime_paths.host_root))
     thread_id = args.thread_id.strip() or run_dir.name
     runtime_config = build_runtime_config(thread_id)
     checkpointer = InMemorySaver()
