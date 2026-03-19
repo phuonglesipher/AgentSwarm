@@ -9,13 +9,14 @@ from langgraph.graph import END, START, StateGraph
 from typing_extensions import NotRequired, TypedDict
 
 from core.graph_logging import trace_graph_node, trace_route_decision
-from core.llm import LLMError
+from core.llm import CodexCliLLMClient, LLMError
 from core.models import WorkflowContext, WorkflowMetadata
 from core.quality_loop import QualityLoopSpec, evaluate_quality_loop
 from core.text_utils import keyword_tokens, normalize_text, slugify, tokenize
 
 
 APPROVAL_SCORE = 90
+MIN_REVIEW_ROUNDS = 2
 MAX_REVIEW_ROUNDS = 3
 TEXT_SUFFIXES = {
     ".c",
@@ -50,11 +51,16 @@ LOOP_SPEC = QualityLoopSpec(
     loop_id="root-project-investigation-review",
     threshold=APPROVAL_SCORE,
     max_rounds=MAX_REVIEW_ROUNDS,
-    require_blocker_free=False,
+    min_rounds=MIN_REVIEW_ROUNDS,
+    require_blocker_free=True,
     require_missing_section_free=False,
-    require_explicit_approval=False,
+    require_explicit_approval=True,
     min_score_delta=1,
     stagnation_limit=2,
+)
+MANDATORY_VERIFICATION_ACTION = (
+    "Run one more investigation pass that independently re-validates the causal chain with fresh evidence, "
+    "a concrete call-order proof, or a read-only reproduction result before final handoff."
 )
 REVIEW_CRITERIA = (
     ("Focus", 25, "Task Framing", "Root Cause Hypothesis"),
@@ -149,6 +155,42 @@ def _dedupe(items: list[str]) -> list[str]:
         seen.add(item)
         ordered.append(item)
     return ordered
+
+
+def _investigation_round_goal(
+    *,
+    investigation_round: int,
+    review_feedback: str,
+    previous_investigation: str,
+) -> str:
+    if investigation_round == 1:
+        return "First pass. Build the strongest initial hypothesis and identify exactly what still needs proof."
+    if investigation_round < MIN_REVIEW_ROUNDS:
+        return "Verification pass. Add fresh evidence or a read-only reproduction before approval can stick."
+    if review_feedback.strip():
+        return "Verification pass. Explicitly answer the previous senior review with fresh evidence, not just a rewrite."
+    if previous_investigation.strip():
+        return "Verification pass. Independently re-check the current hypothesis and tighten the causal proof."
+    return "Verification pass. Re-validate the current hypothesis before final handoff."
+
+
+def _investigation_pass_mandate(investigation_round: int) -> str:
+    if investigation_round < MIN_REVIEW_ROUNDS:
+        return (
+            f"This workflow requires at least {MIN_REVIEW_ROUNDS} review rounds, so this pass must leave a clear path "
+            "for an independent verification round instead of treating the first hypothesis as final."
+        )
+    return (
+        "This pass must independently re-verify or falsify the previous hypothesis with at least one new piece of evidence, "
+        "clearer sequencing proof, or a read-only command/test observation."
+    )
+
+
+def _select_investigator_llm(context: WorkflowContext) -> tuple[Any, str]:
+    investigator_llm = context.get_llm("investigator")
+    if isinstance(investigator_llm, CodexCliLLMClient):
+        return investigator_llm.with_overrides(sandbox_mode="workspace-write"), "codex-agent-tools"
+    return investigator_llm, "templated-llm"
 
 
 def _short_slug(value: str, *, fallback: str, max_length: int = 18) -> str:
@@ -298,19 +340,19 @@ def _collect_project_context(
 
     snapshot = "\n".join(
         [
-            "## Host Root Layout",
+            "### Host Root Layout",
             _format_bullets(top_level, empty_message="No readable top-level entries found."),
             "",
-            "## Candidate Docs",
+            "### Candidate Docs",
             _format_bullets(docs, empty_message="No strong doc hits yet."),
             "",
-            "## Candidate Source Files",
+            "### Candidate Source Files",
             _format_bullets(source, empty_message="No strong source hits yet."),
             "",
-            "## Candidate Tests",
+            "### Candidate Tests",
             _format_bullets(tests, empty_message="No strong test hits yet."),
             "",
-            "## File Context",
+            "### File Context",
             "\n\n".join(excerpts) or "No readable file excerpts were captured.",
         ]
     ).strip()
@@ -545,7 +587,7 @@ def _fallback_review(task_prompt: str, investigation_doc: str) -> dict[str, Any]
         ]
     )
     score = sum(item["score"] for item in criterion_scores)
-    approved = score >= APPROVAL_SCORE
+    approved = score >= APPROVAL_SCORE and not blocking_issues
     review_doc = _compose_review_doc(
         score,
         approved,
@@ -629,7 +671,7 @@ def _parse_review_doc(review_doc: str, fallback: dict[str, Any]) -> dict[str, An
         stripped = line.strip()
         if stripped.startswith("- "):
             item = stripped[2:].strip()
-            if item.lower() != "none.":
+            if not item.lower().startswith("none."):
                 raw_blocking_issues.append(item)
     technical_blocking_issues = [item for item in raw_blocking_issues if not _is_process_only_feedback(item)]
     if raw_blocking_issues:
@@ -643,7 +685,7 @@ def _parse_review_doc(review_doc: str, fallback: dict[str, Any]) -> dict[str, An
         if not stripped.startswith("- "):
             continue
         item = re.sub(r"^-\s*\[[ xX]\]\s*", "", stripped).strip()
-        if item.lower() != "no further investigation changes requested.":
+        if not item.lower().startswith("no further investigation changes requested."):
             raw_improvement_actions.append(item)
     technical_improvement_actions = [
         item for item in raw_improvement_actions if not _is_process_only_feedback(item)
@@ -658,7 +700,7 @@ def _parse_review_doc(review_doc: str, fallback: dict[str, Any]) -> dict[str, An
         blocking_issues=blocking_issues,
     )
     score = sum(item["score"] for item in normalized_scores)
-    approved = score >= APPROVAL_SCORE
+    approved = score >= APPROVAL_SCORE and not blocking_issues
 
     final_review_doc = _compose_review_doc(
         score,
@@ -692,10 +734,10 @@ def _fallback_investigation_doc(
 ) -> str:
     owners = relevant_source or relevant_docs or relevant_tests or ["No strong owner found yet; inspect the most likely entrypoint first."]
     verification = relevant_tests or relevant_source or ["Add a focused regression check once ownership is confirmed."]
-    revision_goal = (
-        "First pass. Start broad enough to identify the most credible owner."
-        if not review_feedback.strip()
-        else "This pass explicitly responds to the previous senior review before widening scope."
+    revision_goal = _investigation_round_goal(
+        investigation_round=investigation_round,
+        review_feedback=review_feedback,
+        previous_investigation=previous_investigation,
     )
     lines = [
         "# Root Project Investigation",
@@ -704,6 +746,7 @@ def _fallback_investigation_doc(
         f"- Round: {investigation_round}",
         f"- Request: {task_prompt}",
         f"- Revision goal: {revision_goal}",
+        f"- Verification mandate: {_investigation_pass_mandate(investigation_round)}",
         "",
         "## Project Root Findings",
         project_snapshot,
@@ -751,6 +794,7 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
         investigation_round = int(state.get("investigation_round", 0)) + 1
         artifact_path = _artifact_dir(context, metadata, state)
         project_context = _collect_project_context(context, state["task_prompt"], str(state.get("review_feedback", "")))
+        investigator_llm, investigation_mode = _select_investigator_llm(context)
         fallback_doc = _fallback_investigation_doc(
             task_prompt=state["task_prompt"],
             investigation_round=investigation_round,
@@ -764,26 +808,40 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
         )
 
         investigation_doc = fallback_doc
-        if context.llm.is_enabled():
+        if investigator_llm.is_enabled():
             try:
-                investigation_doc = context.llm.generate_text(
+                investigation_method = (
+                    "Use the Codex agent tools available in this environment to inspect the project directly, read the most relevant "
+                    "source/docs/tests, and when it increases confidence, run targeted read-only commands or tests that help prove "
+                    "the causal chain. Do not modify files, do not write patches, and do not invent command output. "
+                    if investigation_mode == "codex-agent-tools"
+                    else "Work only from the provided host-project context and previous review artifacts. Do not invent tool usage or command output. "
+                )
+                investigation_doc = investigator_llm.generate_text(
                     instructions=(
                         "You are root-project-investigation-workflow. Investigate the host project root like a senior engineer "
                         "trying to converge on the most credible root cause and owner. Write a markdown investigation brief using "
                         "this exact section order: Task Framing, Project Root Findings, Candidate Ownership, Root Cause Hypothesis, "
                         "Architecture Notes, Clean Code Notes, Optimization Notes, Verification Plan, Open Questions. "
-                        "Stay concrete, evidence-driven, and strict about scope. If previous review feedback exists, address it explicitly. "
-                        "Do not use JSON."
+                        f"Stay concrete, evidence-driven, and strict about scope. {investigation_method}"
+                        "If previous review feedback exists, address it explicitly. Do not use JSON."
                     ),
                     input_text=(
                         f"Host project root: {context.host_root}\n"
+                        f"Investigation mode: {investigation_mode}\n"
                         f"Investigation round: {investigation_round}/{MAX_REVIEW_ROUNDS}\n\n"
                         f"Task prompt:\n{state['task_prompt']}\n\n"
+                        f"Round goal:\n{_investigation_round_goal(investigation_round=investigation_round, review_feedback=str(state.get('review_feedback', '')), previous_investigation=str(state.get('investigation_doc', '')))}\n\n"
+                        f"Verification mandate:\n{_investigation_pass_mandate(investigation_round)}\n\n"
+                        f"Minimum review rounds before final approval can stick: {MIN_REVIEW_ROUNDS}\n\n"
+                        f"Suggested starting docs:\n{_format_bullets(project_context['docs'], empty_message='No strong doc hits yet.')}\n\n"
+                        f"Suggested starting source files:\n{_format_bullets(project_context['source'], empty_message='No strong source hits yet.')}\n\n"
+                        f"Suggested starting tests:\n{_format_bullets(project_context['tests'], empty_message='No strong test hits yet.')}\n\n"
                         f"Current project snapshot:\n{project_context['snapshot']}\n\n"
                         f"Previous investigation document:\n{state.get('investigation_doc', '') or 'None. This is the first round.'}\n\n"
                         f"Previous reviewer feedback:\n{state.get('review_feedback', '') or 'None. This is the first round.'}\n\n"
                         f"Previous reviewer checklist:\n{_format_bullets(list(state.get('review_improvement_actions', [])), empty_message='None.')}\n\n"
-                        "Return only the next investigation document."
+                        "Return only the next investigation document. The next document must add real evidence, not just rephrase the prior round."
                     ),
                 )
             except LLMError:
@@ -816,6 +874,11 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
                         "architecture, clean code thinking, optimization awareness, and verification quality. Return markdown using this exact shape: "
                         "# Investigation Review, Decision: APPROVE or REVISE, Overall Score: NN/100, ## Criterion Scores, ## Blocking Issues, "
                         "## Improvement Checklist, ## Senior Engineer Notes. Use one bullet per criterion in the form `- Criterion: score/max - rationale`. "
+                        "If there are no blocking issues, write exactly `- None.` under Blocking Issues. "
+                        "If there are no further investigation changes requested, write exactly `- [x] No further investigation changes requested.` "
+                        f"Minimum final-approval depth is {MIN_REVIEW_ROUNDS} review rounds. If the current round is below that floor, require one more "
+                        "pass that independently re-validates the causal chain with fresh evidence, clearer ordering proof, or a read-only reproduction. "
+                        "Do not approve early just because the first brief sounds plausible. "
                         "Only gate on technical investigation quality. Do not require organizational ownership assignment, DRI naming, commit/PR provenance, "
                         "or other process artifacts unless they are explicitly present in the provided evidence. Keep Overall Score numerically consistent "
                         "with the criterion bullets. Do not use JSON."
@@ -823,6 +886,7 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
                     input_text=(
                         f"Task prompt:\n{state['task_prompt']}\n\n"
                         f"Review round: {review_round}/{MAX_REVIEW_ROUNDS}\n\n"
+                        f"Minimum rounds required before final approval can stick: {MIN_REVIEW_ROUNDS}\n\n"
                         f"Investigation document:\n{state['investigation_doc']}\n\n"
                         "Act like a demanding senior engineer who cares about clean code, focus, optimization, architecture, and validation quality."
                     ),
@@ -831,6 +895,30 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
             except LLMError:
                 review_result = fallback
 
+        if review_round < MIN_REVIEW_ROUNDS:
+            enforced_actions = _dedupe([*review_result["improvement_actions"], MANDATORY_VERIFICATION_ACTION])
+            enforced_notes = "\n".join(
+                item
+                for item in [
+                    "\n".join(_extract_heading_block(review_result["review_doc"], "Senior Engineer Notes")).strip(),
+                    f"Minimum verification depth is {MIN_REVIEW_ROUNDS} rounds, so this brief still needs one more independent pass.",
+                ]
+                if item
+            ).strip()
+            review_result = {
+                **review_result,
+                "approved": False,
+                "improvement_actions": enforced_actions,
+                "review_doc": _compose_review_doc(
+                    review_result["score"],
+                    False,
+                    review_result["criterion_scores"],
+                    review_result["blocking_issues"],
+                    enforced_actions,
+                    enforced_notes,
+                ),
+            }
+
         previous_score = int(state.get("review_score", 0)) if review_round > 1 else None
         prior_stagnated_rounds = int(state.get("loop_stagnated_rounds", 0)) if review_round > 1 else 0
         progress = evaluate_quality_loop(
@@ -838,6 +926,7 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
             round_index=review_round,
             score=review_result["score"],
             approved=review_result["approved"],
+            blocking_issues=review_result["blocking_issues"],
             previous_score=previous_score,
             prior_stagnated_rounds=prior_stagnated_rounds,
             improvement_actions=review_result["improvement_actions"],

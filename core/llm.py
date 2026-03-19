@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import json
 import os
 from pathlib import Path
@@ -157,6 +157,7 @@ class CodexCLIConfig:
     model: str
     timeout_seconds: int
     working_directory: str | None = None
+    sandbox_mode: str = "read-only"
 
 
 class CodexCliLLMClient(LLMClient):
@@ -183,6 +184,22 @@ class CodexCliLLMClient(LLMClient):
         if self._resolve_command_path() is None:
             return f"codex_cli/{self.config.model}: disabled (codex command not found)"
         return f"codex_cli/{self.config.model}: available"
+
+    def with_overrides(
+        self,
+        *,
+        sandbox_mode: str | None = None,
+        working_directory: str | None = None,
+        timeout_seconds: int | None = None,
+    ) -> "CodexCliLLMClient":
+        return CodexCliLLMClient(
+            replace(
+                self.config,
+                sandbox_mode=sandbox_mode or self.config.sandbox_mode,
+                working_directory=working_directory or self.config.working_directory,
+                timeout_seconds=timeout_seconds or self.config.timeout_seconds,
+            )
+        )
 
     def generate_text(self, *, instructions: str, input_text: str, effort: str | None = None) -> str:
         del effort
@@ -222,7 +239,7 @@ class CodexCliLLMClient(LLMClient):
                 "--color",
                 "never",
                 "--sandbox",
-                "read-only",
+                self.config.sandbox_mode,
                 "-m",
                 self.config.model,
                 "-o",
@@ -384,6 +401,7 @@ def _build_client_for_profile(
                 ),
                 timeout_seconds=int(os.getenv("CODEX_TIMEOUT_SECONDS", "300")),
                 working_directory=working_directory,
+                sandbox_mode=os.getenv("CODEX_SANDBOX", "read-only"),
             )
         )
 

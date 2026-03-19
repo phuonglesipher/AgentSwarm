@@ -91,6 +91,37 @@ class QualityLoopTests(unittest.TestCase):
         self.assertTrue(third_round.completed)
         self.assertFalse(third_round.should_continue)
 
+    def test_loop_requires_minimum_rounds_before_passing(self) -> None:
+        spec = QualityLoopSpec(loop_id="plan-review", threshold=90, max_rounds=3, min_rounds=2)
+
+        first_round = evaluate_quality_loop(
+            spec,
+            round_index=1,
+            score=96,
+            approved=True,
+            blocking_issues=[],
+            improvement_actions=[],
+        )
+        second_round = evaluate_quality_loop(
+            spec,
+            round_index=2,
+            score=96,
+            approved=True,
+            blocking_issues=[],
+            improvement_actions=[],
+            previous_score=96,
+            prior_stagnated_rounds=first_round.stagnated_rounds,
+        )
+
+        self.assertEqual(first_round.status, "retry")
+        self.assertIn("needs at least 2 round(s)", first_round.reason)
+        self.assertTrue(first_round.should_continue)
+        self.assertFalse(first_round.completed)
+        self.assertEqual(second_round.status, "passed")
+        self.assertTrue(second_round.approved)
+        self.assertFalse(second_round.should_continue)
+        self.assertTrue(second_round.completed)
+
 
 if __name__ == "__main__":
     unittest.main()

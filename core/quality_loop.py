@@ -21,6 +21,7 @@ class QualityLoopSpec:
     loop_id: str
     threshold: int
     max_rounds: int
+    min_rounds: int = 1
     require_blocker_free: bool = True
     require_missing_section_free: bool = True
     require_explicit_approval: bool = True
@@ -63,6 +64,10 @@ def evaluate_quality_loop(
         raise ValueError("round_index must be positive")
     if spec.max_rounds <= 0:
         raise ValueError("max_rounds must be positive")
+    if spec.min_rounds <= 0:
+        raise ValueError("min_rounds must be positive")
+    if spec.min_rounds > spec.max_rounds:
+        raise ValueError("min_rounds must be less than or equal to max_rounds")
     if spec.threshold < 0:
         raise ValueError("threshold must be non-negative")
     if spec.stagnation_limit < 0:
@@ -89,7 +94,15 @@ def evaluate_quality_loop(
     meets_blockers = (not normalized_blocking_issues) if spec.require_blocker_free else True
     meets_missing_sections = (not normalized_missing_sections) if spec.require_missing_section_free else True
 
-    if meets_score and meets_approval and meets_blockers and meets_missing_sections:
+    if round_index < spec.min_rounds:
+        status = "retry"
+        should_continue = True
+        completed = False
+        reason = (
+            f"Loop `{spec.loop_id}` needs at least {spec.min_rounds} round(s); "
+            f"round {round_index} is still a verification pass."
+        )
+    elif meets_score and meets_approval and meets_blockers and meets_missing_sections:
         status = "passed"
         should_continue = False
         completed = True

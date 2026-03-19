@@ -71,10 +71,40 @@ class CodexCliLLMClientTests(unittest.TestCase):
         assert isinstance(command, list)
         self.assertEqual(command[command.index("--cd") + 1], str(host_root))
         self.assertEqual(command[-1], "-")
+        self.assertEqual(command[command.index("--sandbox") + 1], "read-only")
         self.assertIsInstance(captured["input"], str)
         self.assertIn("Fix the movement bug", str(captured["input"]))
         self.assertEqual(captured["encoding"], "utf-8")
         self.assertEqual(captured["errors"], "replace")
+
+    def test_with_overrides_can_switch_codex_sandbox_mode(self) -> None:
+        client = CodexCliLLMClient(
+            CodexCLIConfig(
+                command="codex",
+                model="gpt-5.3-codex",
+                timeout_seconds=30,
+                sandbox_mode="read-only",
+            )
+        )
+        resolved_command = r"C:\Users\phuong.le\AppData\Roaming\npm\codex.cmd"
+        captured: list[list[str]] = []
+
+        def fake_run(command: list[str], **kwargs) -> subprocess.CompletedProcess[str]:
+            del kwargs
+            captured.append(command)
+            output_path = Path(command[command.index("-o") + 1])
+            output_path.write_text("sandbox override works", encoding="utf-8")
+            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+        with mock.patch("core.llm.shutil.which", return_value=resolved_command):
+            with mock.patch("core.llm.subprocess.run", side_effect=fake_run):
+                result = client.with_overrides(sandbox_mode="workspace-write").generate_text(
+                    instructions="Investigate",
+                    input_text="Find the root cause",
+                )
+
+        self.assertEqual(result, "sandbox override works")
+        self.assertEqual(captured[0][captured[0].index("--sandbox") + 1], "workspace-write")
 
 
 if __name__ == "__main__":

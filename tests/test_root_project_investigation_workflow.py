@@ -322,6 +322,107 @@ class ProcessOnlyReviewLLMManager:
         return ["default", "reviewer"]
 
 
+class NonePrefixedApprovalLLMClient:
+    def is_enabled(self) -> bool:
+        return True
+
+    def describe(self) -> str:
+        return "none-prefixed approval test client"
+
+    def generate_text(self, *, instructions: str, input_text: str, effort: str | None = None) -> str:
+        del input_text, effort
+        if "Investigate the host project root like a senior engineer" in instructions:
+            return "\n".join(
+                [
+                    "# Root Project Investigation",
+                    "",
+                    "## Task Framing",
+                    "- Request: investigate player movement regression.",
+                    "- Scope: prove the causal chain directly from doc, runtime code, and tests.",
+                    "- Revision goal: produce a technically approvable investigation brief.",
+                    "",
+                    "## Project Root Findings",
+                    "- [docs/player_movement.md](C:/temp/docs/player_movement.md) defines the post-recovery movement contract.",
+                    "- [src/player_movement.py](C:/temp/src/player_movement.py) contains the early return while recovering.",
+                    "- [tests/test_player_movement.py](C:/temp/tests/test_player_movement.py) only covers the happy order.",
+                    "",
+                    "## Candidate Ownership",
+                    "- [src/player_movement.py](C:/temp/src/player_movement.py) is the primary runtime owner.",
+                    "- [tests/test_player_movement.py](C:/temp/tests/test_player_movement.py) is the main regression surface.",
+                    "",
+                    "## Root Cause Hypothesis",
+                    "- Movement remains disabled if regain_control runs before recovery ends and no second callback occurs.",
+                    "- The class ties restoration to call order instead of the recovery-end transition itself.",
+                    "",
+                    "## Architecture Notes",
+                    "- The bug boundary is local to movement-state transitions and their caller sequencing.",
+                    "- The recovery-end transition and movement restore contract are not enforced atomically.",
+                    "",
+                    "## Clean Code Notes",
+                    "- Public state flags allow invalid combinations to persist.",
+                    "- The eventual fix should restore the invariant at the owning runtime path.",
+                    "",
+                    "## Optimization Notes",
+                    "- This is correctness-first work; optimization is not the bottleneck.",
+                    "- Avoid speculative tuning until the transition contract is stable.",
+                    "",
+                    "## Verification Plan",
+                    "- Reproduce both happy and reversed call order.",
+                    "- Add repeated-cycle checks once executable test tooling is available.",
+                    "- Confirm the real integration caller if it exists outside this snapshot.",
+                    "",
+                    "## Open Questions",
+                    "- Confirm whether any external system intentionally leaves movement disabled after recovery.",
+                ]
+            )
+
+        if "strict senior engineer reviewing an investigation brief" in instructions:
+            return "\n".join(
+                [
+                    "# Investigation Review",
+                    "",
+                    "Decision: REVISE",
+                    "Overall Score: 100/100",
+                    "",
+                    "## Criterion Scores",
+                    "- Focus: 25/25 - The investigation is tightly scoped.",
+                    "- Evidence & Ownership: 20/20 - Ownership is grounded in project files and tests.",
+                    "- Architecture: 20/20 - The boundary and handoff are clear.",
+                    "- Clean Code: 15/15 - Maintainability concerns are explicit.",
+                    "- Optimization: 10/10 - Optimization is treated proportionally.",
+                    "- Verification: 10/10 - Verification is concrete and technical.",
+                    "",
+                    "## Blocking Issues",
+                    "- None. Round-depth gate is satisfied (`2/2` minimum), and the causal chain is technically well-supported for investigation approval.",
+                    "",
+                    "## Improvement Checklist",
+                    "- [ ] Add executable regression tests once pytest is available.",
+                    "",
+                    "## Senior Engineer Notes",
+                    "Investigation quality is already strong enough to approve technically.",
+                ]
+            )
+
+        raise AssertionError(f"Unexpected generate_text instructions: {instructions}")
+
+
+class NonePrefixedApprovalLLMManager:
+    def __init__(self) -> None:
+        self._client = NonePrefixedApprovalLLMClient()
+
+    def resolve(self, profile: str | None = None) -> NonePrefixedApprovalLLMClient:
+        return self._client
+
+    def is_enabled(self, profile: str | None = None) -> bool:
+        return True
+
+    def describe(self, profile: str | None = None) -> str:
+        return f"{profile or 'default'}: none-prefixed approval test client"
+
+    def available_profiles(self) -> list[str]:
+        return ["default", "reviewer"]
+
+
 class RootProjectInvestigationWorkflowTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
@@ -387,9 +488,13 @@ class RootProjectInvestigationWorkflowTests(unittest.TestCase):
             artifact_dir = Path(result["artifact_dir"])
             self.assertGreaterEqual(result["review_score"], 90)
             self.assertTrue(result["review_approved"])
+            self.assertEqual(result["investigation_round"], 2)
+            self.assertEqual(result["review_round"], 2)
             self.assertEqual(result["final_report"]["status"], "completed")
             self.assertTrue((artifact_dir / "investigation_round_1.md").exists())
             self.assertTrue((artifact_dir / "review_round_1.md").exists())
+            self.assertTrue((artifact_dir / "investigation_round_2.md").exists())
+            self.assertTrue((artifact_dir / "review_round_2.md").exists())
 
     def test_workflow_loops_until_review_score_reaches_threshold(self) -> None:
         with tempfile.TemporaryDirectory(prefix="agentswarm-root-investigation-loop-") as temp_dir:
@@ -440,11 +545,37 @@ class RootProjectInvestigationWorkflowTests(unittest.TestCase):
                 }
             )
 
-            self.assertEqual(result["review_round"], 1)
+            self.assertEqual(result["investigation_round"], 2)
+            self.assertEqual(result["review_round"], 2)
             self.assertEqual(result["review_score"], 100)
             self.assertTrue(result["review_approved"])
             self.assertEqual(result["review_blocking_issues"], [])
             self.assertEqual(result["review_improvement_actions"], [])
+            self.assertEqual(result["final_report"]["status"], "completed")
+
+    def test_review_parser_ignores_none_prefixed_blocker_explanations(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="agentswarm-root-investigation-none-prefixed-") as temp_dir:
+            host_root = Path(temp_dir) / "host-project"
+            self._prepare_host_project(host_root)
+            registry = self._load_registry(host_root, NonePrefixedApprovalLLMManager())
+
+            workflow = registry.get("root-project-investigation-workflow").graph
+            self.assertIsNotNone(workflow)
+
+            run_dir = host_root / ".agentswarm" / "runs" / "none-prefixed"
+            run_dir.mkdir(parents=True, exist_ok=True)
+            result = workflow.invoke(
+                {
+                    "task_prompt": "Investigate the root cause of a player movement recovery regression",
+                    "task_id": "task-1-player-movement-investigation",
+                    "run_dir": str(run_dir),
+                }
+            )
+
+            self.assertEqual(result["review_round"], 2)
+            self.assertEqual(result["review_score"], 100)
+            self.assertTrue(result["review_approved"])
+            self.assertEqual(result["review_blocking_issues"], [])
             self.assertEqual(result["final_report"]["status"], "completed")
 
 
