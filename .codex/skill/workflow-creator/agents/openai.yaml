@@ -1,0 +1,4 @@
+interface:
+  display_name: "Workflow Creator"
+  short_description: "Design AgentSwarm workflow graphs with reuse loops"
+  default_prompt: "Use $workflow-creator to design or refactor an AgentSwarm workflow with reusable subgraphs and strict review-score loops."

@@ -28,22 +28,15 @@ graph TD;
 	finalize --> __end__;
 	subgraph agentswarm__gameplay-engineer-workflow
 	agentswarm__gameplay-engineer-workflow\3aclassify_request(classify_request)
-	agentswarm__gameplay-engineer-workflow\3aprepare_doc_search(prepare_doc_search)
-	agentswarm__gameplay-engineer-workflow\3atool_request_error(tool_request_error)
-	agentswarm__gameplay-engineer-workflow\3acapture_doc_hits(capture_doc_hits)
-	agentswarm__gameplay-engineer-workflow\3aprepare_doc_context_lookup(prepare_doc_context_lookup)
-	agentswarm__gameplay-engineer-workflow\3acapture_doc_context(capture_doc_context)
-	agentswarm__gameplay-engineer-workflow\3aprepare_code_search(prepare_code_search)
-	agentswarm__gameplay-engineer-workflow\3acapture_code_hits(capture_code_hits)
-	agentswarm__gameplay-engineer-workflow\3aprepare_code_context_lookup(prepare_code_context_lookup)
-	agentswarm__gameplay-engineer-workflow\3acapture_code_context(capture_code_context)
-	agentswarm__gameplay-engineer-workflow\3aprepare_blueprint_search(prepare_blueprint_search)
-	agentswarm__gameplay-engineer-workflow\3acapture_blueprint_hits(capture_blueprint_hits)
-	agentswarm__gameplay-engineer-workflow\3aprepare_blueprint_context_lookup(prepare_blueprint_context_lookup)
-	agentswarm__gameplay-engineer-workflow\3acapture_blueprint_context(capture_blueprint_context)
+	agentswarm__gameplay-engineer-workflow\3arequest_investigation(request_investigation)
+	agentswarm__gameplay-engineer-workflow\3aprepare_investigation_strategy(prepare_investigation_strategy)
+	agentswarm__gameplay-engineer-workflow\3asimulate_engineer_investigation(simulate_engineer_investigation)
 	agentswarm__gameplay-engineer-workflow\3aassess_implementation_strategy(assess_implementation_strategy)
+	agentswarm__gameplay-engineer-workflow\3aevaluate_investigation(evaluate_investigation)
 	agentswarm__gameplay-engineer-workflow\3abuild_design_doc(build_design_doc)
 	agentswarm__gameplay-engineer-workflow\3abuild_bug_context_doc(build_bug_context_doc)
+	agentswarm__gameplay-engineer-workflow\3aprepare_investigation_blocked_delivery(prepare_investigation_blocked_delivery)
+	agentswarm__gameplay-engineer-workflow\3aprepare_investigation_delivery(prepare_investigation_delivery)
 	agentswarm__gameplay-engineer-workflow\3aplan_work(plan_work)
 	agentswarm__gameplay-engineer-workflow\3arequest_review(request_review)
 	agentswarm__gameplay-engineer-workflow\3aenter_review_subgraph(enter_review_subgraph)
@@ -52,93 +45,49 @@ graph TD;
 	agentswarm__gameplay-engineer-workflow\3arevise_plan(revise_plan)
 	agentswarm__gameplay-engineer-workflow\3aimplement_code(implement_code)
 	agentswarm__gameplay-engineer-workflow\3apost_implementation_gate(post_implementation_gate)
+	agentswarm__gameplay-engineer-workflow\3arequest_repair_validation(request_repair_validation)
 	agentswarm__gameplay-engineer-workflow\3aself_test(self_test)
+	agentswarm__gameplay-engineer-workflow\3acapture_repair_validation(capture_repair_validation)
 	agentswarm__gameplay-engineer-workflow\3arepair_code(repair_code)
 	agentswarm__gameplay-engineer-workflow\3aprepare_delivery(prepare_delivery)
+	agentswarm__gameplay-engineer-workflow\3aprepare_repair_blocked_delivery(prepare_repair_blocked_delivery)
 	agentswarm__gameplay-engineer-workflow\3aprepare_review_blocked_delivery(prepare_review_blocked_delivery)
-	agentswarm__gameplay-engineer-workflow\3aagentswarm__find-gameplay-blueprints(agentswarm__find-gameplay-blueprints)
-	agentswarm__gameplay-engineer-workflow\3aagentswarm__find-gameplay-docs(agentswarm__find-gameplay-docs)
-	agentswarm__gameplay-engineer-workflow\3aagentswarm__load-blueprint-context(agentswarm__load-blueprint-context)
-	agentswarm__gameplay-engineer-workflow\3aagentswarm__load-markdown-context(agentswarm__load-markdown-context)
-	agentswarm__gameplay-engineer-workflow\3aagentswarm__find-gameplay-code(agentswarm__find-gameplay-code)
-	agentswarm__gameplay-engineer-workflow\3aagentswarm__load-source-context(agentswarm__load-source-context)
 	agentswarm__gameplay-engineer-workflow\3a__end__(<p>__end__</p>)
-	agentswarm__gameplay-engineer-workflow\3aagentswarm__find-gameplay-blueprints --> agentswarm__gameplay-engineer-workflow\3acapture_blueprint_hits;
-	agentswarm__gameplay-engineer-workflow\3aagentswarm__find-gameplay-code --> agentswarm__gameplay-engineer-workflow\3acapture_code_hits;
-	agentswarm__gameplay-engineer-workflow\3aagentswarm__find-gameplay-docs --> agentswarm__gameplay-engineer-workflow\3acapture_doc_hits;
-	agentswarm__gameplay-engineer-workflow\3aagentswarm__load-blueprint-context --> agentswarm__gameplay-engineer-workflow\3acapture_blueprint_context;
-	agentswarm__gameplay-engineer-workflow\3aagentswarm__load-markdown-context --> agentswarm__gameplay-engineer-workflow\3acapture_doc_context;
-	agentswarm__gameplay-engineer-workflow\3aagentswarm__load-source-context --> agentswarm__gameplay-engineer-workflow\3acapture_code_context;
-	agentswarm__gameplay-engineer-workflow\3aassess_implementation_strategy -.-> agentswarm__gameplay-engineer-workflow\3abuild_bug_context_doc;
-	agentswarm__gameplay-engineer-workflow\3aassess_implementation_strategy -.-> agentswarm__gameplay-engineer-workflow\3abuild_design_doc;
-	agentswarm__gameplay-engineer-workflow\3abuild_bug_context_doc --> agentswarm__gameplay-engineer-workflow\3aimplement_code;
-	agentswarm__gameplay-engineer-workflow\3abuild_design_doc --> agentswarm__gameplay-engineer-workflow\3aplan_work;
-	agentswarm__gameplay-engineer-workflow\3acapture_blueprint_context --> agentswarm__gameplay-engineer-workflow\3aassess_implementation_strategy;
-	agentswarm__gameplay-engineer-workflow\3acapture_blueprint_hits --> agentswarm__gameplay-engineer-workflow\3aprepare_blueprint_context_lookup;
-	agentswarm__gameplay-engineer-workflow\3acapture_code_context --> agentswarm__gameplay-engineer-workflow\3aprepare_blueprint_search;
-	agentswarm__gameplay-engineer-workflow\3acapture_code_hits --> agentswarm__gameplay-engineer-workflow\3aprepare_code_context_lookup;
-	agentswarm__gameplay-engineer-workflow\3acapture_doc_context --> agentswarm__gameplay-engineer-workflow\3aprepare_code_search;
-	agentswarm__gameplay-engineer-workflow\3acapture_doc_hits --> agentswarm__gameplay-engineer-workflow\3aprepare_doc_context_lookup;
+	agentswarm__gameplay-engineer-workflow\3aassess_implementation_strategy --> agentswarm__gameplay-engineer-workflow\3aevaluate_investigation;
+	agentswarm__gameplay-engineer-workflow\3abuild_bug_context_doc -.-> agentswarm__gameplay-engineer-workflow\3aimplement_code;
+	agentswarm__gameplay-engineer-workflow\3abuild_bug_context_doc -.-> agentswarm__gameplay-engineer-workflow\3aprepare_investigation_delivery;
+	agentswarm__gameplay-engineer-workflow\3abuild_design_doc -.-> agentswarm__gameplay-engineer-workflow\3aplan_work;
+	agentswarm__gameplay-engineer-workflow\3abuild_design_doc -.-> agentswarm__gameplay-engineer-workflow\3aprepare_investigation_delivery;
+	agentswarm__gameplay-engineer-workflow\3acapture_repair_validation -.-> agentswarm__gameplay-engineer-workflow\3aprepare_delivery;
+	agentswarm__gameplay-engineer-workflow\3acapture_repair_validation -.-> agentswarm__gameplay-engineer-workflow\3aprepare_repair_blocked_delivery;
+	agentswarm__gameplay-engineer-workflow\3acapture_repair_validation -.-> agentswarm__gameplay-engineer-workflow\3arepair_code;
 	agentswarm__gameplay-engineer-workflow\3acapture_review_result -.-> agentswarm__gameplay-engineer-workflow\3aimplement_code;
 	agentswarm__gameplay-engineer-workflow\3acapture_review_result -.-> agentswarm__gameplay-engineer-workflow\3aprepare_review_blocked_delivery;
 	agentswarm__gameplay-engineer-workflow\3acapture_review_result -.-> agentswarm__gameplay-engineer-workflow\3arevise_plan;
-	agentswarm__gameplay-engineer-workflow\3aclassify_request --> agentswarm__gameplay-engineer-workflow\3aprepare_doc_search;
+	agentswarm__gameplay-engineer-workflow\3aclassify_request --> agentswarm__gameplay-engineer-workflow\3arequest_investigation;
 	agentswarm__gameplay-engineer-workflow\3aenter_review_subgraph --> agentswarm__gameplay-engineer-workflow\3agameplay-reviewer-workflow;
+	agentswarm__gameplay-engineer-workflow\3aevaluate_investigation -.-> agentswarm__gameplay-engineer-workflow\3abuild_bug_context_doc;
+	agentswarm__gameplay-engineer-workflow\3aevaluate_investigation -.-> agentswarm__gameplay-engineer-workflow\3abuild_design_doc;
+	agentswarm__gameplay-engineer-workflow\3aevaluate_investigation -.-> agentswarm__gameplay-engineer-workflow\3aprepare_investigation_blocked_delivery;
+	agentswarm__gameplay-engineer-workflow\3aevaluate_investigation -.-> agentswarm__gameplay-engineer-workflow\3arequest_investigation;
 	agentswarm__gameplay-engineer-workflow\3agameplay-reviewer-workflow --> agentswarm__gameplay-engineer-workflow\3acapture_review_result;
 	agentswarm__gameplay-engineer-workflow\3aimplement_code --> agentswarm__gameplay-engineer-workflow\3apost_implementation_gate;
 	agentswarm__gameplay-engineer-workflow\3aplan_work --> agentswarm__gameplay-engineer-workflow\3arequest_review;
 	agentswarm__gameplay-engineer-workflow\3apost_implementation_gate -.-> agentswarm__gameplay-engineer-workflow\3aprepare_delivery;
-	agentswarm__gameplay-engineer-workflow\3apost_implementation_gate -.-> agentswarm__gameplay-engineer-workflow\3aself_test;
-	agentswarm__gameplay-engineer-workflow\3aprepare_blueprint_context_lookup -.-> agentswarm__gameplay-engineer-workflow\3aagentswarm__find-gameplay-blueprints;
-	agentswarm__gameplay-engineer-workflow\3aprepare_blueprint_context_lookup -.-> agentswarm__gameplay-engineer-workflow\3aagentswarm__find-gameplay-code;
-	agentswarm__gameplay-engineer-workflow\3aprepare_blueprint_context_lookup -.-> agentswarm__gameplay-engineer-workflow\3aagentswarm__find-gameplay-docs;
-	agentswarm__gameplay-engineer-workflow\3aprepare_blueprint_context_lookup -.-> agentswarm__gameplay-engineer-workflow\3aagentswarm__load-blueprint-context;
-	agentswarm__gameplay-engineer-workflow\3aprepare_blueprint_context_lookup -.-> agentswarm__gameplay-engineer-workflow\3aagentswarm__load-markdown-context;
-	agentswarm__gameplay-engineer-workflow\3aprepare_blueprint_context_lookup -.-> agentswarm__gameplay-engineer-workflow\3aagentswarm__load-source-context;
-	agentswarm__gameplay-engineer-workflow\3aprepare_blueprint_context_lookup -.-> agentswarm__gameplay-engineer-workflow\3atool_request_error;
-	agentswarm__gameplay-engineer-workflow\3aprepare_blueprint_search -.-> agentswarm__gameplay-engineer-workflow\3aagentswarm__find-gameplay-blueprints;
-	agentswarm__gameplay-engineer-workflow\3aprepare_blueprint_search -.-> agentswarm__gameplay-engineer-workflow\3aagentswarm__find-gameplay-code;
-	agentswarm__gameplay-engineer-workflow\3aprepare_blueprint_search -.-> agentswarm__gameplay-engineer-workflow\3aagentswarm__find-gameplay-docs;
-	agentswarm__gameplay-engineer-workflow\3aprepare_blueprint_search -.-> agentswarm__gameplay-engineer-workflow\3aagentswarm__load-blueprint-context;
-	agentswarm__gameplay-engineer-workflow\3aprepare_blueprint_search -.-> agentswarm__gameplay-engineer-workflow\3aagentswarm__load-markdown-context;
-	agentswarm__gameplay-engineer-workflow\3aprepare_blueprint_search -.-> agentswarm__gameplay-engineer-workflow\3aagentswarm__load-source-context;
-	agentswarm__gameplay-engineer-workflow\3aprepare_blueprint_search -.-> agentswarm__gameplay-engineer-workflow\3atool_request_error;
-	agentswarm__gameplay-engineer-workflow\3aprepare_code_context_lookup -.-> agentswarm__gameplay-engineer-workflow\3aagentswarm__find-gameplay-blueprints;
-	agentswarm__gameplay-engineer-workflow\3aprepare_code_context_lookup -.-> agentswarm__gameplay-engineer-workflow\3aagentswarm__find-gameplay-code;
-	agentswarm__gameplay-engineer-workflow\3aprepare_code_context_lookup -.-> agentswarm__gameplay-engineer-workflow\3aagentswarm__find-gameplay-docs;
-	agentswarm__gameplay-engineer-workflow\3aprepare_code_context_lookup -.-> agentswarm__gameplay-engineer-workflow\3aagentswarm__load-blueprint-context;
-	agentswarm__gameplay-engineer-workflow\3aprepare_code_context_lookup -.-> agentswarm__gameplay-engineer-workflow\3aagentswarm__load-markdown-context;
-	agentswarm__gameplay-engineer-workflow\3aprepare_code_context_lookup -.-> agentswarm__gameplay-engineer-workflow\3aagentswarm__load-source-context;
-	agentswarm__gameplay-engineer-workflow\3aprepare_code_context_lookup -.-> agentswarm__gameplay-engineer-workflow\3atool_request_error;
-	agentswarm__gameplay-engineer-workflow\3aprepare_code_search -.-> agentswarm__gameplay-engineer-workflow\3aagentswarm__find-gameplay-blueprints;
-	agentswarm__gameplay-engineer-workflow\3aprepare_code_search -.-> agentswarm__gameplay-engineer-workflow\3aagentswarm__find-gameplay-code;
-	agentswarm__gameplay-engineer-workflow\3aprepare_code_search -.-> agentswarm__gameplay-engineer-workflow\3aagentswarm__find-gameplay-docs;
-	agentswarm__gameplay-engineer-workflow\3aprepare_code_search -.-> agentswarm__gameplay-engineer-workflow\3aagentswarm__load-blueprint-context;
-	agentswarm__gameplay-engineer-workflow\3aprepare_code_search -.-> agentswarm__gameplay-engineer-workflow\3aagentswarm__load-markdown-context;
-	agentswarm__gameplay-engineer-workflow\3aprepare_code_search -.-> agentswarm__gameplay-engineer-workflow\3aagentswarm__load-source-context;
-	agentswarm__gameplay-engineer-workflow\3aprepare_code_search -.-> agentswarm__gameplay-engineer-workflow\3atool_request_error;
-	agentswarm__gameplay-engineer-workflow\3aprepare_doc_context_lookup -.-> agentswarm__gameplay-engineer-workflow\3aagentswarm__find-gameplay-blueprints;
-	agentswarm__gameplay-engineer-workflow\3aprepare_doc_context_lookup -.-> agentswarm__gameplay-engineer-workflow\3aagentswarm__find-gameplay-code;
-	agentswarm__gameplay-engineer-workflow\3aprepare_doc_context_lookup -.-> agentswarm__gameplay-engineer-workflow\3aagentswarm__find-gameplay-docs;
-	agentswarm__gameplay-engineer-workflow\3aprepare_doc_context_lookup -.-> agentswarm__gameplay-engineer-workflow\3aagentswarm__load-blueprint-context;
-	agentswarm__gameplay-engineer-workflow\3aprepare_doc_context_lookup -.-> agentswarm__gameplay-engineer-workflow\3aagentswarm__load-markdown-context;
-	agentswarm__gameplay-engineer-workflow\3aprepare_doc_context_lookup -.-> agentswarm__gameplay-engineer-workflow\3aagentswarm__load-source-context;
-	agentswarm__gameplay-engineer-workflow\3aprepare_doc_context_lookup -.-> agentswarm__gameplay-engineer-workflow\3atool_request_error;
-	agentswarm__gameplay-engineer-workflow\3aprepare_doc_search -.-> agentswarm__gameplay-engineer-workflow\3aagentswarm__find-gameplay-blueprints;
-	agentswarm__gameplay-engineer-workflow\3aprepare_doc_search -.-> agentswarm__gameplay-engineer-workflow\3aagentswarm__find-gameplay-code;
-	agentswarm__gameplay-engineer-workflow\3aprepare_doc_search -.-> agentswarm__gameplay-engineer-workflow\3aagentswarm__find-gameplay-docs;
-	agentswarm__gameplay-engineer-workflow\3aprepare_doc_search -.-> agentswarm__gameplay-engineer-workflow\3aagentswarm__load-blueprint-context;
-	agentswarm__gameplay-engineer-workflow\3aprepare_doc_search -.-> agentswarm__gameplay-engineer-workflow\3aagentswarm__load-markdown-context;
-	agentswarm__gameplay-engineer-workflow\3aprepare_doc_search -.-> agentswarm__gameplay-engineer-workflow\3aagentswarm__load-source-context;
-	agentswarm__gameplay-engineer-workflow\3aprepare_doc_search -.-> agentswarm__gameplay-engineer-workflow\3atool_request_error;
-	agentswarm__gameplay-engineer-workflow\3arepair_code --> agentswarm__gameplay-engineer-workflow\3aself_test;
+	agentswarm__gameplay-engineer-workflow\3apost_implementation_gate -.-> agentswarm__gameplay-engineer-workflow\3arequest_repair_validation;
+	agentswarm__gameplay-engineer-workflow\3aprepare_investigation_strategy --> agentswarm__gameplay-engineer-workflow\3asimulate_engineer_investigation;
+	agentswarm__gameplay-engineer-workflow\3arepair_code --> agentswarm__gameplay-engineer-workflow\3arequest_repair_validation;
+	agentswarm__gameplay-engineer-workflow\3arequest_investigation --> agentswarm__gameplay-engineer-workflow\3aprepare_investigation_strategy;
+	agentswarm__gameplay-engineer-workflow\3arequest_repair_validation --> agentswarm__gameplay-engineer-workflow\3aself_test;
 	agentswarm__gameplay-engineer-workflow\3arequest_review --> agentswarm__gameplay-engineer-workflow\3aenter_review_subgraph;
 	agentswarm__gameplay-engineer-workflow\3arevise_plan --> agentswarm__gameplay-engineer-workflow\3arequest_review;
-	agentswarm__gameplay-engineer-workflow\3aself_test -.-> agentswarm__gameplay-engineer-workflow\3aprepare_delivery;
-	agentswarm__gameplay-engineer-workflow\3aself_test -.-> agentswarm__gameplay-engineer-workflow\3arepair_code;
+	agentswarm__gameplay-engineer-workflow\3aself_test --> agentswarm__gameplay-engineer-workflow\3acapture_repair_validation;
+	agentswarm__gameplay-engineer-workflow\3asimulate_engineer_investigation --> agentswarm__gameplay-engineer-workflow\3aassess_implementation_strategy;
 	agentswarm__gameplay-engineer-workflow\3aprepare_delivery --> agentswarm__gameplay-engineer-workflow\3a__end__;
+	agentswarm__gameplay-engineer-workflow\3aprepare_investigation_blocked_delivery --> agentswarm__gameplay-engineer-workflow\3a__end__;
+	agentswarm__gameplay-engineer-workflow\3aprepare_investigation_delivery --> agentswarm__gameplay-engineer-workflow\3a__end__;
+	agentswarm__gameplay-engineer-workflow\3aprepare_repair_blocked_delivery --> agentswarm__gameplay-engineer-workflow\3a__end__;
 	agentswarm__gameplay-engineer-workflow\3aprepare_review_blocked_delivery --> agentswarm__gameplay-engineer-workflow\3a__end__;
-	agentswarm__gameplay-engineer-workflow\3atool_request_error --> agentswarm__gameplay-engineer-workflow\3a__end__;
 	end
 	subgraph agentswarm__gameplay-reviewer-workflow
 	agentswarm__gameplay-reviewer-workflow\3areview_plan(review_plan)

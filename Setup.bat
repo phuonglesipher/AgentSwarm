@@ -5,7 +5,7 @@ cd /d "%~dp0"
 set "PYTHON_BIN=python"
 where py >nul 2>nul
 if %errorlevel%==0 (
-    set "PYTHON_BIN=py -3"
+    set "PYTHON_BIN=py -2"
 )
 
 %PYTHON_BIN% -m pip install --upgrade pip
