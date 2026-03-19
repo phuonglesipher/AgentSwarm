@@ -260,7 +260,7 @@ def _build_html(main_graph_mermaid: str, engineer_graph_mermaid: str) -> str:
       <article class="panel">
         <div class="panel-header">
           <h2>Gameplay Engineer Workflow</h2>
-          <span class="chip">Feature + bugfix split</span>
+          <span class="chip">Gameplay-only delivery</span>
         </div>
         <div class="panel-body">
           <div class="mermaid-shell">

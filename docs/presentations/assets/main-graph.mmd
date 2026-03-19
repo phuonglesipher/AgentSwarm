@@ -14,18 +14,36 @@ graph TD;
 	finalize(finalize)
 	__end__([<p>__end__</p>]):::last
 	__start__ --> analyze_prompt;
+	agentswarm__gameplay-engineer-planner\3afinalize --> collect_task_result;
 	agentswarm__gameplay-engineer-workflow\3a__end__ --> collect_task_result;
 	agentswarm__gameplay-reviewer-workflow\3areview_plan --> collect_task_result;
+	agentswarm__root-project-investigation-reviewer-workflow\3areview --> collect_task_result;
+	agentswarm__root-project-investigation-workflow\3a__end__ --> collect_task_result;
 	analyze_prompt --> plan_tasks;
 	collect_task_result --> select_next_task;
 	mark_task_failed --> collect_task_result;
 	plan_tasks --> route_tasks;
 	route_tasks --> select_next_task;
+	select_next_task -.-> agentswarm__gameplay-engineer-planner\3a__start__;
 	select_next_task -.-> agentswarm__gameplay-engineer-workflow\3aclassify_request;
 	select_next_task -.-> agentswarm__gameplay-reviewer-workflow\3areview_plan;
+	select_next_task -.-> agentswarm__root-project-investigation-reviewer-workflow\3areview;
+	select_next_task -.-> agentswarm__root-project-investigation-workflow\3a__start__;
 	select_next_task -.-> finalize;
 	select_next_task -.-> mark_task_failed;
 	finalize --> __end__;
+	subgraph agentswarm__gameplay-engineer-planner
+	agentswarm__gameplay-engineer-planner\3a__start__(<p>__start__</p>)
+	agentswarm__gameplay-engineer-planner\3aresearch_solution(research_solution)
+	agentswarm__gameplay-engineer-planner\3adraft_solution_plan(draft_solution_plan)
+	agentswarm__gameplay-engineer-planner\3areview_solution_plan(review_solution_plan)
+	agentswarm__gameplay-engineer-planner\3afinalize(finalize)
+	agentswarm__gameplay-engineer-planner\3a__start__ --> agentswarm__gameplay-engineer-planner\3aresearch_solution;
+	agentswarm__gameplay-engineer-planner\3adraft_solution_plan --> agentswarm__gameplay-engineer-planner\3areview_solution_plan;
+	agentswarm__gameplay-engineer-planner\3aresearch_solution --> agentswarm__gameplay-engineer-planner\3adraft_solution_plan;
+	agentswarm__gameplay-engineer-planner\3areview_solution_plan -.-> agentswarm__gameplay-engineer-planner\3afinalize;
+	agentswarm__gameplay-engineer-planner\3areview_solution_plan -.-> agentswarm__gameplay-engineer-planner\3aresearch_solution;
+	end
 	subgraph agentswarm__gameplay-engineer-workflow
 	agentswarm__gameplay-engineer-workflow\3aclassify_request(classify_request)
 	agentswarm__gameplay-engineer-workflow\3arequest_investigation(request_investigation)
@@ -89,8 +107,25 @@ graph TD;
 	agentswarm__gameplay-engineer-workflow\3aprepare_repair_blocked_delivery --> agentswarm__gameplay-engineer-workflow\3a__end__;
 	agentswarm__gameplay-engineer-workflow\3aprepare_review_blocked_delivery --> agentswarm__gameplay-engineer-workflow\3a__end__;
 	end
+	subgraph agentswarm__root-project-investigation-workflow
+	agentswarm__root-project-investigation-workflow\3a__start__(<p>__start__</p>)
+	agentswarm__root-project-investigation-workflow\3ainvestigate(investigate)
+	agentswarm__root-project-investigation-workflow\3arequest_review(request_review)
+	agentswarm__root-project-investigation-workflow\3aroot-project-investigation-reviewer-workflow(root-project-investigation-reviewer-workflow)
+	agentswarm__root-project-investigation-workflow\3acapture_review_result(capture_review_result)
+	agentswarm__root-project-investigation-workflow\3a__end__(<p>__end__</p>)
+	agentswarm__root-project-investigation-workflow\3a__start__ --> agentswarm__root-project-investigation-workflow\3ainvestigate;
+	agentswarm__root-project-investigation-workflow\3acapture_review_result -.-> agentswarm__root-project-investigation-workflow\3a__end__;
+	agentswarm__root-project-investigation-workflow\3acapture_review_result -.-> agentswarm__root-project-investigation-workflow\3ainvestigate;
+	agentswarm__root-project-investigation-workflow\3ainvestigate --> agentswarm__root-project-investigation-workflow\3arequest_review;
+	agentswarm__root-project-investigation-workflow\3arequest_review --> agentswarm__root-project-investigation-workflow\3aroot-project-investigation-reviewer-workflow;
+	agentswarm__root-project-investigation-workflow\3aroot-project-investigation-reviewer-workflow --> agentswarm__root-project-investigation-workflow\3acapture_review_result;
+	end
 	subgraph agentswarm__gameplay-reviewer-workflow
 	agentswarm__gameplay-reviewer-workflow\3areview_plan(review_plan)
+	end
+	subgraph agentswarm__root-project-investigation-reviewer-workflow
+	agentswarm__root-project-investigation-reviewer-workflow\3areview(review)
 	end
 	classDef default fill:#f2f0ff,line-height:1.2
 	classDef first fill-opacity:0
