@@ -466,6 +466,20 @@ class RootProjectInvestigationWorkflowTests(unittest.TestCase):
             manifest=manifest,
         )
 
+    def test_workflow_registers_reviewer_subgraph(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="agentswarm-root-investigation-subgraph-") as temp_dir:
+            host_root = Path(temp_dir) / "host-project"
+            self._prepare_host_project(host_root)
+            registry = self._load_registry(host_root, DisabledLLMManager())
+
+            workflow = registry.get("root-project-investigation-workflow").graph
+            reviewer_workflow = registry.get("root-project-investigation-reviewer-workflow").graph
+
+            self.assertIsNotNone(workflow)
+            self.assertIsNotNone(reviewer_workflow)
+            subgraphs = dict(workflow.get_subgraphs())
+            self.assertIn("root-project-investigation-reviewer-workflow", subgraphs)
+
     def test_workflow_loads_and_completes_without_llm(self) -> None:
         with tempfile.TemporaryDirectory(prefix="agentswarm-root-investigation-fallback-") as temp_dir:
             host_root = Path(temp_dir) / "host-project"

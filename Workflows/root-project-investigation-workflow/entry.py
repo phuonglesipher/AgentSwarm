@@ -789,6 +789,7 @@ def _fallback_investigation_doc(
 
 def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
     graph_name = metadata.name
+    reviewer_graph = context.get_workflow_graph("root-project-investigation-reviewer-workflow")
 
     def investigate(state: InvestigationLoopState) -> dict[str, Any]:
         investigation_round = int(state.get("investigation_round", 0)) + 1
@@ -859,112 +860,48 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
             "summary": f"{metadata.name} completed investigation round {investigation_round} and handed the brief to senior review.",
         }
 
-    def review(state: InvestigationLoopState) -> dict[str, Any]:
+    def request_review(state: InvestigationLoopState) -> dict[str, Any]:
         review_round = int(state.get("review_round", 0)) + 1
+        return {
+            "summary": (
+                f"{metadata.name} handed investigation round {state['investigation_round']} to senior review "
+                f"for review round {review_round}."
+            )
+        }
+
+    def capture_review_result(state: InvestigationLoopState) -> dict[str, Any]:
+        review_round = int(state.get("review_round", 0))
         artifact_path = _artifact_dir(context, metadata, state)
-        fallback = _fallback_review(state["task_prompt"], state["investigation_doc"])
-        review_result = fallback
-
-        reviewer_llm = context.get_llm("reviewer")
-        if reviewer_llm.is_enabled():
-            try:
-                generated_review = reviewer_llm.generate_text(
-                    instructions=(
-                        "You are a strict senior engineer reviewing an investigation brief. Score it hard against focus, evidence and ownership, "
-                        "architecture, clean code thinking, optimization awareness, and verification quality. Return markdown using this exact shape: "
-                        "# Investigation Review, Decision: APPROVE or REVISE, Overall Score: NN/100, ## Criterion Scores, ## Blocking Issues, "
-                        "## Improvement Checklist, ## Senior Engineer Notes. Use one bullet per criterion in the form `- Criterion: score/max - rationale`. "
-                        "If there are no blocking issues, write exactly `- None.` under Blocking Issues. "
-                        "If there are no further investigation changes requested, write exactly `- [x] No further investigation changes requested.` "
-                        f"Minimum final-approval depth is {MIN_REVIEW_ROUNDS} review rounds. If the current round is below that floor, require one more "
-                        "pass that independently re-validates the causal chain with fresh evidence, clearer ordering proof, or a read-only reproduction. "
-                        "Do not approve early just because the first brief sounds plausible. "
-                        "Only gate on technical investigation quality. Do not require organizational ownership assignment, DRI naming, commit/PR provenance, "
-                        "or other process artifacts unless they are explicitly present in the provided evidence. Keep Overall Score numerically consistent "
-                        "with the criterion bullets. Do not use JSON."
-                    ),
-                    input_text=(
-                        f"Task prompt:\n{state['task_prompt']}\n\n"
-                        f"Review round: {review_round}/{MAX_REVIEW_ROUNDS}\n\n"
-                        f"Minimum rounds required before final approval can stick: {MIN_REVIEW_ROUNDS}\n\n"
-                        f"Investigation document:\n{state['investigation_doc']}\n\n"
-                        "Act like a demanding senior engineer who cares about clean code, focus, optimization, architecture, and validation quality."
-                    ),
-                )
-                review_result = _parse_review_doc(generated_review, fallback)
-            except LLMError:
-                review_result = fallback
-
-        if review_round < MIN_REVIEW_ROUNDS:
-            enforced_actions = _dedupe([*review_result["improvement_actions"], MANDATORY_VERIFICATION_ACTION])
-            enforced_notes = "\n".join(
-                item
-                for item in [
-                    "\n".join(_extract_heading_block(review_result["review_doc"], "Senior Engineer Notes")).strip(),
-                    f"Minimum verification depth is {MIN_REVIEW_ROUNDS} rounds, so this brief still needs one more independent pass.",
-                ]
-                if item
-            ).strip()
-            review_result = {
-                **review_result,
-                "approved": False,
-                "improvement_actions": enforced_actions,
-                "review_doc": _compose_review_doc(
-                    review_result["score"],
-                    False,
-                    review_result["criterion_scores"],
-                    review_result["blocking_issues"],
-                    enforced_actions,
-                    enforced_notes,
-                ),
-            }
-
-        previous_score = int(state.get("review_score", 0)) if review_round > 1 else None
-        prior_stagnated_rounds = int(state.get("loop_stagnated_rounds", 0)) if review_round > 1 else 0
-        progress = evaluate_quality_loop(
-            LOOP_SPEC,
-            round_index=review_round,
-            score=review_result["score"],
-            approved=review_result["approved"],
-            blocking_issues=review_result["blocking_issues"],
-            previous_score=previous_score,
-            prior_stagnated_rounds=prior_stagnated_rounds,
-            improvement_actions=review_result["improvement_actions"],
-        )
-
         final_status = "in_progress"
-        if progress.approved:
+        if state["review_approved"]:
             final_status = "completed"
-        elif progress.completed:
+        elif state["loop_completed"]:
             final_status = "review-blocked"
-
-        final_review_doc = review_result["review_doc"]
-        (artifact_path / f"review_round_{review_round}.md").write_text(final_review_doc, encoding="utf-8")
 
         final_report = {
             "status": final_status,
             "investigation_rounds": int(state.get("investigation_round", 0)),
             "review_rounds": review_round,
-            "review_score": progress.score,
-            "review_approved": progress.approved,
-            "loop_status": progress.status,
-            "loop_reason": progress.reason,
-            "loop_stagnated_rounds": progress.stagnated_rounds,
+            "review_score": int(state.get("review_score", 0)),
+            "review_approved": bool(state.get("review_approved", False)),
+            "loop_status": str(state.get("loop_status", "unknown")),
+            "loop_reason": str(state.get("loop_reason", "")),
+            "loop_stagnated_rounds": int(state.get("loop_stagnated_rounds", 0)),
             "artifact_dir": str(artifact_path),
             "relevant_docs": list(state.get("relevant_docs", [])),
             "relevant_source": list(state.get("relevant_source", [])),
             "relevant_tests": list(state.get("relevant_tests", [])),
-            "blocking_issues": list(review_result["blocking_issues"]),
-            "improvement_actions": list(review_result["improvement_actions"]),
+            "blocking_issues": list(state.get("review_blocking_issues", [])),
+            "improvement_actions": list(state.get("review_improvement_actions", [])),
         }
 
         summary = (
-            f"{metadata.name} passed senior review in {review_round} round(s) with score {progress.score}/100."
-            if progress.approved
+            f"{metadata.name} passed senior review in {review_round} round(s) with score {state['review_score']}/100."
+            if state["review_approved"]
             else (
-                f"{metadata.name} stopped after {review_round} round(s) with score {progress.score}/100. Loop status: {progress.status}."
-                if progress.completed
-                else f"{metadata.name} scored {progress.score}/100 in review round {review_round} and will loop back into investigation."
+                f"{metadata.name} stopped after {review_round} round(s) with score {state['review_score']}/100. Loop status: {state['loop_status']}."
+                if state["loop_completed"]
+                else f"{metadata.name} scored {state['review_score']}/100 in review round {review_round} and will loop back into investigation."
             )
         )
         (artifact_path / "final_report.md").write_text(
@@ -973,38 +910,25 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
                     "# Root Project Investigation Final Report",
                     "",
                     f"- Status: {final_status}",
-                    f"- Review Score: {progress.score}/100",
-                    f"- Review Approved: {progress.approved}",
-                    f"- Loop Status: {progress.status}",
-                    f"- Loop Reason: {progress.reason}",
+                    f"- Review Score: {state['review_score']}/100",
+                    f"- Review Approved: {state['review_approved']}",
+                    f"- Loop Status: {state['loop_status']}",
+                    f"- Loop Reason: {state['loop_reason']}",
                     "",
                     "## Blocking Issues",
-                    *([f"- {item}" for item in review_result["blocking_issues"]] or ["- None."]),
+                    *([f"- {item}" for item in state.get("review_blocking_issues", [])] or ["- None."]),
                     "",
                     "## Improvement Checklist",
-                    *([f"- {item}" for item in review_result["improvement_actions"]] or ["- None."]),
+                    *([f"- {item}" for item in state.get("review_improvement_actions", [])] or ["- None."]),
                     "",
                     "## Latest Review",
-                    final_review_doc,
+                    state.get("review_doc", ""),
                 ]
             ),
             encoding="utf-8",
         )
         return {
-            "review_round": review_round,
             "artifact_dir": str(artifact_path),
-            "review_doc": final_review_doc,
-            "review_score": progress.score,
-            "review_feedback": final_review_doc,
-            "review_blocking_issues": list(review_result["blocking_issues"]),
-            "review_improvement_actions": list(review_result["improvement_actions"]),
-            "review_criterion_scores": list(review_result["criterion_scores"]),
-            "review_approved": progress.approved,
-            "loop_status": progress.status,
-            "loop_reason": progress.reason,
-            "loop_should_continue": progress.should_continue,
-            "loop_completed": progress.completed,
-            "loop_stagnated_rounds": progress.stagnated_rounds,
             "final_report": final_report,
             "summary": summary,
         }
@@ -1014,11 +938,21 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
 
     graph = StateGraph(InvestigationLoopState)
     graph.add_node("investigate", trace_graph_node(graph_name=graph_name, node_name="investigate", node_fn=investigate))
-    graph.add_node("review", trace_graph_node(graph_name=graph_name, node_name="review", node_fn=review))
+    graph.add_node(
+        "request_review",
+        trace_graph_node(graph_name=graph_name, node_name="request_review", node_fn=request_review),
+    )
+    graph.add_node("root-project-investigation-reviewer-workflow", reviewer_graph)
+    graph.add_node(
+        "capture_review_result",
+        trace_graph_node(graph_name=graph_name, node_name="capture_review_result", node_fn=capture_review_result),
+    )
     graph.add_edge(START, "investigate")
-    graph.add_edge("investigate", "review")
+    graph.add_edge("investigate", "request_review")
+    graph.add_edge("request_review", "root-project-investigation-reviewer-workflow")
+    graph.add_edge("root-project-investigation-reviewer-workflow", "capture_review_result")
     graph.add_conditional_edges(
-        "review",
+        "capture_review_result",
         trace_route_decision(graph_name=graph_name, router_name="review_gate", route_fn=review_gate),
         {"investigate": "investigate", END: END},
     )
