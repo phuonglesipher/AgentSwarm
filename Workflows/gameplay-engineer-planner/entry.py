@@ -460,6 +460,45 @@ def _compose_review_feedback(
     return "\n".join(lines)
 
 
+def _blocked_review_response(
+    *,
+    artifact_dir: Path,
+    metadata: WorkflowMetadata,
+    planning_round: int,
+    reason: str,
+    loop_status: str,
+) -> dict[str, Any]:
+    improvement_action = "Enable the reviewer LLM and rerun planner review so the scoring assessments come from LLM output."
+    feedback = _compose_review_feedback(
+        planning_round=planning_round,
+        score=0,
+        approved=False,
+        loop_status=loop_status,
+        loop_reason=reason,
+        section_reviews=[],
+        missing_sections=[],
+        blocking_issues=[reason],
+        improvement_actions=[improvement_action],
+        reviewer_feedback=reason,
+    )
+    (artifact_dir / f"planner_review_round_{planning_round}.md").write_text(feedback, encoding="utf-8")
+    return {
+        "score": 0,
+        "feedback": feedback,
+        "missing_sections": [],
+        "section_reviews": [],
+        "blocking_issues": [reason],
+        "improvement_actions": [improvement_action],
+        "approved": False,
+        "loop_status": loop_status,
+        "loop_reason": reason,
+        "loop_should_continue": False,
+        "loop_completed": True,
+        "loop_stagnated_rounds": 0,
+        "summary": f"{metadata.name} stopped because gameplay solution-plan assessments were unavailable.",
+    }
+
+
 def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
     graph_name = metadata.name
 
@@ -536,102 +575,120 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
     def review_solution_plan(state: PlannerState) -> dict[str, Any]:
         artifact_dir = _artifact_dir(context, metadata, state)
         reviewer_llm = context.get_llm("reviewer")
-        fallback = _fallback_review(state["solution_plan"])
-        review_result = fallback
-        if reviewer_llm.is_enabled():
-            schema = {
-                "type": "object",
-                "properties": {
-                    "score": {"type": "integer"},
-                    "feedback": {"type": "string"},
-                    "missing_sections": {"type": "array", "items": {"type": "string"}},
-                    "section_reviews": {
-                        "type": "array",
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "section": {"type": "string"},
-                                "score": {"type": "integer"},
-                                "status": {"type": "string"},
-                                "rationale": {"type": "string"},
-                                "action_items": {"type": "array", "items": {"type": "string"}},
-                            },
-                            "required": ["section", "score", "status", "rationale", "action_items"],
-                            "additionalProperties": False,
-                        },
-                    },
-                    "blocking_issues": {"type": "array", "items": {"type": "string"}},
-                    "improvement_actions": {"type": "array", "items": {"type": "string"}},
-                    "approved": {"type": "boolean"},
-                },
-                "required": [
-                    "score",
-                    "feedback",
-                    "missing_sections",
-                    "section_reviews",
-                    "blocking_issues",
-                    "improvement_actions",
-                    "approved",
-                ],
-                "additionalProperties": False,
-            }
-            try:
-                generated = reviewer_llm.generate_json(
-                    instructions=(
-                        "You review gameplay solution plans before implementation. Score the plan hard against Problem Framing, Current Context, "
-                        "Proposed Solution, Execution Plan, Validation Plan, and Risks and Open Questions. Return JSON only."
-                    ),
-                    input_text=(
-                        f"Task prompt:\n{state['task_prompt']}\n\n"
-                        f"Planning round: {state['planning_round']}\n\n"
-                        "Hard blocker and scoring rules:\n"
-                        "- [hard blocker] Player Outcome: the plan must name the player-visible result.\n"
-                        "- [hard blocker] Current Behavior Evidence: the plan must cite grounded docs, code, or tests.\n"
-                        "- [hard blocker] Speculation Control: the plan must stay anchored on current runtime ownership.\n"
-                        "- [hard blocker] Edge and Regression Coverage: the validation plan must protect neighboring gameplay paths.\n\n"
-                        f"Solution plan:\n{state['solution_plan']}\n"
-                    ),
-                    schema_name="gameplay_solution_plan_review",
-                    schema=schema,
-                )
-                review_result = {
-                    "score": int(generated.get("score", fallback["score"])),
-                    "feedback": str(generated.get("feedback", fallback["feedback"])).strip(),
-                    "missing_sections": [str(item) for item in generated.get("missing_sections", []) if str(item).strip()],
-                    "section_reviews": [
-                        {
-                            "section": str(item["section"]).strip(),
-                            "score": max(0, int(item["score"])),
-                            "status": str(item["status"]).strip(),
-                            "rationale": str(item["rationale"]).strip(),
-                            "action_items": [
-                                str(action).strip() for action in item.get("action_items", []) if str(action).strip()
-                            ],
-                        }
-                        for item in generated.get("section_reviews", [])
-                        if str(item.get("section", "")).strip()
-                    ]
-                    or fallback["section_reviews"],
-                    "blocking_issues": _dedupe([str(item) for item in generated.get("blocking_issues", []) if str(item).strip()]),
-                    "improvement_actions": _dedupe(
-                        [str(item) for item in generated.get("improvement_actions", []) if str(item).strip()]
-                    ),
-                    "approved": bool(generated.get("approved", False)),
-                }
-                if not review_result["missing_sections"]:
-                    review_result["missing_sections"] = fallback["missing_sections"]
-                if not review_result["blocking_issues"] and not review_result["approved"]:
-                    review_result["blocking_issues"] = fallback["blocking_issues"]
-                if not review_result["improvement_actions"] and not review_result["approved"]:
-                    review_result["improvement_actions"] = fallback["improvement_actions"]
-            except LLMError:
-                review_result = fallback
+        planning_round = int(state["planning_round"])
+        if not reviewer_llm.is_enabled():
+            return _blocked_review_response(
+                artifact_dir=artifact_dir,
+                metadata=metadata,
+                planning_round=planning_round,
+                reason="Reviewer LLM is unavailable, so gameplay solution-plan assessments cannot be generated.",
+                loop_status="llm-unavailable",
+            )
 
-        previous_score = int(state.get("score", 0)) if int(state.get("planning_round", 0)) > 1 else None
-        prior_stagnated_rounds = int(state.get("loop_stagnated_rounds", 0)) if int(state.get("planning_round", 0)) > 1 else 0
+        schema = {
+            "type": "object",
+            "properties": {
+                "score": {"type": "integer"},
+                "feedback": {"type": "string"},
+                "missing_sections": {"type": "array", "items": {"type": "string"}},
+                "section_reviews": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "section": {"type": "string"},
+                            "score": {"type": "integer"},
+                            "status": {"type": "string"},
+                            "rationale": {"type": "string"},
+                            "action_items": {"type": "array", "items": {"type": "string"}},
+                        },
+                        "required": ["section", "score", "status", "rationale", "action_items"],
+                        "additionalProperties": False,
+                    },
+                },
+                "blocking_issues": {"type": "array", "items": {"type": "string"}},
+                "improvement_actions": {"type": "array", "items": {"type": "string"}},
+                "approved": {"type": "boolean"},
+            },
+            "required": [
+                "score",
+                "feedback",
+                "missing_sections",
+                "section_reviews",
+                "blocking_issues",
+                "improvement_actions",
+                "approved",
+            ],
+            "additionalProperties": False,
+        }
+        try:
+            generated = reviewer_llm.generate_json(
+                instructions=(
+                    "You review gameplay solution plans before implementation. Score the plan hard against Problem Framing, Current Context, "
+                    "Proposed Solution, Execution Plan, Validation Plan, and Risks and Open Questions. Return JSON only."
+                ),
+                input_text=(
+                    f"Task prompt:\n{state['task_prompt']}\n\n"
+                    f"Planning round: {planning_round}\n\n"
+                    "Hard blocker and scoring rules:\n"
+                    "- [hard blocker] Player Outcome: the plan must name the player-visible result.\n"
+                    "- [hard blocker] Current Behavior Evidence: the plan must cite grounded docs, code, or tests.\n"
+                    "- [hard blocker] Speculation Control: the plan must stay anchored on current runtime ownership.\n"
+                    "- [hard blocker] Edge and Regression Coverage: the validation plan must protect neighboring gameplay paths.\n\n"
+                    f"Solution plan:\n{state['solution_plan']}\n"
+                ),
+                schema_name="gameplay_solution_plan_review",
+                schema=schema,
+            )
+            raw_section_reviews = [
+                {
+                    "section": str(item["section"]).strip(),
+                    "score": max(0, int(item["score"])),
+                    "status": str(item["status"]).strip(),
+                    "rationale": str(item["rationale"]).strip(),
+                    "action_items": [str(action).strip() for action in item.get("action_items", []) if str(action).strip()],
+                }
+                for item in generated.get("section_reviews", [])
+                if str(item.get("section", "")).strip()
+            ]
+            expected_sections = {section for section, _ in SECTION_WEIGHTS}
+            received_sections = {item["section"] for item in raw_section_reviews}
+            if len(raw_section_reviews) != len(SECTION_WEIGHTS) or received_sections != expected_sections:
+                raise ValueError("Reviewer LLM did not return the full gameplay solution-plan assessment set.")
+            ordered_section_reviews = [
+                next(item for item in raw_section_reviews if item["section"] == section)
+                for section, _ in SECTION_WEIGHTS
+            ]
+            review_result = {
+                "score": sum(item["score"] for item in ordered_section_reviews),
+                "feedback": str(generated.get("feedback", "")).strip(),
+                "missing_sections": _dedupe(
+                    [
+                        *[str(item) for item in generated.get("missing_sections", []) if str(item).strip()],
+                        *[item["section"] for item in ordered_section_reviews if item["status"].strip().lower() == "missing"],
+                    ]
+                ),
+                "section_reviews": ordered_section_reviews,
+                "blocking_issues": _dedupe([str(item) for item in generated.get("blocking_issues", []) if str(item).strip()]),
+                "improvement_actions": _dedupe(
+                    [str(item) for item in generated.get("improvement_actions", []) if str(item).strip()]
+                ),
+                "approved": bool(generated.get("approved", False)),
+            }
+        except (LLMError, TypeError, ValueError) as exc:
+            return _blocked_review_response(
+                artifact_dir=artifact_dir,
+                metadata=metadata,
+                planning_round=planning_round,
+                reason=f"Reviewer LLM failed to produce usable gameplay solution-plan assessments: {exc}",
+                loop_status="llm-error",
+            )
+
+        previous_score = int(state.get("score", 0)) if planning_round > 1 else None
+        prior_stagnated_rounds = int(state.get("loop_stagnated_rounds", 0)) if planning_round > 1 else 0
         progress = evaluate_quality_loop(
             PLAN_LOOP_SPEC,
-            round_index=int(state["planning_round"]),
+            round_index=planning_round,
             score=review_result["score"],
             approved=bool(review_result.get("approved", False)),
             missing_sections=review_result["missing_sections"],
@@ -641,7 +698,7 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
             prior_stagnated_rounds=prior_stagnated_rounds,
         )
         feedback = _compose_review_feedback(
-            planning_round=int(state["planning_round"]),
+            planning_round=planning_round,
             score=progress.score,
             approved=progress.approved,
             loop_status=progress.status,
@@ -652,7 +709,7 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
             improvement_actions=list(progress.improvement_actions),
             reviewer_feedback=review_result["feedback"],
         )
-        (artifact_dir / f"planner_review_round_{state['planning_round']}.md").write_text(feedback, encoding="utf-8")
+        (artifact_dir / f"planner_review_round_{planning_round}.md").write_text(feedback, encoding="utf-8")
         final_score = 100 if progress.approved else progress.score
         return {
             "score": final_score,
@@ -668,10 +725,10 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
             "loop_completed": progress.completed,
             "loop_stagnated_rounds": progress.stagnated_rounds,
             "summary": (
-                f"{metadata.name} approved planning round {state['planning_round']}."
+                f"{metadata.name} approved planning round {planning_round}."
                 if progress.approved
                 else (
-                    f"{metadata.name} stopped after planning round {state['planning_round']}."
+                    f"{metadata.name} stopped after planning round {planning_round}."
                     if progress.completed
                     else f"{metadata.name} requested another planning round."
                 )

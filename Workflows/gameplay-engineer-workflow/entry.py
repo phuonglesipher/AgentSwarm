@@ -1524,195 +1524,219 @@ def _to_score_assessments(checks: list[InvestigationCheck]) -> list[ScoreAssessm
     ]
 
 
-def _evaluate_investigation_quality(state: EngineerState) -> tuple[dict[str, Any], list[InvestigationCheck]]:
-    checks: list[InvestigationCheck] = []
+def _evaluate_investigation_quality(
+    context: WorkflowContext,
+    state: EngineerState,
+) -> tuple[dict[str, Any], list[InvestigationCheck]]:
     artifact_dir_value = str(state.get("artifact_dir", "")).strip()
     score_history_dir = Path(artifact_dir_value) if artifact_dir_value else None
+    review_round = max(1, int(state.get("investigation_round", 1)))
+    reviewer_llm = context.get_llm("reviewer")
 
-    def add_check(section: str, max_score: int, passed: bool, rationale: str, action: str) -> None:
-        checks.append(
+    if not reviewer_llm.is_enabled():
+        reason = "Reviewer LLM is unavailable, so gameplay investigation assessments cannot be generated."
+        improvement_action = (
+            "Enable the reviewer LLM and rerun gameplay investigation review so the scoring assessments come from LLM output."
+        )
+        feedback = _compose_loop_feedback(
+            title="Investigation Confidence Review",
+            round_index=review_round,
+            score=0,
+            threshold=INVESTIGATION_SCORE,
+            approved=False,
+            confidence_label="unmeasured",
+            confidence_reason="MAD confidence is unavailable because no LLM-generated assessments were produced.",
+            confidence=None,
+            blocking_issues=[reason],
+            improvement_actions=[improvement_action],
+            sections=[],
+            loop_reason=reason,
+        )
+        return (
             {
-                "section": section,
-                "score": max_score if passed else max(1, round(max_score * 0.4)),
-                "max_score": max_score,
-                "status": "pass" if passed else "needs-work",
-                "rationale": rationale,
-                "action_items": [] if passed else [action],
+                "investigation_score": 0,
+                "investigation_feedback": feedback,
+                "investigation_missing_sections": [],
+                "investigation_blocking_issues": [reason],
+                "investigation_improvement_actions": [improvement_action],
+                "investigation_approved": False,
+                "investigation_loop_status": "llm-unavailable",
+                "investigation_loop_reason": reason,
+                "investigation_loop_stagnated_rounds": 0,
+                "investigation_score_confidence": None,
+                "investigation_score_confidence_label": "unmeasured",
+                "investigation_score_confidence_reason": "MAD confidence is unavailable because no LLM-generated assessments were produced.",
+                "active_loop_should_continue": False,
+                "active_loop_completed": True,
+                "active_loop_status": "llm-unavailable",
+            },
+            [],
+        )
+
+    schema = {
+        "type": "object",
+        "properties": {
+            "feedback": {"type": "string"},
+            "section_reviews": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "section": {"type": "string"},
+                        "score": {"type": "integer"},
+                        "status": {"type": "string"},
+                        "rationale": {"type": "string"},
+                        "action_items": {"type": "array", "items": {"type": "string"}},
+                    },
+                    "required": ["section", "score", "status", "rationale", "action_items"],
+                    "additionalProperties": False,
+                },
+            },
+            "blocking_issues": {"type": "array", "items": {"type": "string"}},
+            "improvement_actions": {"type": "array", "items": {"type": "string"}},
+            "approved": {"type": "boolean"},
+        },
+        "required": ["feedback", "section_reviews", "blocking_issues", "improvement_actions", "approved"],
+        "additionalProperties": False,
+    }
+    try:
+        generated = reviewer_llm.generate_json(
+            instructions=(
+                "You are gameplay-engineer-workflow's strict investigation reviewer. Score the investigation only from the evidence provided. "
+                "Return JSON with these exact section reviews: Supporting References, Runtime Owner Precision, Current vs Legacy Split, "
+                "Ownership Summary, Root Cause Hypothesis, Investigation Summary, Implementation Medium, Validation Plan, Noise Control. "
+                "Approval requires a score >= 85, no blocking issues, and a technically grounded handoff. "
+                f"Minimum final-approval depth is {MIN_INVESTIGATION_ROUNDS} investigation rounds. "
+                "Do not drift into process-only asks like sign-off, artifact naming, or bookkeeping. "
+                "Keep the score numerically consistent with the section reviews."
+            ),
+            input_text=build_prompt_brief(
+                opening="Review the current gameplay investigation as a strict senior engineer before planning or implementation can proceed.",
+                sections=[
+                    ("Task request", state["task_prompt"].strip()),
+                    (
+                        "Review context",
+                        "\n".join(
+                            [
+                                f"- Investigation round: {review_round}",
+                                f"- Task type: {state.get('task_type', 'bugfix')}",
+                                f"- Execution track: {state.get('execution_track', state.get('task_type', 'bugfix'))}",
+                                f"- Approval threshold: {INVESTIGATION_SCORE}/100",
+                            ]
+                        ),
+                    ),
+                    ("Investigation document", str(state.get("investigation_doc", "")).strip() or "None."),
+                    ("Current runtime paths", _format_bullets(list(state.get("current_runtime_paths", [])))),
+                    ("Legacy runtime paths", _format_bullets(list(state.get("legacy_runtime_paths", [])))),
+                    ("Supporting docs", _format_bullets(list(state.get("doc_hits", [])))),
+                    ("Supporting source files", _format_bullets(list(state.get("source_hits", [])))),
+                    ("Supporting tests", _format_bullets(list(state.get("test_hits", [])))),
+                    ("Supporting Blueprint assets", _format_bullets(list(state.get("blueprint_hits", [])))),
+                    ("Supporting Blueprint text exports", _format_bullets(list(state.get("blueprint_text_hits", [])))),
+                ],
+                closing=(
+                    "Score it hard, focus only on technical investigation quality, and require another independent verification pass "
+                    "before final approval can stick."
+                ),
+            ),
+            schema_name="gameplay_investigation_review",
+            schema=schema,
+        )
+        raw_checks = [
+            {
+                "section": str(item["section"]).strip(),
+                "score": max(0, int(item["score"])),
+                "max_score": INVESTIGATION_SECTION_WEIGHT_MAP[str(item["section"]).strip()],
+                "status": str(item["status"]).strip(),
+                "rationale": str(item["rationale"]).strip(),
+                "action_items": [str(action).strip() for action in item.get("action_items", []) if str(action).strip()],
             }
+            for item in generated.get("section_reviews", [])
+            if str(item.get("section", "")).strip() in INVESTIGATION_SECTION_WEIGHT_MAP
+        ]
+        expected_sections = {section for section, _ in INVESTIGATION_SECTION_WEIGHTS}
+        received_sections = {item["section"] for item in raw_checks}
+        if len(raw_checks) != len(INVESTIGATION_SECTION_WEIGHTS) or received_sections != expected_sections:
+            raise ValueError("Reviewer LLM did not return the full gameplay investigation assessment set.")
+        checks = [
+            next(item for item in raw_checks if item["section"] == section)
+            for section, _ in INVESTIGATION_SECTION_WEIGHTS
+        ]
+        blocking_issues = _filter_plan_revision_items(
+            [str(item) for item in generated.get("blocking_issues", []) if str(item).strip()]
+        )
+        improvement_actions = _filter_plan_revision_items(
+            [str(item) for item in generated.get("improvement_actions", []) if str(item).strip()]
+        )
+        explicit_approval = bool(generated.get("approved", False))
+    except (LLMError, TypeError, ValueError) as exc:
+        reason = f"Reviewer LLM failed to produce usable gameplay investigation assessments: {exc}"
+        improvement_action = (
+            "Fix reviewer LLM access or output formatting, then rerun gameplay investigation review so the scoring assessments come from LLM output."
+        )
+        feedback = _compose_loop_feedback(
+            title="Investigation Confidence Review",
+            round_index=review_round,
+            score=0,
+            threshold=INVESTIGATION_SCORE,
+            approved=False,
+            confidence_label="unmeasured",
+            confidence_reason="MAD confidence is unavailable because no LLM-generated assessments were produced.",
+            confidence=None,
+            blocking_issues=[reason],
+            improvement_actions=[improvement_action],
+            sections=[],
+            loop_reason=reason,
+        )
+        return (
+            {
+                "investigation_score": 0,
+                "investigation_feedback": feedback,
+                "investigation_missing_sections": [],
+                "investigation_blocking_issues": [reason],
+                "investigation_improvement_actions": [improvement_action],
+                "investigation_approved": False,
+                "investigation_loop_status": "llm-error",
+                "investigation_loop_reason": reason,
+                "investigation_loop_stagnated_rounds": 0,
+                "investigation_score_confidence": None,
+                "investigation_score_confidence_label": "unmeasured",
+                "investigation_score_confidence_reason": "MAD confidence is unavailable because no LLM-generated assessments were produced.",
+                "active_loop_should_continue": False,
+                "active_loop_completed": True,
+                "active_loop_status": "llm-error",
+            },
+            [],
         )
 
-    current_runtime_paths = [str(item).strip() for item in state.get("current_runtime_paths", []) if str(item).strip()]
-    legacy_runtime_paths = [str(item).strip() for item in state.get("legacy_runtime_paths", []) if str(item).strip()]
-    source_hits = [str(item).strip() for item in state.get("source_hits", []) if str(item).strip()]
-    test_hits = [str(item).strip() for item in state.get("test_hits", []) if str(item).strip()]
-    blueprint_hits = [str(item).strip() for item in state.get("blueprint_hits", []) if str(item).strip()]
-    blueprint_text_hits = [str(item).strip() for item in state.get("blueprint_text_hits", []) if str(item).strip()]
-    doc_hits = [str(item).strip() for item in state.get("doc_hits", []) if str(item).strip()]
-    ownership_summary = str(state.get("ownership_summary", "")).strip()
-    investigation_summary = str(state.get("investigation_summary", "")).strip()
-    implementation_medium = str(state.get("implementation_medium", "")).strip().lower()
-    implementation_medium_reason = str(state.get("implementation_medium_reason", "")).strip()
-    root_cause_text = "\n".join(
-        [
-            str(state.get("investigation_root_cause", "")).strip(),
-            *[str(item).strip() for item in state.get("runtime_path_hypotheses", []) if str(item).strip()],
-        ]
-    ).strip()
-    validation_plan = str(state.get("investigation_validation_plan", "")).strip()
-    owner_hint_text = "\n".join(
-        [
-            ownership_summary,
-            str(state.get("code_context", "")).strip(),
-            str(state.get("blueprint_context", "")).strip(),
-            root_cause_text,
-        ]
-    )
-    current_set = {item.lower() for item in current_runtime_paths}
-    legacy_set = {item.lower() for item in legacy_runtime_paths}
-    has_supporting_references = bool(doc_hits or source_hits or blueprint_hits or blueprint_text_hits)
-    has_live_owner = bool(current_runtime_paths or blueprint_hits or blueprint_text_hits)
-    has_owner_precision = has_live_owner and (
-        bool(current_runtime_paths)
-        or _contains_path_hint(owner_hint_text)
-    )
-    has_current_vs_legacy_split = (not legacy_set) or bool(current_set and not current_set.intersection(legacy_set))
-    has_ownership_summary = bool(ownership_summary) and (has_live_owner or _contains_path_hint(ownership_summary))
-    has_root_cause = bool(root_cause_text) or (
-        has_live_owner
-        and bool(investigation_summary)
-        and int(state.get("investigation_round", 1)) >= MIN_INVESTIGATION_ROUNDS
-    )
-    has_investigation_summary = bool(investigation_summary)
-    has_implementation_medium = implementation_medium in {"cpp", "blueprint"} and bool(implementation_medium_reason)
-    has_validation = (
-        bool(test_hits)
-        or bool(validation_plan and (_contains_path_hint(validation_plan) or "manual" in normalize_text(validation_plan)))
-        or bool(implementation_medium == "blueprint" and (blueprint_hits or blueprint_text_hits))
-    )
-    has_noise_control = (not legacy_runtime_paths) or has_live_owner
-
-    add_check(
-        "Supporting References",
-        10,
-        has_supporting_references,
-        "Relevant docs, source files, or Blueprint assets support the investigation."
-        if has_supporting_references
-        else "The investigation still lacks grounded supporting references.",
-        "Ground the investigation in concrete docs, source files, or Blueprint assets before planning.",
-    )
-    add_check(
-        "Runtime Owner Precision",
-        25,
-        has_owner_precision,
-        "The investigation isolated a current runtime owner with grounded path-level evidence."
-        if has_owner_precision
-        else "The live gameplay runtime owner is still too ambiguous.",
-        "Identify the current runtime owner and anchor the handoff on the exact gameplay path.",
-    )
-    add_check(
-        "Current vs Legacy Split",
-        10,
-        has_current_vs_legacy_split,
-        "The investigation separated current runtime ownership from stale or archival references."
-        if has_current_vs_legacy_split
-        else "Legacy references still blur the live runtime owner.",
-        "Separate the live gameplay owner from stale or archival references before implementation.",
-    )
-    add_check(
-        "Ownership Summary",
-        10,
-        has_ownership_summary,
-        "The ownership summary names the likely owner and why it is responsible."
-        if has_ownership_summary
-        else "The ownership handoff is still too thin.",
-        "Tighten the ownership summary so it names the owner and the reason it owns this behavior.",
-    )
-    add_check(
-        "Root Cause Hypothesis",
-        15,
-        has_root_cause,
-        "The investigation names a plausible causal hypothesis for the gameplay behavior."
-        if has_root_cause
-        else "The investigation still needs a concrete causal hypothesis.",
-        "State the likely failing transition, hook, or runtime condition before implementation.",
-    )
-    add_check(
-        "Investigation Summary",
-        10,
-        has_investigation_summary,
-        "The investigation summary is concrete enough to hand off."
-        if has_investigation_summary
-        else "The investigation summary still needs a tighter handoff.",
-        "Summarize the grounded owner, likely cause, and next proof step in one handoff-ready note.",
-    )
-    add_check(
-        "Implementation Medium",
-        5,
-        has_implementation_medium,
-        "The investigation classified the work as code or Blueprint with rationale."
-        if has_implementation_medium
-        else "The implementation medium is still under-justified.",
-        "Explain whether the fix belongs in code or Blueprint and why.",
-    )
-    add_check(
-        "Validation Plan",
-        10,
-        has_validation,
-        "A concrete automated or manual validation path is present."
-        if has_validation
-        else "The validation path is still too vague.",
-        "Name the exact regression test, validation path, or manual Blueprint verification flow.",
-    )
-    add_check(
-        "Noise Control",
-        5,
-        has_noise_control,
-        "The evidence set stayed focused on the live gameplay owner."
-        if has_noise_control
-        else "The investigation still carries too much stale or noisy evidence.",
-        "Trim stale evidence and keep the brief focused on the live gameplay owner only.",
-    )
-
-    blocking_issues = _dedupe(
-        [
-            f"{item['section']}: {item['action_items'][0]}"
-            for item in checks
-            if item["section"] in INVESTIGATION_BLOCKING_SECTIONS and item["status"] != "pass"
-        ]
-    )
-    if int(state.get("investigation_round", 1)) < MIN_INVESTIGATION_ROUNDS:
-        blocking_issues.append(
-            f"Minimum verification depth is {MIN_INVESTIGATION_ROUNDS} rounds, so this investigation still needs one more independent pass."
+    if review_round < MIN_INVESTIGATION_ROUNDS:
+        blocking_issues = _dedupe(
+            [
+                *blocking_issues,
+                f"Minimum verification depth is {MIN_INVESTIGATION_ROUNDS} rounds, so this investigation still needs one more independent pass.",
+            ]
         )
-    improvement_actions = _dedupe(
-        [
-            action
-            for item in checks
-            if item["status"] != "pass"
-            for action in item["action_items"]
-        ]
-    )
-    if int(state.get("investigation_round", 1)) < MIN_INVESTIGATION_ROUNDS:
-        improvement_actions.append(MANDATORY_INVESTIGATION_VERIFICATION_ACTION)
-    proposed_score = sum(item["score"] for item in checks)
+        improvement_actions = _dedupe([*improvement_actions, MANDATORY_INVESTIGATION_VERIFICATION_ACTION])
+        explicit_approval = False
+
     score_decision = evaluate_score_decision(
         INVESTIGATION_SCORE_POLICY,
-        round_index=max(1, int(state.get("investigation_round", 1))),
+        round_index=review_round,
         assessments=_to_score_assessments(checks),
-        explicit_approval=proposed_score >= INVESTIGATION_SCORE and not blocking_issues,
+        explicit_approval=explicit_approval,
         blocking_issues=blocking_issues,
         improvement_actions=improvement_actions,
         artifact_dir=score_history_dir,
     )
     progress = evaluate_quality_loop(
         INVESTIGATION_LOOP_SPEC,
-        round_index=max(1, int(state.get("investigation_round", 1))),
+        round_index=review_round,
         score=score_decision.score,
         approved=score_decision.approved,
         blocking_issues=score_decision.blocking_issues,
         improvement_actions=score_decision.improvement_actions,
-        previous_score=int(state.get("investigation_score", 0)) if int(state.get("investigation_round", 1)) > 1 else None,
-        prior_stagnated_rounds=int(state.get("investigation_loop_stagnated_rounds", 0)) if int(state.get("investigation_round", 1)) > 1 else 0,
+        previous_score=int(state.get("investigation_score", 0)) if review_round > 1 else None,
+        prior_stagnated_rounds=int(state.get("investigation_loop_stagnated_rounds", 0)) if review_round > 1 else 0,
     )
     feedback = _compose_loop_feedback(
         title="Investigation Confidence Review",
@@ -1726,7 +1750,7 @@ def _evaluate_investigation_quality(state: EngineerState) -> tuple[dict[str, Any
         blocking_issues=list(progress.blocking_issues),
         improvement_actions=list(progress.improvement_actions),
         sections=checks,
-        loop_reason=progress.reason,
+        loop_reason=str(generated.get("feedback", "")).strip() or progress.reason,
     )
     return (
         {
@@ -1888,7 +1912,7 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
 
     def evaluate_investigation(state: EngineerState) -> dict[str, Any]:
         artifact_dir = _artifact_dir(context, metadata, state)
-        updates, checks = _evaluate_investigation_quality(state)
+        updates, checks = _evaluate_investigation_quality(context, state)
         review_doc = str(updates["investigation_feedback"])
         (artifact_dir / f"investigation_review_round_{state['investigation_round']}.md").write_text(review_doc, encoding="utf-8")
         return {

@@ -436,6 +436,87 @@ def _extract_heading_block(document: str, heading: str) -> list[str]:
     return collected
 
 
+def _parse_review_doc_or_raise(review_doc: str) -> dict[str, Any]:
+    decision_match = re.search(r"Decision:\s*(APPROVE|REVISE)", review_doc, flags=re.IGNORECASE)
+    score_match = re.search(r"Overall Score:\s*(\d{1,3})\s*/\s*100", review_doc, flags=re.IGNORECASE)
+    if decision_match is None or score_match is None:
+        raise ValueError("Reviewer LLM response is missing the required Decision or Overall Score fields.")
+
+    max_score_lookup = {name: weight for name, weight, *_ in REVIEW_CRITERIA}
+    parsed_scores: list[CriterionAssessment] = []
+    seen_criteria: set[str] = set()
+    for line in _extract_heading_block(review_doc, "Criterion Scores"):
+        match = re.match(
+            r"-\s*(?P<criterion>[^:]+):\s*(?P<score>\d{1,3})\s*/\s*(?P<max>\d{1,3})\s*-\s*(?P<rationale>.+)",
+            line.strip(),
+            flags=re.IGNORECASE,
+        )
+        if match is None:
+            continue
+        criterion = match.group("criterion").strip()
+        if criterion not in max_score_lookup or criterion in seen_criteria:
+            continue
+        seen_criteria.add(criterion)
+        max_score = max_score_lookup[criterion]
+        item_score = max(0, min(int(match.group("score")), max_score))
+        status = "pass" if item_score >= max_score else "needs-work"
+        if item_score == 0:
+            status = "missing"
+        parsed_scores.append(
+            {
+                "criterion": criterion,
+                "score": item_score,
+                "max_score": max_score,
+                "status": status,
+                "rationale": match.group("rationale").strip(),
+                "action_items": [],
+            }
+        )
+
+    if len(parsed_scores) != len(REVIEW_CRITERIA):
+        raise ValueError("Reviewer LLM did not return the full investigation criterion assessment set.")
+
+    ordered_scores = [{**next(item for item in parsed_scores if item["criterion"] == name)} for name, *_ in REVIEW_CRITERIA]
+    raw_blocking_issues: list[str] = []
+    for line in _extract_heading_block(review_doc, "Blocking Issues"):
+        stripped = line.strip()
+        if stripped.startswith("- "):
+            item = stripped[2:].strip()
+            if not item.lower().startswith("none."):
+                raw_blocking_issues.append(item)
+    blocking_issues = _dedupe([item for item in raw_blocking_issues if not _is_process_only_feedback(item)])
+
+    raw_improvement_actions: list[str] = []
+    for line in _extract_heading_block(review_doc, "Improvement Checklist"):
+        stripped = line.strip()
+        if not stripped.startswith("- "):
+            continue
+        item = re.sub(r"^-\s*\[[ xX]\]\s*", "", stripped).strip()
+        if not item.lower().startswith("no further investigation changes requested."):
+            raw_improvement_actions.append(item)
+    improvement_actions = _dedupe([item for item in raw_improvement_actions if not _is_process_only_feedback(item)])
+
+    score = sum(item["score"] for item in ordered_scores)
+    explicit_decision = decision_match.group(1).strip().lower() == "approve"
+    approved = explicit_decision or (score >= APPROVAL_SCORE and not blocking_issues)
+    final_review_doc = _compose_review_doc(
+        score,
+        approved,
+        ordered_scores,
+        blocking_issues,
+        improvement_actions,
+        "\n".join(_extract_heading_block(review_doc, "Senior Engineer Notes")).strip(),
+    )
+    return {
+        "review_doc": final_review_doc,
+        "score": score,
+        "approved": approved,
+        "criterion_scores": ordered_scores,
+        "blocking_issues": blocking_issues,
+        "improvement_actions": improvement_actions,
+    }
+
+
 def _parse_review_doc(review_doc: str, fallback: dict[str, Any]) -> dict[str, Any]:
     if re.search(r"Overall Score:\s*(\d{1,3})\s*/\s*100", review_doc, flags=re.IGNORECASE) is None:
         return fallback
@@ -528,43 +609,97 @@ def _parse_review_doc(review_doc: str, fallback: dict[str, Any]) -> dict[str, An
     }
 
 
+def _blocked_review_response(
+    *,
+    artifact_path: Path,
+    metadata: WorkflowMetadata,
+    review_round: int,
+    reason: str,
+    loop_status: str,
+) -> dict[str, Any]:
+    improvement_action = "Enable the reviewer LLM and rerun investigation review so the scoring assessments come from LLM output."
+    review_doc = _compose_review_doc(
+        0,
+        False,
+        [],
+        [reason],
+        [improvement_action],
+        reason,
+        confidence_label="unmeasured",
+        confidence_reason="MAD confidence is unavailable because no LLM-generated assessments were produced.",
+    )
+    (artifact_path / f"review_round_{review_round}.md").write_text(review_doc, encoding="utf-8")
+    return {
+        "review_round": review_round,
+        "artifact_dir": str(artifact_path),
+        "review_doc": review_doc,
+        "review_score": 0,
+        "review_feedback": review_doc,
+        "review_blocking_issues": [reason],
+        "review_improvement_actions": [improvement_action],
+        "review_criterion_scores": [],
+        "review_approved": False,
+        "loop_status": loop_status,
+        "loop_reason": reason,
+        "loop_should_continue": False,
+        "loop_completed": True,
+        "loop_stagnated_rounds": 0,
+        "review_score_confidence": None,
+        "review_score_confidence_label": "unmeasured",
+        "review_score_confidence_reason": "MAD confidence is unavailable because no LLM-generated assessments were produced.",
+        "summary": f"{metadata.name} stopped in review round {review_round} because investigation assessments were unavailable.",
+    }
+
+
 def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
     graph_name = metadata.name
 
     def review(state: ReviewerState) -> dict[str, Any]:
         review_round = int(state.get("review_round", 0)) + 1
         artifact_path = _artifact_dir(context, metadata, state)
-        fallback = _fallback_review(state["task_prompt"], state["investigation_doc"])
-        review_result = fallback
+        reviewer_llm = context.get_llm("reviewer")
+        if not reviewer_llm.is_enabled():
+            return _blocked_review_response(
+                artifact_path=artifact_path,
+                metadata=metadata,
+                review_round=review_round,
+                reason="Reviewer LLM is unavailable, so investigation assessments cannot be generated.",
+                loop_status="llm-unavailable",
+            )
 
-        if context.llm.is_enabled():
-            try:
-                generated_review = context.llm.generate_text(
-                    instructions=(
-                        "You are a strict senior engineer reviewing an investigation brief. Score it hard against focus, evidence and ownership, "
-                        "architecture, clean code thinking, optimization awareness, and verification quality. Return markdown using this exact shape: "
-                        "# Investigation Review, Decision: APPROVE or REVISE, Overall Score: NN/100, ## Criterion Scores, ## Blocking Issues, "
-                        "## Improvement Checklist, ## Senior Engineer Notes. Use one bullet per criterion in the form `- Criterion: score/max - rationale`. "
-                        "If there are no blocking issues, write exactly `- None.` under Blocking Issues. "
-                        "If there are no further investigation changes requested, write exactly `- [x] No further investigation changes requested.` "
-                        f"Minimum final-approval depth is {MIN_REVIEW_ROUNDS} review rounds. If the current round is below that floor, require one more "
-                        "pass that independently re-validates the causal chain with fresh evidence, clearer ordering proof, or a read-only reproduction. "
-                        "Do not approve early just because the first brief sounds plausible. "
-                        "Only gate on technical investigation quality. Do not require organizational ownership assignment, DRI naming, commit/PR provenance, "
-                        "or other process artifacts unless they are explicitly present in the provided evidence. Keep Overall Score numerically consistent "
-                        "with the criterion bullets. Do not use JSON."
-                    ),
-                    input_text=(
-                        f"Task prompt:\n{state['task_prompt']}\n\n"
-                        f"Review round: {review_round}/{MAX_REVIEW_ROUNDS}\n\n"
-                        f"Minimum rounds required before final approval can stick: {MIN_REVIEW_ROUNDS}\n\n"
-                        f"Investigation document:\n{state['investigation_doc']}\n\n"
-                        "Act like a demanding senior engineer who cares about clean code, focus, optimization, architecture, and validation quality."
-                    ),
-                )
-                review_result = _parse_review_doc(generated_review, fallback)
-            except LLMError:
-                review_result = fallback
+        try:
+            generated_review = reviewer_llm.generate_text(
+                instructions=(
+                    "You are a strict senior engineer reviewing an investigation brief. Score it hard against focus, evidence and ownership, "
+                    "architecture, clean code thinking, optimization awareness, and verification quality. Return markdown using this exact shape: "
+                    "# Investigation Review, Decision: APPROVE or REVISE, Overall Score: NN/100, ## Criterion Scores, ## Blocking Issues, "
+                    "## Improvement Checklist, ## Senior Engineer Notes. Use one bullet per criterion in the form `- Criterion: score/max - rationale`. "
+                    "If there are no blocking issues, write exactly `- None.` under Blocking Issues. "
+                    "If there are no further investigation changes requested, write exactly `- [x] No further investigation changes requested.` "
+                    f"Minimum final-approval depth is {MIN_REVIEW_ROUNDS} review rounds. If the current round is below that floor, require one more "
+                    "pass that independently re-validates the causal chain with fresh evidence, clearer ordering proof, or a read-only reproduction. "
+                    "Do not approve early just because the first brief sounds plausible. "
+                    "Only gate on technical investigation quality. Do not require organizational ownership assignment, DRI naming, commit/PR provenance, "
+                    "or other process artifacts unless they are explicitly present in the provided evidence. Keep Overall Score numerically consistent "
+                    "with the criterion bullets. Do not use JSON."
+                ),
+                input_text=(
+                    f"Task prompt:\n{state['task_prompt']}\n\n"
+                    f"Review round: {review_round}/{MAX_REVIEW_ROUNDS}\n\n"
+                    f"Minimum rounds required before final approval can stick: {MIN_REVIEW_ROUNDS}\n\n"
+                    f"Investigation document:\n{state['investigation_doc']}\n\n"
+                    "Act like a demanding senior engineer who cares about clean code, focus, optimization, architecture, and validation quality."
+                ),
+            )
+            review_result = _parse_review_doc_or_raise(generated_review)
+        except (LLMError, ValueError) as exc:
+            return _blocked_review_response(
+                artifact_path=artifact_path,
+                metadata=metadata,
+                review_round=review_round,
+                reason=f"Reviewer LLM failed to produce usable investigation assessments: {exc}",
+                loop_status="llm-error",
+            )
 
         if review_round < MIN_REVIEW_ROUNDS:
             enforced_actions = _dedupe([*review_result["improvement_actions"], MANDATORY_VERIFICATION_ACTION])

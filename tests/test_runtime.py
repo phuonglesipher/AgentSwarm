@@ -71,6 +71,52 @@ def _plan_review_payload(
     }
 
 
+def _investigation_review_payload(
+    *,
+    section_rows: list[tuple[str, int, str, str, list[str]]],
+    feedback: str,
+    blocking_issues: list[str],
+    improvement_actions: list[str],
+    approved: bool,
+) -> dict:
+    return {
+        "feedback": feedback,
+        "section_reviews": [
+            {
+                "section": section,
+                "score": score,
+                "status": status,
+                "rationale": rationale,
+                "action_items": action_items,
+            }
+            for section, score, status, rationale, action_items in section_rows
+        ],
+        "blocking_issues": blocking_issues,
+        "improvement_actions": improvement_actions,
+        "approved": approved,
+    }
+
+
+def _approved_investigation_review_payload(feedback: str = "The investigation is technically ready.") -> dict:
+    return _investigation_review_payload(
+        section_rows=[
+            ("Supporting References", 10, "pass", "Grounded references support the investigation.", []),
+            ("Runtime Owner Precision", 25, "pass", "The live runtime owner is identified precisely.", []),
+            ("Current vs Legacy Split", 10, "pass", "Current ownership is separated from stale references.", []),
+            ("Ownership Summary", 10, "pass", "Ownership is summarized clearly enough for handoff.", []),
+            ("Root Cause Hypothesis", 15, "pass", "The causal hypothesis is concrete and technically grounded.", []),
+            ("Investigation Summary", 10, "pass", "The investigation summary is handoff-ready.", []),
+            ("Implementation Medium", 5, "pass", "The implementation medium is justified.", []),
+            ("Validation Plan", 10, "pass", "The validation path is concrete.", []),
+            ("Noise Control", 5, "pass", "The evidence stays focused on the live owner.", []),
+        ],
+        feedback=feedback,
+        blocking_issues=[],
+        improvement_actions=[],
+        approved=True,
+    )
+
+
 class DisabledLLMClient:
     def is_enabled(self) -> bool:
         return False
@@ -148,6 +194,35 @@ class AlwaysBadLLMClient:
                 code_context="Workflow behavior under test lives in Workflows/gameplay-engineer-workflow/entry.py.",
                 implementation_medium="cpp",
                 implementation_medium_reason="Return code-side execution so the test can focus on the feature review loop.",
+            )
+        if schema_name == "gameplay_investigation_review":
+            return _approved_investigation_review_payload(
+                feedback="Investigation quality is sufficient, so the test can focus on the plan-review failure path."
+            )
+        if schema_name == "gameplay_plan_review":
+            return _plan_review_payload(
+                section_rows=[
+                    ("Overview", 4, "needs-work", "The overview is too vague to trust.", ["Clarify the player-visible gameplay goal."]),
+                    ("Task Type", 4, "needs-work", "The task framing is still too thin.", ["Explain why this work belongs on the chosen gameplay track."]),
+                    ("Existing Docs", 2, "needs-work", "Grounding evidence is still too weak.", ["Cite the live design, runtime, or test references."]),
+                    ("Implementation Steps", 6, "needs-work", "Implementation steps are not grounded in the runtime owner.", ["Name the owning runtime file and the exact change hook."]),
+                    ("Unit Tests", 2, "needs-work", "Regression coverage is still undefined.", ["Specify the exact automated regression checks."]),
+                    ("Risks", 2, "needs-work", "Risks and mitigations are not actionable yet.", ["Name the main gameplay regression risk and mitigation."]),
+                    ("Acceptance Criteria", 2, "needs-work", "Acceptance criteria are not player-visible enough.", ["Write player-visible acceptance criteria."]),
+                ],
+                feedback="The plan is still incomplete and never becomes implementation-ready in this test.",
+                blocking_issues=[
+                    "Implementation Steps: Name the owning runtime file and the exact change hook.",
+                    "Unit Tests: Specify the exact automated regression checks.",
+                    "Acceptance Criteria: Write player-visible acceptance criteria.",
+                ],
+                improvement_actions=[
+                    "Clarify the player-visible gameplay goal.",
+                    "Name the owning runtime file and the exact change hook.",
+                    "Specify the exact automated regression checks.",
+                    "Write player-visible acceptance criteria.",
+                ],
+                approved=False,
             )
         return {
             "score": 0,
@@ -323,6 +398,10 @@ class AlmostApprovedLLMClient:
                 code_context="Gameplay workflow logic is implemented in Workflows/gameplay-engineer-workflow/entry.py.",
                 implementation_medium="cpp",
                 implementation_medium_reason="The test fixture is source-owned and validated by Python runtime tests.",
+            )
+        if schema_name == "gameplay_investigation_review":
+            return _approved_investigation_review_payload(
+                feedback="Investigation quality is strong enough to move into the plan-review loop."
             )
         if schema_name == "gameplay_plan_review":
             self._review_calls += 1
@@ -522,7 +601,7 @@ class RepairAwareCodegenLLMClient:
 
 class RepairAwareCodegenLLMManager:
     def __init__(self) -> None:
-        self._default_client = DisabledLLMClient()
+        self._default_client = RepairDefaultLLMClient()
         self._codegen_client = RepairAwareCodegenLLMClient()
 
     @property
@@ -585,6 +664,10 @@ class ContextOnlyInvestigationLLMClient:
                 ownership_summary="The issue likely belongs to src/combat_dodge.py once local fallback resolves the exact path.",
                 investigation_summary="Code ownership is clearer than Blueprint ownership in this fixture.",
             )
+        if schema_name == "gameplay_investigation_review":
+            return _approved_investigation_review_payload(
+                feedback="The investigation is grounded enough to continue past the review gate."
+            )
         raise AssertionError(f"Unexpected schema_name: {schema_name}")
 
 
@@ -611,6 +694,7 @@ class ContextOnlyInvestigationLLMManager:
 class InvestigationRetryLLMClient:
     def __init__(self) -> None:
         self._investigation_calls = 0
+        self._review_calls = 0
 
     def is_enabled(self) -> bool:
         return True
@@ -671,6 +755,37 @@ class InvestigationRetryLLMClient:
                 implementation_medium="cpp",
                 implementation_medium_reason="The strongest surviving evidence points to code-side movement logic.",
             )
+        if schema_name == "gameplay_investigation_review":
+            self._review_calls += 1
+            if self._review_calls == 1:
+                return _investigation_review_payload(
+                    section_rows=[
+                        ("Supporting References", 10, "pass", "Grounded references support the investigation.", []),
+                        ("Runtime Owner Precision", 12, "needs-work", "The live runtime owner still needs a cleaner current path.", ["Isolate the current runtime owner."]),
+                        ("Current vs Legacy Split", 4, "needs-work", "Legacy references still blur current ownership.", ["Separate current ownership from stale evidence."]),
+                        ("Ownership Summary", 10, "pass", "Ownership direction is plausible.", []),
+                        ("Root Cause Hypothesis", 10, "needs-work", "The causal chain still needs a clearer live owner.", ["Tie the hypothesis to the live owner."]),
+                        ("Investigation Summary", 10, "pass", "The summary captures the remaining gap.", []),
+                        ("Implementation Medium", 5, "pass", "Code ownership is plausible.", []),
+                        ("Validation Plan", 4, "needs-work", "Validation is still too vague.", ["Name the exact validation path."]),
+                        ("Noise Control", 5, "pass", "The investigation stayed focused.", []),
+                    ],
+                    feedback="Round 1 still needs a stronger current-vs-legacy split and a concrete validation path.",
+                    blocking_issues=[
+                        "Runtime Owner Precision: Isolate the current runtime owner.",
+                        "Current vs Legacy Split: Separate current ownership from stale evidence.",
+                        "Validation Plan: Name the exact validation path.",
+                    ],
+                    improvement_actions=[
+                        "Isolate the current runtime owner.",
+                        "Separate current ownership from stale evidence.",
+                        "Name the exact validation path.",
+                    ],
+                    approved=False,
+                )
+            return _approved_investigation_review_payload(
+                feedback="The second investigation round is grounded enough to move forward."
+            )
         raise AssertionError(f"Unexpected schema_name: {schema_name}")
 
 
@@ -699,6 +814,7 @@ class InvestigationLearningCarryForwardLLMClient:
         self.strategy_inputs: list[str] = []
         self._strategy_calls = 0
         self._investigation_calls = 0
+        self._review_calls = 0
 
     def is_enabled(self) -> bool:
         return True
@@ -785,6 +901,37 @@ class InvestigationLearningCarryForwardLLMClient:
                 code_context="Gameplay/player_movement.py is the live movement owner and Checks/test_player_movement.py validates the regression path.",
                 implementation_medium="cpp",
                 implementation_medium_reason="The strongest surviving evidence points to code-owned movement logic.",
+            )
+        if schema_name == "gameplay_investigation_review":
+            self._review_calls += 1
+            if self._review_calls == 1:
+                return _investigation_review_payload(
+                    section_rows=[
+                        ("Supporting References", 6, "needs-work", "The first pass leaned on an archive note instead of current references.", ["Replace the archive note with live runtime references."]),
+                        ("Runtime Owner Precision", 10, "needs-work", "The live movement owner is still too ambiguous.", ["Identify the live runtime owner."]),
+                        ("Current vs Legacy Split", 3, "needs-work", "Archive evidence still dominates the brief.", ["Discard the archive note and keep only live evidence."]),
+                        ("Ownership Summary", 8, "needs-work", "Ownership summary still needs a stronger runtime owner.", ["Name the live owner and why it owns the bug."]),
+                        ("Root Cause Hypothesis", 10, "needs-work", "The hypothesis exists but is not tied tightly enough to the live owner.", ["Tie the hypothesis to the live owner."]),
+                        ("Investigation Summary", 8, "needs-work", "The summary still needs a stronger runtime owner.", ["Tighten the investigation summary around the live owner."]),
+                        ("Implementation Medium", 5, "pass", "Code ownership is still plausible.", []),
+                        ("Validation Plan", 5, "needs-work", "The validation path still needs the concrete regression test.", ["Name the concrete validation path."]),
+                        ("Noise Control", 2, "needs-work", "Rejected archive evidence is still polluting the handoff.", ["Keep rejected archive evidence out of the next pass."]),
+                    ],
+                    feedback="Round 1 found useful signal, but the next pass must carry forward only the live runtime owner and discard the archive note.",
+                    blocking_issues=[
+                        "Runtime Owner Precision: Identify the live runtime owner.",
+                        "Current vs Legacy Split: Discard the archive note and keep only live evidence.",
+                        "Validation Plan: Name the concrete validation path.",
+                    ],
+                    improvement_actions=[
+                        "Identify the live runtime owner.",
+                        "Discard the archive note and keep only live evidence.",
+                        "Name the concrete validation path.",
+                    ],
+                    approved=False,
+                )
+            return _approved_investigation_review_payload(
+                feedback="The second investigation round carried forward the right evidence and is ready for handoff."
             )
         raise AssertionError(f"Unexpected schema_name: {schema_name}")
 
@@ -1062,6 +1209,58 @@ class StrictLoopingFeatureLLMClient:
                 code_context="src/traversal_runtime.py owns the wall-jump recharge path and tests/test_traversal_runtime.py should validate recharge and cap behavior.",
                 implementation_medium="cpp",
                 implementation_medium_reason="The strongest surviving evidence points to code-owned traversal logic.",
+            )
+        if schema_name == "gameplay_investigation_review":
+            if self._investigation_calls == 1:
+                return _investigation_review_payload(
+                    section_rows=[
+                        ("Supporting References", 10, "pass", "Design intent is grounded in the relevant references.", []),
+                        ("Runtime Owner Precision", 12, "needs-work", "The live runtime owner still needs to be isolated.", ["Identify the current code runtime owner before drafting the feature plan."]),
+                        ("Current vs Legacy Split", 4, "needs-work", "The brief still carries stale ownership ambiguity.", ["Separate the current runtime path from legacy references."]),
+                        ("Ownership Summary", 10, "pass", "Ownership direction is plausible.", []),
+                        ("Root Cause Hypothesis", 9, "needs-work", "The hypothesis still needs a clearer owner and transition.", ["State the likely failing transition and tie it to the selected runtime owner."]),
+                        ("Investigation Summary", 10, "pass", "The summary explains what survived round 1.", []),
+                        ("Implementation Medium", 5, "pass", "The work is clearly code-owned.", []),
+                        ("Validation Plan", 4, "needs-work", "The validation path is still incomplete.", ["Name the exact automated validation path before implementation."]),
+                        ("Noise Control", 5, "pass", "The evidence set stayed focused.", []),
+                    ],
+                    feedback="Round 1 still needs the live owner, a cleaner current-vs-legacy split, and an exact validation path.",
+                    blocking_issues=[
+                        "Runtime Owner Precision: Identify the current code runtime owner before drafting the feature plan.",
+                        "Current vs Legacy Split: Separate the current runtime path from legacy references.",
+                        "Validation Plan: Name the exact automated validation path before implementation.",
+                    ],
+                    improvement_actions=[
+                        "Identify the current code runtime owner before drafting the feature plan.",
+                        "Separate the current runtime path from legacy references.",
+                        "Name the exact automated validation path before implementation.",
+                    ],
+                    approved=False,
+                )
+            if self._investigation_calls == 2:
+                return _investigation_review_payload(
+                    section_rows=[
+                        ("Supporting References", 10, "pass", "Grounded references support the investigation.", []),
+                        ("Runtime Owner Precision", 25, "pass", "The live runtime owner is isolated clearly.", []),
+                        ("Current vs Legacy Split", 10, "pass", "Current ownership is separated from stale references.", []),
+                        ("Ownership Summary", 10, "pass", "Ownership is summarized clearly enough for handoff.", []),
+                        ("Root Cause Hypothesis", 15, "pass", "The causal hypothesis is concrete and grounded.", []),
+                        ("Investigation Summary", 10, "pass", "The summary is handoff-ready.", []),
+                        ("Implementation Medium", 5, "pass", "The implementation medium is justified.", []),
+                        ("Validation Plan", 4, "needs-work", "The final validation path still needs the exact automated test handoff.", ["Name the exact automated validation path before implementation."]),
+                        ("Noise Control", 5, "pass", "The evidence set stayed focused.", []),
+                    ],
+                    feedback="Round 2 isolated the live owner, but it still needs the exact automated validation path.",
+                    blocking_issues=[
+                        "Validation Plan: Name the exact automated validation path before implementation.",
+                    ],
+                    improvement_actions=[
+                        "Name the exact automated validation path before implementation.",
+                    ],
+                    approved=False,
+                )
+            return _approved_investigation_review_payload(
+                feedback="The investigation is finally strong enough to move into planning."
             )
         if schema_name == "gameplay_plan_review":
             self._review_calls += 1
@@ -1412,6 +1611,10 @@ class CodeOnlyMixedNoiseLLMClient:
                 implementation_medium="mixed",
                 implementation_medium_reason="Spawn and movement gating sometimes span code and Blueprint systems.",
             )
+        if schema_name == "gameplay_investigation_review":
+            return _approved_investigation_review_payload(
+                feedback="Investigation quality is strong enough to continue into implementation."
+            )
         raise AssertionError(f"Unexpected schema_name: {schema_name}")
 
 
@@ -1550,6 +1753,10 @@ class RepairDefaultLLMClient:
                 code_context="The bug is likely in src/runtime.py and should be validated by tests/test_runtime.py.",
                 implementation_medium="cpp",
                 implementation_medium_reason="The task is fully code-owned in this fixture.",
+            )
+        if schema_name == "gameplay_investigation_review":
+            return _approved_investigation_review_payload(
+                feedback="Investigation quality is sufficient, so the repair-loop test can focus on self-test failures."
             )
         raise AssertionError(f"Unexpected schema_name: {schema_name}")
 
@@ -2044,15 +2251,16 @@ class WorkflowDrivenRuntimeTests(unittest.TestCase):
             },
         )
 
-        self.assertLess(result["score"], 100)
-        self.assertIn("Unit Tests", result["missing_sections"])
+        self.assertEqual(result["score"], 0)
+        self.assertEqual(result["missing_sections"], [])
         self.assertFalse(result["approved"])
         self.assertTrue(result["blocking_issues"])
         self.assertTrue(result["improvement_actions"])
-        self.assertEqual(len(result["section_reviews"]), 7)
-        self.assertEqual(result["loop_status"], "retry")
-        self.assertTrue(result["loop_should_continue"])
+        self.assertEqual(result["section_reviews"], [])
+        self.assertEqual(result["loop_status"], "llm-unavailable")
+        self.assertFalse(result["loop_should_continue"])
         self.assertIn("## Section Scores", result["feedback"])
+        self.assertIn("Reviewer LLM is unavailable", result["feedback"])
 
     def test_reviewer_workflow_ignores_process_only_drift_when_plan_is_technically_ready(self) -> None:
         drift_registry = load_workflows(
@@ -2317,13 +2525,15 @@ class WorkflowDrivenRuntimeTests(unittest.TestCase):
             self.assertTrue((run_dir / GRAPH_DEBUG_TRACE_FILE).exists())
 
             artifact_dir = self._single_workflow_artifact_dir(run_dir, "gameplay-engineer-workflow")
-            self.assertTrue((artifact_dir / "plan_doc.md").exists())
-            self.assertTrue((artifact_dir / "architecture_plan.md").exists())
-            self.assertTrue((artifact_dir / "review_abort.md").exists())
+            self.assertTrue((artifact_dir / "engineer_investigation.md").exists())
+            self.assertTrue((artifact_dir / "investigation_review_round_1.md").exists())
+            self.assertTrue((artifact_dir / "investigation_abort.md").exists())
             self.assertTrue((artifact_dir / "final_report.md").exists())
+            self.assertFalse((artifact_dir / "plan_doc.md").exists())
+            self.assertFalse((artifact_dir / "architecture_plan.md").exists())
             self.assertFalse((artifact_dir / "pull_request.md").exists())
             self.assertFalse((artifact_dir / "self_test.txt").exists())
-            self.assertIn("never reached gameplay plan approval", result["final_response"])
+            self.assertIn("gameplay investigation never grounded a safe handoff", result["final_response"])
 
             trace_output = trace_log.read_text(encoding="utf-8")
             self.assertIn("[main_graph] [analyze_prompt] ENTER", trace_output)
@@ -2332,8 +2542,8 @@ class WorkflowDrivenRuntimeTests(unittest.TestCase):
             self.assertIn("output_keys=", trace_output)
             self.assertIn(f"details={GRAPH_DEBUG_TRACE_FILE}#", trace_output)
             self.assertIn("next=agentswarm__gameplay-engineer-workflow", trace_output)
-            self.assertIn("[gameplay-engineer-workflow] [request_review] ENTER", trace_output)
-            self.assertIn("[gameplay-reviewer-workflow] [review_plan] ENTER", trace_output)
+            self.assertIn("[gameplay-engineer-workflow] [evaluate_investigation] ENTER", trace_output)
+            self.assertIn("[gameplay-engineer-workflow] [prepare_investigation_blocked_delivery] ENTER", trace_output)
             self.assertIn("[main_graph] [finalize] EXIT", trace_output)
 
     def test_main_graph_registers_workflow_subgraphs(self) -> None:
@@ -2403,7 +2613,7 @@ class WorkflowDrivenRuntimeTests(unittest.TestCase):
             registry = load_workflows(
                 project_root=self.project_root,
                 workflows_root=self.workflows_root,
-                llm_manager=self.llm_manager,
+                llm_manager=ContextOnlyInvestigationLLMManager(),
                 runtime_paths=paths,
                 config=config,
                 manifest=manifest,
@@ -2477,7 +2687,7 @@ class WorkflowDrivenRuntimeTests(unittest.TestCase):
             registry = load_workflows(
                 project_root=self.project_root,
                 workflows_root=self.workflows_root,
-                llm_manager=self.llm_manager,
+                llm_manager=ContextOnlyInvestigationLLMManager(),
                 runtime_paths=paths,
                 config=config,
                 manifest=manifest,
@@ -2565,7 +2775,7 @@ class WorkflowDrivenRuntimeTests(unittest.TestCase):
             registry = load_workflows(
                 project_root=self.project_root,
                 workflows_root=self.workflows_root,
-                llm_manager=self.llm_manager,
+                llm_manager=ContextOnlyInvestigationLLMManager(),
                 runtime_paths=paths,
                 config=config,
                 manifest=manifest,
@@ -2823,7 +3033,7 @@ class WorkflowDrivenRuntimeTests(unittest.TestCase):
             registry = load_workflows(
                 project_root=self.project_root,
                 workflows_root=self.workflows_root,
-                llm_manager=self.llm_manager,
+                llm_manager=ContextOnlyInvestigationLLMManager(),
                 runtime_paths=paths,
                 config=config,
                 manifest=manifest,
@@ -2875,7 +3085,7 @@ class WorkflowDrivenRuntimeTests(unittest.TestCase):
             registry = load_workflows(
                 project_root=self.project_root,
                 workflows_root=self.workflows_root,
-                llm_manager=self.llm_manager,
+                llm_manager=ContextOnlyInvestigationLLMManager(),
                 runtime_paths=paths,
                 config=config,
                 manifest=manifest,
@@ -3078,7 +3288,7 @@ class WorkflowDrivenRuntimeTests(unittest.TestCase):
             self.assertIsNotNone(engineer_graph)
             workflow_module = sys.modules["workflow_agentswarm__gameplay_engineer_workflow"]
 
-            def staged_investigation_quality(state):
+            def staged_investigation_quality(_context, state):
                 if state["investigation_round"] == 1:
                     checks = [
                         ("Supporting References", True, "Relevant docs or config files support the investigation."),

@@ -480,7 +480,7 @@ class TemplateInvestigationWorkflowTests(unittest.TestCase):
             subgraphs = dict(workflow.get_subgraphs())
             self.assertIn("template-investigation-reviewer-workflow", subgraphs)
 
-    def test_workflow_loads_and_completes_without_llm(self) -> None:
+    def test_workflow_blocks_without_reviewer_llm(self) -> None:
         with tempfile.TemporaryDirectory(prefix="agentswarm-root-investigation-fallback-") as temp_dir:
             host_root = Path(temp_dir) / "host-project"
             self._prepare_host_project(host_root)
@@ -500,15 +500,17 @@ class TemplateInvestigationWorkflowTests(unittest.TestCase):
             )
 
             artifact_dir = Path(result["artifact_dir"])
-            self.assertGreaterEqual(result["review_score"], 90)
-            self.assertTrue(result["review_approved"])
-            self.assertEqual(result["investigation_round"], 2)
-            self.assertEqual(result["review_round"], 2)
-            self.assertEqual(result["final_report"]["status"], "completed")
+            self.assertEqual(result["review_score"], 0)
+            self.assertFalse(result["review_approved"])
+            self.assertEqual(result["investigation_round"], 1)
+            self.assertEqual(result["review_round"], 1)
+            self.assertEqual(result["final_report"]["status"], "review-blocked")
+            self.assertEqual(result["loop_status"], "llm-unavailable")
+            self.assertIn("Reviewer LLM is unavailable", result["review_feedback"])
             self.assertTrue((artifact_dir / "investigation_round_1.md").exists())
             self.assertTrue((artifact_dir / "review_round_1.md").exists())
-            self.assertTrue((artifact_dir / "investigation_round_2.md").exists())
-            self.assertTrue((artifact_dir / "review_round_2.md").exists())
+            self.assertFalse((artifact_dir / "investigation_round_2.md").exists())
+            self.assertFalse((artifact_dir / "review_round_2.md").exists())
 
     def test_workflow_loops_until_review_score_reaches_threshold(self) -> None:
         with tempfile.TemporaryDirectory(prefix="agentswarm-root-investigation-loop-") as temp_dir:
