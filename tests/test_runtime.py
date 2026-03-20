@@ -1093,6 +1093,136 @@ class StrictLoopingFeatureLLMManager:
         return ["default", "codegen"]
 
 
+class ProcessDriftReviewerLLMClient:
+    def is_enabled(self) -> bool:
+        return True
+
+    def describe(self) -> str:
+        return "process-drift reviewer test client"
+
+    def generate_text(self, *, instructions: str, input_text: str, effort: str | None = None) -> str:
+        raise AssertionError("Process drift reviewer test client should not call generate_text")
+
+    def generate_json(
+        self,
+        *,
+        instructions: str,
+        input_text: str,
+        schema_name: str,
+        schema: dict,
+        effort: str | None = None,
+    ) -> dict:
+        del instructions, input_text, schema, effort
+        if schema_name != "gameplay_plan_review":
+            raise AssertionError(f"Unexpected schema_name: {schema_name}")
+        return {
+            "score": 72,
+            "feedback": "The plan is ready for implementation, but the review drifted into approval bookkeeping.",
+            "missing_sections": [],
+            "section_reviews": [
+                {"section": "Overview", "score": 10, "status": "pass", "rationale": "The gameplay goal and scope are clear.", "action_items": []},
+                {"section": "Task Type", "score": 6, "status": "needs-work", "rationale": "The section says round metadata is stale for the current review context.", "action_items": ["Update round metadata to match the active review round."]},
+                {"section": "Existing Docs", "score": 10, "status": "pass", "rationale": "The docs and owner paths are grounded.", "action_items": []},
+                {"section": "Implementation Steps", "score": 15, "status": "needs-work", "rationale": "The implementation is concrete, but the verification artifact naming still references the prior round.", "action_items": ["Rename the verification artifacts for the active review round."]},
+                {"section": "Unit Tests", "score": 20, "status": "pass", "rationale": "Recharge, cap, and adjacent-path tests are covered.", "action_items": []},
+                {"section": "Risks", "score": 10, "status": "pass", "rationale": "Risks and mitigations are concrete.", "action_items": []},
+                {"section": "Acceptance Criteria", "score": 9, "status": "needs-work", "rationale": "Acceptance criteria still require an independent verifier sign-off artifact.", "action_items": ["Add a sign-off artifact for the active review round."]},
+            ],
+            "blocking_issues": [
+                "Task Type: Update round metadata to match the active review round.",
+                "Implementation Steps: Rename the verification artifacts for the active review round.",
+                "Acceptance Criteria: Add a sign-off artifact for the active review round.",
+            ],
+            "improvement_actions": [
+                "Update round metadata to match the active review round.",
+                "Rename the verification artifacts for the active review round.",
+                "Add a sign-off artifact for the active review round.",
+            ],
+            "approved": False,
+        }
+
+
+class ProcessDriftReviewerLLMManager:
+    def __init__(self) -> None:
+        self._client = ProcessDriftReviewerLLMClient()
+
+    def resolve(self, profile: str | None = None):
+        del profile
+        return self._client
+
+    def is_enabled(self, profile: str | None = None) -> bool:
+        return self.resolve(profile).is_enabled()
+
+    def describe(self, profile: str | None = None) -> str:
+        return f"{profile or 'default'}: {self.resolve(profile).describe()}"
+
+    def available_profiles(self) -> list[str]:
+        return ["default"]
+
+
+class ContradictoryReadyReviewerLLMClient:
+    def is_enabled(self) -> bool:
+        return True
+
+    def describe(self) -> str:
+        return "contradictory-ready reviewer test client"
+
+    def generate_text(self, *, instructions: str, input_text: str, effort: str | None = None) -> str:
+        raise AssertionError("Contradictory-ready reviewer test client should not call generate_text")
+
+    def generate_json(
+        self,
+        *,
+        instructions: str,
+        input_text: str,
+        schema_name: str,
+        schema: dict,
+        effort: str | None = None,
+    ) -> dict:
+        del instructions, input_text, schema, effort
+        if schema_name != "gameplay_plan_review":
+            raise AssertionError(f"Unexpected schema_name: {schema_name}")
+        return {
+            "score": 100,
+            "feedback": "The plan is ready for implementation.",
+            "missing_sections": [],
+            "section_reviews": [
+                {"section": "Overview", "score": 10, "status": "pass", "rationale": "Player-visible outcome is explicit.", "action_items": []},
+                {"section": "Task Type", "score": 10, "status": "pass", "rationale": "Task framing and owner are clear.", "action_items": []},
+                {"section": "Existing Docs", "score": 10, "status": "pass", "rationale": "Docs and owner paths are grounded.", "action_items": []},
+                {"section": "Implementation Steps", "score": 25, "status": "pass", "rationale": "Implementation steps are concrete and safe.", "action_items": []},
+                {"section": "Unit Tests", "score": 20, "status": "pass", "rationale": "Regression coverage is explicit.", "action_items": []},
+                {"section": "Risks", "score": 10, "status": "pass", "rationale": "Risks and mitigations are concrete.", "action_items": []},
+                {"section": "Acceptance Criteria", "score": 15, "status": "pass", "rationale": "Acceptance criteria are player-visible and verifiable.", "action_items": []},
+            ],
+            "blocking_issues": [
+                "Player Outcome: Name the player-visible result and the nearby gameplay boundary that must remain stable.",
+            ],
+            "improvement_actions": [
+                "Clarify the player-visible outcome and the nearby gameplay boundary.",
+            ],
+            "approved": False,
+        }
+
+
+class ContradictoryReadyReviewerLLMManager:
+    def __init__(self) -> None:
+        self._client = ContradictoryReadyReviewerLLMClient()
+
+    def resolve(self, profile: str | None = None):
+        del profile
+        return self._client
+
+    def is_enabled(self, profile: str | None = None) -> bool:
+        return self.resolve(profile).is_enabled()
+
+    def describe(self, profile: str | None = None) -> str:
+        return f"{profile or 'default'}: {self.resolve(profile).describe()}"
+
+    def available_profiles(self) -> list[str]:
+        return ["default"]
+
+
 class CodeOnlyMixedNoiseLLMClient:
     def is_enabled(self) -> bool:
         return True
@@ -1792,6 +1922,132 @@ class WorkflowDrivenRuntimeTests(unittest.TestCase):
         self.assertEqual(result["loop_status"], "retry")
         self.assertTrue(result["loop_should_continue"])
         self.assertIn("## Section Scores", result["feedback"])
+
+    def test_reviewer_workflow_ignores_process_only_drift_when_plan_is_technically_ready(self) -> None:
+        drift_registry = load_workflows(
+            project_root=self.project_root,
+            workflows_root=self.workflows_root,
+            llm_manager=ProcessDriftReviewerLLMManager(),
+        )
+        reviewer_graph = drift_registry.get("gameplay-reviewer-workflow").graph
+        self.assertIsNotNone(reviewer_graph)
+
+        plan_doc = "\n".join(
+            [
+                "# Gameplay Implementation Plan",
+                "",
+                "## Overview",
+                "- A valid wall jump should restore exactly one spent air dash charge.",
+                "- Nearby non-wall-jump aerial paths must remain unchanged and the cap must stay enforced.",
+                "",
+                "## Task Type",
+                "- feature",
+                "- Classification reason: this adds a new player-facing traversal rule that needs approval before implementation.",
+                "",
+                "## Existing Docs",
+                "- docs/designer/air_dash_recharge.md",
+                "- docs/programming/air_dash_runtime.md",
+                "",
+                "## Implementation Steps",
+                "- Update src/traversal_runtime.py at the explicit wall-jump success hook.",
+                "- Restore one spent charge and clamp it to the configured maximum.",
+                "- Keep recharge out of unrelated aerial transitions so the neighboring path stays unchanged.",
+                "",
+                "## Unit Tests",
+                "- Add a test proving a valid wall jump restores exactly one spent charge.",
+                "- Add a test proving repeated valid wall jumps never exceed the cap.",
+                "- Add a test proving non-wall-jump aerial updates leave charges unchanged.",
+                "",
+                "## Risks",
+                "- Risk: recharge could leak into a generic aerial path.",
+                "- Mitigation: keep the hook tied to the explicit wall-jump transition and guard the neighboring path with tests.",
+                "",
+                "## Acceptance Criteria",
+                "- After spending one charge, the player regains exactly one charge when a valid wall jump succeeds.",
+                "- Repeated wall jumps never exceed the configured charge cap.",
+                "- Nearby aerial traversal paths that are not wall jumps continue to leave charges unchanged.",
+            ]
+        )
+
+        result = reviewer_graph.invoke(
+            {
+                "task_prompt": "Add gameplay feature: a valid wall jump should restore exactly one air dash charge without exceeding the cap.",
+                "plan_doc": plan_doc,
+                "review_round": 1,
+            }
+        )
+
+        self.assertEqual(result["review_round"], 2)
+        self.assertTrue(result["approved"])
+        self.assertTrue(result["review_approved"])
+        self.assertEqual(result["loop_status"], "passed")
+        self.assertEqual(result["review_loop_status"], "passed")
+        self.assertEqual(result["score"], 100)
+        self.assertFalse(result["blocking_issues"])
+        self.assertFalse(result["improvement_actions"])
+        self.assertNotIn("round metadata", result["feedback"].lower())
+        self.assertNotIn("sign-off artifact", result["feedback"].lower())
+
+    def test_reviewer_workflow_drops_contradictory_generic_hard_blockers_when_all_sections_pass(self) -> None:
+        drift_registry = load_workflows(
+            project_root=self.project_root,
+            workflows_root=self.workflows_root,
+            llm_manager=ContradictoryReadyReviewerLLMManager(),
+        )
+        reviewer_graph = drift_registry.get("gameplay-reviewer-workflow").graph
+        self.assertIsNotNone(reviewer_graph)
+
+        plan_doc = "\n".join(
+            [
+                "# Gameplay Implementation Plan",
+                "",
+                "## Overview",
+                "- A valid wall jump should restore exactly one spent air dash charge.",
+                "- Nearby aerial traversal that is not a wall jump must remain unchanged.",
+                "",
+                "## Task Type",
+                "- feature",
+                "- Classification reason: this adds a new player-facing traversal rule that needs approval before implementation.",
+                "",
+                "## Existing Docs",
+                "- docs/designer/air_dash_recharge.md",
+                "- docs/programming/air_dash_runtime.md",
+                "",
+                "## Implementation Steps",
+                "- Update src/traversal_runtime.py at the explicit wall-jump success hook.",
+                "- Restore one spent charge and clamp it to the configured maximum.",
+                "- Keep recharge out of unrelated aerial transitions so adjacent traversal remains unchanged.",
+                "",
+                "## Unit Tests",
+                "- Add a test proving a valid wall jump restores exactly one spent charge.",
+                "- Add a test proving repeated valid wall jumps never exceed the cap.",
+                "- Add a test proving non-wall-jump aerial updates leave charges unchanged.",
+                "",
+                "## Risks",
+                "- Risk: recharge could leak into a generic aerial path.",
+                "- Mitigation: keep the hook tied to the explicit wall-jump transition and guard the neighboring path with tests.",
+                "",
+                "## Acceptance Criteria",
+                "- After spending one charge, the player regains exactly one charge when a valid wall jump succeeds.",
+                "- Repeated wall jumps never exceed the configured charge cap.",
+                "- Nearby aerial traversal paths that are not wall jumps continue to leave charges unchanged.",
+            ]
+        )
+
+        result = reviewer_graph.invoke(
+            {
+                "task_prompt": "Add gameplay feature: a valid wall jump should restore exactly one air dash charge without exceeding the cap.",
+                "plan_doc": plan_doc,
+                "review_round": 1,
+            }
+        )
+
+        self.assertEqual(result["review_round"], 2)
+        self.assertTrue(result["approved"])
+        self.assertEqual(result["loop_status"], "passed")
+        self.assertEqual(result["score"], 100)
+        self.assertFalse(result["blocking_issues"])
+        self.assertIn("The plan is ready for implementation.", result["feedback"])
 
     def test_planner_workflow_loops_research_and_review_until_solution_plan_is_approved(self) -> None:
         with tempfile.TemporaryDirectory(prefix="agentswarm-host-planner-loop-") as temp_dir:

@@ -113,6 +113,26 @@ NON_GAMEPLAY_KEYWORDS = {
 }
 
 
+PROCESS_ONLY_REVIEW_PATTERNS = (
+    r"\breview round\b",
+    r"\bround metadata\b",
+    r"\bcurrent review context\b",
+    r"\bprocess[- ]gate\b",
+    r"\bindependent verif(?:ication|ier)\b",
+    r"\bsign[- ]off\b",
+    r"\bevidence artifact\b",
+    r"\bverification artifact\b",
+    r"\bartifact naming\b",
+    r"\btraceability\b",
+    r"\bapproval[- ]trace\b",
+    r"\bmetadata\b",
+    r"\bcurrent-round\b",
+    r"\bround-\d+\b",
+    r"\blog filenames?\b",
+    r"\btargeted test command",
+)
+
+
 class InvestigationCheck(TypedDict):
     section: str
     score: int
@@ -222,6 +242,17 @@ def _short_slug(value: str, *, fallback: str, max_length: int = 18) -> str:
     digest = hashlib.sha1(normalize_text(value).encode("utf-8")).hexdigest()[:6]
     keep = max(1, max_length - len(digest) - 1)
     return f"{slug[:keep].rstrip('-') or fallback}-{digest}"
+
+
+def _is_process_only_review_item(text: str) -> bool:
+    normalized = normalize_text(text)
+    if not normalized:
+        return False
+    return any(re.search(pattern, normalized) for pattern in PROCESS_ONLY_REVIEW_PATTERNS)
+
+
+def _filter_plan_revision_items(items: list[str]) -> list[str]:
+    return _dedupe([item for item in items if not _is_process_only_review_item(item)])
 
 
 def _artifact_dir(context: WorkflowContext, metadata: WorkflowMetadata, state: EngineerState) -> Path:
@@ -1143,6 +1174,8 @@ def _compose_design_doc(context: WorkflowContext, state: EngineerState) -> str:
 
 def _compose_plan_doc(context: WorkflowContext, state: EngineerState, *, revise: bool) -> str:
     task_type_reason = state["classification_reason"] or f"This work is classified as {state['task_type']}."
+    filtered_review_blocking_issues = _filter_plan_revision_items(list(state.get("review_blocking_issues", [])))
+    filtered_review_improvement_actions = _filter_plan_revision_items(list(state.get("review_improvement_actions", [])))
     fallback = "\n".join(
         [
             "# Gameplay Implementation Plan",
@@ -1200,13 +1233,35 @@ def _compose_plan_doc(context: WorkflowContext, state: EngineerState, *, revise:
                     f"{instruction} using these exact sections: Overview, Task Type, Existing Docs, Implementation Steps, "
                     "Unit Tests, Risks, Acceptance Criteria."
                 ),
-                input_text=(
-                    f"Task prompt:\n{state['task_prompt']}\n\n"
-                    f"Task type: {state['task_type']}\n"
-                    f"Blocking issues:\n{_format_bullets(list(state.get('review_blocking_issues', [])))}\n\n"
-                    f"Improvement actions:\n{_format_bullets(list(state.get('review_improvement_actions', [])))}\n\n"
-                    f"Design context:\n{state.get('design_doc', '')}\n\n"
-                    f"Bug context:\n{state.get('bug_context_doc', '')}\n"
+                input_text=build_prompt_brief(
+                    opening="Draft the next gameplay implementation plan for this workflow.",
+                    sections=[
+                        ("Task request", state["task_prompt"].strip()),
+                        (
+                            "Current task framing",
+                            "\n".join(
+                                [
+                                    f"- Task type: {state['task_type']}",
+                                    f"- Architecture review required: {state['requires_architecture_review']}",
+                                ]
+                            ),
+                        ),
+                        (
+                            "Open blocking issues",
+                            _format_bullets(filtered_review_blocking_issues),
+                        ),
+                        (
+                            "Requested improvements",
+                            _format_bullets(filtered_review_improvement_actions),
+                        ),
+                        ("Design context", state.get("design_doc", "").strip() or "None."),
+                        ("Bug context", state.get("bug_context_doc", "").strip() or "None."),
+                    ],
+                    closing=(
+                        "Produce a plan that is implementation-ready, anchored on the current gameplay owner, "
+                        "and explicit about regression coverage for adjacent behavior. Keep the plan technical and "
+                        "do not add review-round bookkeeping, sign-off workflow, or artifact naming requirements."
+                    ),
                 ),
             )
         except Exception:

@@ -39,6 +39,30 @@ SECTION_WEIGHTS = (
     ("Acceptance Criteria", 15),
 )
 BLOCKING_SECTIONS = {"Task Type", "Implementation Steps", "Unit Tests", "Acceptance Criteria"}
+PROCESS_ONLY_REVIEW_PATTERNS = (
+    r"\breview round\b",
+    r"\bround metadata\b",
+    r"\bcurrent review context\b",
+    r"\bprocess[- ]gate\b",
+    r"\bindependent verif(?:ication|ier)\b",
+    r"\bsign[- ]off\b",
+    r"\bevidence artifact\b",
+    r"\bverification artifact\b",
+    r"\bartifact naming\b",
+    r"\btraceability\b",
+    r"\bapproval[- ]trace\b",
+    r"\bmetadata\b",
+    r"\bcurrent-round\b",
+    r"\bround-\d+\b",
+    r"\blog filenames?\b",
+    r"\btargeted test command",
+)
+GENERIC_HARD_BLOCKER_PREFIXES = (
+    "Player Outcome:",
+    "Current Behavior Evidence:",
+    "Speculation Control:",
+    "Edge and Regression Coverage:",
+)
 
 
 class SectionReview(TypedDict):
@@ -103,6 +127,108 @@ def _short_slug(value: str, *, fallback: str, max_length: int = 18) -> str:
     digest = hashlib.sha1(normalize_text(value).encode("utf-8")).hexdigest()[:6]
     keep = max(1, max_length - len(digest) - 1)
     return f"{slug[:keep].rstrip('-') or fallback}-{digest}"
+
+
+def _is_process_only_review_item(text: str) -> bool:
+    normalized = normalize_text(text)
+    if not normalized:
+        return False
+    return any(re.search(pattern, normalized) for pattern in PROCESS_ONLY_REVIEW_PATTERNS)
+
+
+def _is_process_only_section_review(item: SectionReview) -> bool:
+    if item["status"] == "pass":
+        return False
+    signals = [item["rationale"], *item["action_items"]]
+    normalized_signals = [signal for signal in signals if str(signal).strip()]
+    return bool(normalized_signals) and all(_is_process_only_review_item(signal) for signal in normalized_signals)
+
+
+def _apply_process_drift_guardrails(
+    *,
+    review_result: dict[str, Any],
+    fallback_section_reviews: list[SectionReview],
+) -> dict[str, Any]:
+    fallback_lookup = {item["section"]: item for item in fallback_section_reviews}
+    sanitized_section_reviews: list[SectionReview] = []
+    for item in review_result["section_reviews"]:
+        section = str(item.get("section", "")).strip()
+        fallback = fallback_lookup.get(section, item)
+        candidate: SectionReview = {
+            "section": section or fallback["section"],
+            "score": max(0, int(item.get("score", fallback["score"]))),
+            "status": str(item.get("status", fallback["status"])).strip() or fallback["status"],
+            "rationale": str(item.get("rationale", fallback["rationale"])).strip() or fallback["rationale"],
+            "action_items": [
+                str(action).strip()
+                for action in item.get("action_items", [])
+                if str(action).strip()
+            ]
+            or list(fallback["action_items"]),
+        }
+        sanitized_section_reviews.append(fallback if _is_process_only_section_review(candidate) else candidate)
+
+    if not sanitized_section_reviews:
+        sanitized_section_reviews = list(fallback_section_reviews)
+
+    missing_sections = [item["section"] for item in sanitized_section_reviews if item["status"] == "missing"]
+    blocking_issues = _dedupe(
+        [
+            str(item)
+            for item in review_result.get("blocking_issues", [])
+            if str(item).strip() and not _is_process_only_review_item(str(item))
+        ]
+    )
+    if all(item["status"] == "pass" for item in sanitized_section_reviews):
+        blocking_issues = _dedupe(
+            [
+                item
+                for item in blocking_issues
+                if not any(item.startswith(prefix) for prefix in GENERIC_HARD_BLOCKER_PREFIXES)
+            ]
+        )
+    derived_blocking_issues = _dedupe(
+        [
+            f"{item['section']}: {item['action_items'][0]}"
+            for item in sanitized_section_reviews
+            if item["section"] in BLOCKING_SECTIONS and item["status"] != "pass" and item["action_items"]
+        ]
+    )
+    if not blocking_issues:
+        blocking_issues = derived_blocking_issues
+
+    improvement_actions = _dedupe(
+        [
+            str(item)
+            for item in review_result.get("improvement_actions", [])
+            if str(item).strip() and not _is_process_only_review_item(str(item))
+        ]
+    )
+    derived_improvement_actions = _dedupe(
+        [
+            action
+            for item in sanitized_section_reviews
+            if item["status"] != "pass"
+            for action in item["action_items"]
+        ]
+    )
+    if not improvement_actions:
+        improvement_actions = derived_improvement_actions
+
+    score = sum(item["score"] for item in sanitized_section_reviews)
+    approved = bool(review_result.get("approved", False))
+    if score >= APPROVAL_SCORE and not missing_sections and not blocking_issues:
+        approved = True
+
+    return {
+        **review_result,
+        "score": score,
+        "approved": approved,
+        "missing_sections": missing_sections,
+        "section_reviews": sanitized_section_reviews,
+        "blocking_issues": blocking_issues,
+        "improvement_actions": improvement_actions,
+    }
 
 
 def _artifact_dir(context: WorkflowContext, metadata: WorkflowMetadata, state: ReviewerState) -> Path:
@@ -364,7 +490,8 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
                         "You are gameplay-reviewer-workflow. Review a gameplay implementation plan like a strict senior gameplay engineer. "
                         "Score the plan against these exact sections: Overview, Task Type, Existing Docs, Implementation Steps, Unit Tests, "
                         "Risks, Acceptance Criteria. Return structured JSON only. Approval requires a score >= 90, no blocking issues, and "
-                        "no missing required sections. Focus on technical clarity, owner paths, regression coverage, and player-visible acceptance."
+                        "no missing required sections. Focus on technical clarity, owner paths, regression coverage, and player-visible acceptance. "
+                        "Do not block on review-round bookkeeping, artifact naming, sign-off records, or other process-only approval trace details."
                     ),
                     input_text=build_prompt_brief(
                         opening="Review the current gameplay implementation plan as a strict senior gameplay engineer.",
@@ -393,7 +520,10 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
                             ),
                             ("Plan document", state["plan_doc"].strip()),
                         ],
-                        closing="Score it hard, keep the feedback technical, and require another independent verification pass before final approval can stick.",
+                        closing=(
+                            "Score it hard, keep the feedback technical, and require another independent verification "
+                            "pass before final approval can stick. Do not drift into process-only asks."
+                        ),
                     ),
                     schema_name="gameplay_plan_review",
                     schema=schema,
@@ -425,6 +555,10 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
                     review_result["blocking_issues"] = fallback["blocking_issues"]
                 if not review_result["improvement_actions"] and not review_result["approved"]:
                     review_result["improvement_actions"] = fallback["improvement_actions"]
+                review_result = _apply_process_drift_guardrails(
+                    review_result=review_result,
+                    fallback_section_reviews=fallback["section_reviews"],
+                )
             except LLMError:
                 review_result = fallback
 
