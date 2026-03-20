@@ -52,7 +52,6 @@ PLAN_REVIEW_SCORE_POLICY = ScorePolicy(
     require_missing_section_free=True,
     require_explicit_approval=True,
 )
-BLOCKING_SECTIONS = {"Task Type", "Implementation Steps", "Unit Tests", "Acceptance Criteria"}
 PROCESS_ONLY_REVIEW_PATTERNS = (
     r"\breview round\b",
     r"\bround metadata\b",
@@ -153,27 +152,17 @@ def _is_process_only_review_item(text: str) -> bool:
     return any(re.search(pattern, normalized) for pattern in PROCESS_ONLY_REVIEW_PATTERNS)
 
 
-def _is_process_only_section_review(item: SectionReview) -> bool:
-    if item["status"] == "pass":
-        return False
-    signals = [item["rationale"], *item["action_items"]]
-    normalized_signals = [signal for signal in signals if str(signal).strip()]
-    return bool(normalized_signals) and all(_is_process_only_review_item(signal) for signal in normalized_signals)
-
-
 def _apply_process_drift_guardrails(
     *,
-    plan_doc: str,
     review_result: dict[str, Any],
-    fallback_section_reviews: list[SectionReview],
 ) -> dict[str, Any]:
-    fallback_lookup = {item["section"]: item for item in fallback_section_reviews}
-    sanitized_section_reviews: list[SectionReview] = []
-    for item in review_result["section_reviews"]:
-        fallback = fallback_lookup.get(item["section"], item)
-        sanitized_section_reviews.append(fallback if _is_process_only_section_review(item) else item)
-
-    generated_missing_sections = _dedupe([str(item) for item in review_result.get("missing_sections", []) if str(item).strip()])
+    sanitized_section_reviews = list(review_result["section_reviews"])
+    generated_missing_sections = _dedupe(
+        [
+            *[str(item) for item in review_result.get("missing_sections", []) if str(item).strip()],
+            *[item["section"] for item in sanitized_section_reviews if item["status"] == "missing"],
+        ]
+    )
     generated_blocking_issues = _dedupe(
         [
             str(item)
@@ -196,14 +185,10 @@ def _apply_process_drift_guardrails(
             if str(item).strip() and not _is_process_only_review_item(str(item))
         ]
     )
-    derived_missing_sections, derived_blocking_issues, derived_improvement_actions = _derive_review_requirements(
-        plan_doc,
-        sanitized_section_reviews,
-    )
     score = sum(item["score"] for item in sanitized_section_reviews)
-    missing_sections = _dedupe([*generated_missing_sections, *derived_missing_sections])
-    blocking_issues = _dedupe([*generated_blocking_issues, *derived_blocking_issues])
-    improvement_actions = _dedupe([*generated_improvement_actions, *derived_improvement_actions])
+    missing_sections = generated_missing_sections
+    blocking_issues = generated_blocking_issues
+    improvement_actions = generated_improvement_actions
     approved = bool(review_result.get("approved", False))
     if score >= APPROVAL_SCORE and not missing_sections and not blocking_issues:
         approved = True
@@ -234,45 +219,6 @@ def _artifact_dir(context: WorkflowContext, metadata: WorkflowMetadata, state: R
     return path
 
 
-def _parse_sections(document: str) -> dict[str, str]:
-    sections: dict[str, str] = {}
-    heading: str | None = None
-    buffer: list[str] = []
-    for line in document.splitlines():
-        if line.startswith("## "):
-            if heading is not None:
-                sections[heading] = "\n".join(buffer).strip()
-            heading = line[3:].strip()
-            buffer = []
-            continue
-        if heading is not None:
-            buffer.append(line)
-    if heading is not None:
-        sections[heading] = "\n".join(buffer).strip()
-    return sections
-
-
-def _clean_lines(section_text: str) -> list[str]:
-    return [line.strip() for line in section_text.splitlines() if line.strip()]
-
-
-def _contains_path_hint(text: str) -> bool:
-    return bool(re.search(r"[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)+", text))
-
-
-def _fallback_action(section: str) -> str:
-    actions = {
-        "Overview": "Clarify the player-facing gameplay goal and nearby systems that must remain stable.",
-        "Task Type": "Explain why this work is a bugfix, feature, or maintenance task.",
-        "Existing Docs": "List the design, runtime, or implementation references that constrain the change.",
-        "Implementation Steps": "Name the owning runtime path and expand the change sequence into safe ordered steps.",
-        "Unit Tests": "Specify the exact automated regression checks and assertions that must pass.",
-        "Risks": "Name the main gameplay regression risk and how the implementation will contain it.",
-        "Acceptance Criteria": "Write player-visible pass conditions and edge-case expectations.",
-    }
-    return actions[section]
-
-
 def _to_score_assessments(section_reviews: list[SectionReview]) -> list[ScoreAssessment]:
     return [
         ScoreAssessment(
@@ -289,17 +235,13 @@ def _to_score_assessments(section_reviews: list[SectionReview]) -> list[ScoreAss
 
 def _normalize_section_reviews(
     section_reviews: list[SectionReview],
-    fallback_reviews: list[SectionReview],
 ) -> list[SectionReview]:
-    fallback_lookup = {item["section"]: item for item in fallback_reviews}
     normalized_lookup: dict[str, SectionReview] = {}
-
     for item in section_reviews:
         section = str(item.get("section", "")).strip()
         if section not in SECTION_WEIGHT_MAP or section in normalized_lookup:
             continue
         weight = SECTION_WEIGHT_MAP[section]
-        fallback = fallback_lookup[section]
         score = max(0, min(int(item.get("score", 0)), weight))
         raw_status = str(item.get("status", "")).strip().lower()
         if raw_status == "missing" or score == 0:
@@ -308,189 +250,19 @@ def _normalize_section_reviews(
             status = "pass"
         else:
             status = "needs-work"
-        if section in BLOCKING_SECTIONS and status == "needs-work":
-            score = min(max(1, score), max(1, round(weight * 0.6)))
-        action_items = _dedupe(
-            [str(action).strip() for action in item.get("action_items", []) if str(action).strip()]
-        )
         normalized_lookup[section] = {
             "section": section,
             "score": score,
             "status": status,
-            "rationale": str(item.get("rationale", "")).strip() or fallback["rationale"],
-            "action_items": [] if status == "pass" else (action_items or list(fallback["action_items"])),
+            "rationale": str(item.get("rationale", "")).strip(),
+            "action_items": (
+                []
+                if status == "pass"
+                else _dedupe([str(action).strip() for action in item.get("action_items", []) if str(action).strip()])
+            ),
         }
 
-    normalized: list[SectionReview] = []
-    for section, _ in SECTION_WEIGHTS:
-        normalized.append(normalized_lookup.get(section, fallback_lookup[section]))
-    return normalized
-
-
-def _derive_review_requirements(
-    plan_doc: str,
-    section_reviews: list[SectionReview],
-) -> tuple[list[str], list[str], list[str]]:
-    sections = _parse_sections(plan_doc)
-    review_lookup = {item["section"]: item for item in section_reviews}
-    missing_sections = [item["section"] for item in section_reviews if item["status"] == "missing"]
-    blocking_issues = _dedupe(
-        [
-            f"{item['section']}: {(item['action_items'] or [_fallback_action(item['section'])])[0]}"
-            for item in section_reviews
-            if item["section"] in BLOCKING_SECTIONS and item["status"] != "pass"
-        ]
-    )
-    improvement_actions = _dedupe(
-        [
-            action
-            for item in section_reviews
-            if item["status"] != "pass"
-            for action in (item["action_items"] or [_fallback_action(item["section"])])
-        ]
-    )
-
-    overview_lines = _clean_lines(sections.get("Overview", ""))
-    acceptance_lines = _clean_lines(sections.get("Acceptance Criteria", ""))
-    docs_text = sections.get("Existing Docs", "")
-    implementation_text = sections.get("Implementation Steps", "")
-    tests_text = sections.get("Unit Tests", "")
-    risks_text = sections.get("Risks", "")
-    lower_combined = "\n".join([tests_text, risks_text, "\n".join(acceptance_lines)]).lower()
-
-    hard_blockers: list[str] = []
-    hard_actions: list[str] = []
-    if len(overview_lines) < 2 or len(acceptance_lines) < 2:
-        hard_blockers.append(
-            "Player Outcome: Name the player-visible result and the nearby gameplay boundary that must remain stable."
-        )
-        hard_actions.append("Clarify the player-visible outcome and the nearby gameplay boundary.")
-    if not (_contains_path_hint(docs_text) and _contains_path_hint(implementation_text)):
-        hard_blockers.append(
-            "Current Behavior Evidence: Cite grounded docs, runtime paths, and the owning gameplay file before implementation."
-        )
-        hard_actions.append("Ground the plan in concrete docs, runtime paths, and the owning gameplay file.")
-    if not _contains_path_hint(implementation_text) or "confirm the owning" in implementation_text.lower():
-        hard_blockers.append(
-            "Speculation Control: Anchor the implementation steps on the current runtime owner instead of an unconfirmed path."
-        )
-        hard_actions.append("Anchor the implementation steps on the current runtime owner instead of an unconfirmed path.")
-    if len(_clean_lines(tests_text)) < 2 or not any(
-        marker in lower_combined for marker in ("neighbor", "adjacent", "unchanged", "regression", "edge", "non-")
-    ):
-        hard_blockers.append(
-            "Edge and Regression Coverage: Protect the adjacent gameplay path with explicit regression tests and acceptance criteria."
-        )
-        hard_actions.append(
-            "Protect the adjacent gameplay path with explicit regression tests and acceptance criteria."
-        )
-
-    return (
-        _dedupe([*missing_sections]),
-        _dedupe([*blocking_issues, *hard_blockers]),
-        _dedupe([*improvement_actions, *hard_actions]),
-    )
-
-
-def _score_section(name: str, weight: int, sections: dict[str, str], task_type: str) -> SectionReview:
-    content = sections.get(name, "").strip()
-    lines = _clean_lines(content)
-    lowered = content.lower()
-    score = 0
-    status = "missing"
-    rationale = ""
-
-    if content:
-        score = max(1, round(weight * 0.6))
-        status = "needs-work"
-
-    if name == "Overview":
-        if content and len(lines) >= 2:
-            score = weight
-            status = "pass"
-            rationale = "The gameplay goal and scope are clear enough for implementation."
-        elif content:
-            rationale = "The overview exists, but it still needs nearby gameplay scope or player impact."
-        else:
-            rationale = "The plan does not summarize the gameplay goal clearly enough."
-    elif name == "Task Type":
-        if content and task_type in lowered and "reason" in lowered:
-            score = weight
-            status = "pass"
-            rationale = "The plan names the task type and justifies why that framing is correct."
-        elif content and task_type in lowered:
-            rationale = "The task type is named, but the approval rationale is still too thin."
-        else:
-            rationale = "The plan does not explain what kind of gameplay work this is."
-    elif name == "Existing Docs":
-        if content and len(lines) >= 1 and ("/" in content or "\\" in content):
-            score = weight
-            status = "pass"
-            rationale = "The plan references concrete gameplay docs or runtime notes."
-        elif content:
-            rationale = "The references are present, but they are not grounded enough in concrete files."
-        else:
-            rationale = "The plan does not cite the docs or runtime references that constrain the change."
-    elif name == "Implementation Steps":
-        if content and len(lines) >= 3 and ("/" in content or "\\" in content):
-            score = weight
-            status = "pass"
-            rationale = "The implementation steps are concrete, ordered, and anchored on the owning runtime path."
-        elif content:
-            rationale = "The implementation steps exist, but they remain too generic to trust."
-        else:
-            rationale = "The plan does not explain how the gameplay change will be implemented safely."
-    elif name == "Unit Tests":
-        if content and len(lines) >= 2 and "test" in lowered:
-            score = weight
-            status = "pass"
-            rationale = "The plan names concrete regression tests and assertions."
-        elif content:
-            rationale = "The plan mentions validation, but the exact automated checks are still vague."
-        else:
-            rationale = "The plan does not define the regression tests needed for this gameplay change."
-    elif name == "Risks":
-        if content and len(lines) >= 2 and "risk" in lowered:
-            score = weight
-            status = "pass"
-            rationale = "The main gameplay regression risk and mitigation are documented."
-        elif content:
-            rationale = "The risks are mentioned, but the mitigation remains too vague."
-        else:
-            rationale = "The plan does not describe the main regression risk."
-    else:
-        if content and len(lines) >= 2:
-            score = weight
-            status = "pass"
-            rationale = "The acceptance criteria describe player-visible success conditions clearly enough."
-        elif content:
-            rationale = "The acceptance criteria exist, but they need more concrete pass conditions."
-        else:
-            rationale = "The plan does not define player-visible acceptance criteria."
-
-    return {
-        "section": name,
-        "score": score,
-        "status": status,
-        "rationale": rationale,
-        "action_items": [] if status == "pass" else [_fallback_action(name)],
-    }
-
-
-def _fallback_review(plan_doc: str, task_type: str) -> dict[str, Any]:
-    sections = _parse_sections(plan_doc)
-    section_reviews = [_score_section(name, weight, sections, task_type) for name, weight in SECTION_WEIGHTS]
-    missing_sections, blocking_issues, improvement_actions = _derive_review_requirements(plan_doc, section_reviews)
-    score = sum(item["score"] for item in section_reviews)
-    approved = score >= APPROVAL_SCORE and not blocking_issues and not missing_sections
-    return {
-        "score": score,
-        "approved": approved,
-        "missing_sections": missing_sections,
-        "section_reviews": section_reviews,
-        "blocking_issues": blocking_issues,
-        "improvement_actions": improvement_actions,
-    }
+    return [normalized_lookup[section] for section, _ in SECTION_WEIGHTS]
 
 
 def _compose_feedback(
@@ -700,7 +472,6 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
                 schema_name="gameplay_plan_review",
                 schema=schema,
             )
-            fallback = _fallback_review(state["plan_doc"], task_type)
             raw_section_reviews = [
                 {
                     "section": str(item["section"]).strip(),
@@ -716,9 +487,10 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
             received_sections = {item["section"] for item in raw_section_reviews}
             if len(raw_section_reviews) != len(SECTION_WEIGHTS) or received_sections != expected_sections:
                 raise ValueError("Reviewer LLM did not return the full gameplay plan assessment set.")
-            normalized_section_reviews = _normalize_section_reviews(raw_section_reviews, fallback["section_reviews"])
+            normalized_section_reviews = _normalize_section_reviews(raw_section_reviews)
             review_result = {
                 "score": sum(item["score"] for item in normalized_section_reviews),
+                "feedback": str(generated.get("feedback", "")).strip(),
                 "approved": bool(generated.get("approved", False)),
                 "missing_sections": _dedupe([str(item) for item in generated.get("missing_sections", []) if str(item).strip()]),
                 "section_reviews": normalized_section_reviews,
@@ -728,9 +500,7 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
                 ),
             }
             review_result = _apply_process_drift_guardrails(
-                plan_doc=state["plan_doc"],
                 review_result=review_result,
-                fallback_section_reviews=fallback["section_reviews"],
             )
         except (LLMError, TypeError, ValueError) as exc:
             return _blocked_review_response(

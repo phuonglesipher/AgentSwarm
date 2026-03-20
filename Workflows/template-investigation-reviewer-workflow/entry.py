@@ -13,7 +13,7 @@ from core.llm import LLMError
 from core.models import WorkflowContext, WorkflowMetadata
 from core.quality_loop import QualityLoopSpec, evaluate_quality_loop
 from core.scoring import ScoreAssessment, ScorePolicy, evaluate_score_decision
-from core.text_utils import keyword_tokens, normalize_text, slugify, tokenize
+from core.text_utils import normalize_text, slugify
 
 
 APPROVAL_SCORE = 90
@@ -49,15 +49,6 @@ REVIEW_CRITERIA = (
     ("Optimization", 10, "Optimization Notes"),
     ("Verification", 10, "Verification Plan"),
 )
-BLOCKING_CRITERIA = {"Focus", "Evidence & Ownership", "Architecture", "Verification"}
-CRITERION_ACTIONS = {
-    "Focus": "Tighten the investigation around the most credible root cause instead of broad project commentary.",
-    "Evidence & Ownership": "Name the concrete files, modules, docs, or tests that most likely own the issue.",
-    "Architecture": "Explain the relevant component boundary or runtime handoff more clearly.",
-    "Clean Code": "Call out maintainability, coupling, duplication, naming, or change-safety concerns explicitly.",
-    "Optimization": "Mention likely hot paths, redundant work, or why optimization is intentionally a non-goal.",
-    "Verification": "Add concrete validation steps, regression checks, or measurements for the hypothesis.",
-}
 PROCESS_ONLY_FEEDBACK_KEYWORDS = (
     "dri",
     "merge authority",
@@ -150,44 +141,6 @@ def _artifact_dir(context: WorkflowContext, metadata: WorkflowMetadata, state: R
     path.mkdir(parents=True, exist_ok=True)
     return path
 
-
-def _parse_sections(document: str) -> dict[str, str]:
-    sections: dict[str, str] = {}
-    heading: str | None = None
-    buffer: list[str] = []
-    for line in document.splitlines():
-        if line.startswith("## "):
-            if heading is not None:
-                sections[heading] = "\n".join(buffer).strip()
-            heading = line[3:].strip()
-            buffer = []
-            continue
-        if heading is not None:
-            buffer.append(line)
-    if heading is not None:
-        sections[heading] = "\n".join(buffer).strip()
-    return sections
-
-
-def _clean_lines(section_text: str) -> list[str]:
-    return [line.strip() for line in section_text.splitlines() if line.strip()]
-
-
-def _contains_path_hint(text: str) -> bool:
-    return bool(re.search(r"[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)+", text))
-
-
-def _partial_score(weight: int) -> int:
-    return max(1, round(weight * 0.6))
-
-
-def _criterion_sections(criterion: str) -> tuple[str, ...]:
-    for name, _, *sections in REVIEW_CRITERIA:
-        if name == criterion:
-            return tuple(sections)
-    return ()
-
-
 def _to_score_assessments(criterion_scores: list[CriterionAssessment]) -> list[ScoreAssessment]:
     return [
         ScoreAssessment(
@@ -207,145 +160,6 @@ def _is_process_only_feedback(text: str) -> bool:
     if not lowered:
         return True
     return any(keyword in lowered for keyword in PROCESS_ONLY_FEEDBACK_KEYWORDS)
-
-
-def _criteria_for_feedback(text: str) -> set[str]:
-    lowered = str(text).strip().lower()
-    if not lowered or _is_process_only_feedback(lowered):
-        return set()
-
-    mapped: set[str] = set()
-    if any(keyword in lowered for keyword in ("root cause", "hypothesis", "call-chain", "call chain", "scope", "focus")):
-        mapped.add("Focus")
-    if any(keyword in lowered for keyword in ("owner", "ownership", "file", "module", "path", "source", "doc", "test owner")):
-        mapped.add("Evidence & Ownership")
-    if any(keyword in lowered for keyword in ("architecture", "boundary", "handoff", "contract", "override", "state model")):
-        mapped.add("Architecture")
-    if any(keyword in lowered for keyword in ("clean code", "maintain", "coupling", "duplication", "naming", "readability", "change-safety")):
-        mapped.add("Clean Code")
-    if any(keyword in lowered for keyword in ("optimiz", "performance", "hot path", "cache", "allocation", "redund")):
-        mapped.add("Optimization")
-    if any(keyword in lowered for keyword in ("verify", "validation", "assert", "measure", "repro", "proof", "deterministic", "state-transition", "state transition")):
-        mapped.add("Verification")
-    return mapped
-
-
-def _normalize_criterion_scores(
-    criterion_scores: list[CriterionAssessment],
-    *,
-    blocking_issues: list[str],
-) -> list[CriterionAssessment]:
-    criteria_to_cap: set[str] = set()
-    for item in blocking_issues:
-        criteria_to_cap.update(_criteria_for_feedback(item))
-
-    normalized: list[CriterionAssessment] = []
-    for item in criterion_scores:
-        criterion = item["criterion"]
-        score = int(item["score"])
-        max_score = int(item["max_score"])
-        status = str(item["status"])
-        rationale = str(item["rationale"]).strip()
-        action_items = list(item["action_items"])
-
-        if criterion in criteria_to_cap:
-            capped_score = min(score, _partial_score(max_score))
-            if capped_score != score or status == "pass":
-                score = capped_score
-                status = "needs-work" if score > 0 else "missing"
-                action_items = _dedupe([*action_items, CRITERION_ACTIONS[criterion]])
-                rationale = f"{rationale} Reviewer requested another technical pass here.".strip()
-
-        normalized.append(
-            {
-                "criterion": criterion,
-                "score": score,
-                "max_score": max_score,
-                "status": status,
-                "rationale": rationale,
-                "action_items": [] if status == "pass" else _dedupe(action_items or [CRITERION_ACTIONS[criterion]]),
-            }
-        )
-    return normalized
-
-
-def _assess_criterion(
-    criterion: str,
-    weight: int,
-    sections: dict[str, str],
-    task_prompt: str,
-) -> CriterionAssessment:
-    combined = "\n".join(sections.get(section_name, "") for section_name in _criterion_sections(criterion)).strip()
-    lines = _clean_lines(combined)
-    score = 0
-    status = "missing"
-    rationale = ""
-
-    if combined:
-        score = _partial_score(weight)
-        status = "needs-work"
-
-    if criterion == "Focus":
-        tokens = keyword_tokens(task_prompt) or tokenize(task_prompt)
-        if combined and len(lines) >= 3 and len(tokens & tokenize(combined)) >= 2:
-            score, status = weight, "pass"
-            rationale = "The investigation stays on the core task and names a credible root-cause direction."
-        elif combined:
-            rationale = "The investigation has a direction, but it still needs a tighter root-cause narrative."
-        else:
-            rationale = "The investigation does not frame the task tightly enough to guide the next step."
-    elif criterion == "Evidence & Ownership":
-        if combined and len([line for line in lines if _contains_path_hint(line)]) >= 2:
-            score, status = weight, "pass"
-            rationale = "The brief points to concrete project files and a credible ownership boundary."
-        elif combined:
-            rationale = "There is some evidence, but ownership is not grounded in enough concrete files or tests."
-        else:
-            rationale = "The brief does not identify concrete files, docs, or tests that likely own the issue."
-    elif criterion == "Architecture":
-        if combined and (len(lines) >= 2 or len(combined) >= 120):
-            score, status = weight, "pass"
-            rationale = "The architecture notes explain the relevant boundary or runtime handoff clearly enough."
-        elif combined:
-            rationale = "Architecture is mentioned, but the module boundary still needs clarification."
-        else:
-            rationale = "The brief does not explain the relevant architectural boundary."
-    elif criterion == "Clean Code":
-        keywords = ("maintain", "coupling", "duplicate", "naming", "safe", "clarity", "complex")
-        if combined and (len(lines) >= 2 or any(token in combined.lower() for token in keywords)):
-            score, status = weight, "pass"
-            rationale = "The investigation considers maintainability and change safety, not only the immediate fix."
-        elif combined:
-            rationale = "Clean code concerns are hinted at, but the maintainability tradeoffs remain thin."
-        else:
-            rationale = "The brief does not discuss maintainability or change-safety concerns."
-    elif criterion == "Optimization":
-        keywords = ("optimiz", "hot path", "loop", "memory", "redund", "perf", "cache", "io", "allocation")
-        if combined and (len(lines) >= 1 or any(token in combined.lower() for token in keywords)):
-            score, status = weight, "pass"
-            rationale = "The investigation says how performance should be treated instead of guessing blindly."
-        elif combined:
-            rationale = "Optimization is mentioned, but the likely hotspot or non-goal is still vague."
-        else:
-            rationale = "The brief does not explain whether performance matters here."
-    else:
-        keywords = ("test", "assert", "validate", "measure", "repro", "log", "observe", "regression")
-        if combined and len(lines) >= 2 and any(token in combined.lower() for token in keywords):
-            score, status = weight, "pass"
-            rationale = "The verification plan is concrete enough to confirm or reject the hypothesis quickly."
-        elif combined:
-            rationale = "Verification exists, but it still needs sharper regression or measurement steps."
-        else:
-            rationale = "The brief does not explain how the hypothesis will be validated."
-
-    return {
-        "criterion": criterion,
-        "score": score,
-        "max_score": weight,
-        "status": status,
-        "rationale": rationale,
-        "action_items": [] if status == "pass" else [CRITERION_ACTIONS[criterion]],
-    }
 
 
 def _compose_review_doc(
@@ -377,48 +191,6 @@ def _compose_review_doc(
     lines.extend([f"- [ ] {item}" for item in improvement_actions] or ["- [x] No further investigation changes requested."])
     lines.extend(["", "## Senior Engineer Notes", senior_notes.strip() or "The investigation is ready for handoff."])
     return "\n".join(lines)
-
-
-def _fallback_review(task_prompt: str, investigation_doc: str) -> dict[str, Any]:
-    sections = _parse_sections(investigation_doc)
-    criterion_scores = [_assess_criterion(name, weight, sections, task_prompt) for name, weight, *_ in REVIEW_CRITERIA]
-    blocking_issues = _dedupe(
-        [
-            f"{item['criterion']}: {item['action_items'][0]}"
-            for item in criterion_scores
-            if item["criterion"] in BLOCKING_CRITERIA and item["status"] != "pass"
-        ]
-    )
-    improvement_actions = _dedupe(
-        [
-            action
-            for item in criterion_scores
-            if item["status"] != "pass"
-            for action in item["action_items"]
-        ]
-    )
-    score = sum(item["score"] for item in criterion_scores)
-    approved = score >= APPROVAL_SCORE and not blocking_issues
-    review_doc = _compose_review_doc(
-        score,
-        approved,
-        criterion_scores,
-        blocking_issues,
-        improvement_actions,
-        (
-            "The investigation is tight enough to move forward."
-            if approved
-            else "The investigation still needs sharper ownership, architecture, or validation detail."
-        ),
-    )
-    return {
-        "review_doc": review_doc,
-        "score": score,
-        "approved": approved,
-        "criterion_scores": criterion_scores,
-        "blocking_issues": blocking_issues,
-        "improvement_actions": improvement_actions,
-    }
 
 
 def _extract_heading_block(document: str, heading: str) -> list[str]:
@@ -512,98 +284,6 @@ def _parse_review_doc_or_raise(review_doc: str) -> dict[str, Any]:
         "score": score,
         "approved": approved,
         "criterion_scores": ordered_scores,
-        "blocking_issues": blocking_issues,
-        "improvement_actions": improvement_actions,
-    }
-
-
-def _parse_review_doc(review_doc: str, fallback: dict[str, Any]) -> dict[str, Any]:
-    if re.search(r"Overall Score:\s*(\d{1,3})\s*/\s*100", review_doc, flags=re.IGNORECASE) is None:
-        return fallback
-
-    fallback_lookup = {item["criterion"]: item for item in fallback["criterion_scores"]}
-    parsed_scores: list[CriterionAssessment] = []
-
-    for line in _extract_heading_block(review_doc, "Criterion Scores"):
-        match = re.match(
-            r"-\s*(?P<criterion>[^:]+):\s*(?P<score>\d{1,3})\s*/\s*(?P<max>\d{1,3})\s*-\s*(?P<rationale>.+)",
-            line.strip(),
-            flags=re.IGNORECASE,
-        )
-        if match is None:
-            continue
-        criterion = match.group("criterion").strip()
-        if criterion not in fallback_lookup:
-            continue
-        base = fallback_lookup[criterion]
-        max_score = base["max_score"]
-        item_score = max(0, min(int(match.group("score")), max_score))
-        status = "pass" if item_score >= max_score else "needs-work"
-        if item_score == 0:
-            status = "missing"
-        parsed_scores.append(
-            {
-                "criterion": criterion,
-                "score": item_score,
-                "max_score": max_score,
-                "status": status,
-                "rationale": match.group("rationale").strip() or base["rationale"],
-                "action_items": [] if status == "pass" else list(base["action_items"]),
-            }
-        )
-
-    if len(parsed_scores) != len(REVIEW_CRITERIA):
-        parsed_scores = list(fallback["criterion_scores"])
-    else:
-        parsed_lookup = {item["criterion"]: item for item in parsed_scores}
-        parsed_scores = [parsed_lookup[name] for name, *_ in REVIEW_CRITERIA]
-
-    raw_blocking_issues = []
-    for line in _extract_heading_block(review_doc, "Blocking Issues"):
-        stripped = line.strip()
-        if stripped.startswith("- "):
-            item = stripped[2:].strip()
-            if not item.lower().startswith("none."):
-                raw_blocking_issues.append(item)
-    technical_blocking_issues = [item for item in raw_blocking_issues if not _is_process_only_feedback(item)]
-    if raw_blocking_issues:
-        blocking_issues = _dedupe(technical_blocking_issues)
-    else:
-        blocking_issues = _dedupe(list(fallback["blocking_issues"]))
-
-    raw_improvement_actions = []
-    for line in _extract_heading_block(review_doc, "Improvement Checklist"):
-        stripped = line.strip()
-        if not stripped.startswith("- "):
-            continue
-        item = re.sub(r"^-\s*\[[ xX]\]\s*", "", stripped).strip()
-        if not item.lower().startswith("no further investigation changes requested."):
-            raw_improvement_actions.append(item)
-    technical_improvement_actions = [
-        item for item in raw_improvement_actions if not _is_process_only_feedback(item)
-    ]
-    if raw_improvement_actions:
-        improvement_actions = _dedupe(technical_improvement_actions)
-    else:
-        improvement_actions = _dedupe(list(fallback["improvement_actions"]))
-
-    normalized_scores = _normalize_criterion_scores(parsed_scores, blocking_issues=blocking_issues)
-    score = sum(item["score"] for item in normalized_scores)
-    approved = score >= APPROVAL_SCORE and not blocking_issues
-
-    final_review_doc = _compose_review_doc(
-        score,
-        approved,
-        normalized_scores,
-        blocking_issues,
-        improvement_actions,
-        "\n".join(_extract_heading_block(review_doc, "Senior Engineer Notes")).strip(),
-    )
-    return {
-        "review_doc": final_review_doc,
-        "score": score,
-        "approved": approved,
-        "criterion_scores": normalized_scores,
         "blocking_issues": blocking_issues,
         "improvement_actions": improvement_actions,
     }

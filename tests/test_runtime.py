@@ -1443,17 +1443,17 @@ class ProcessDriftReviewerLLMClient:
         if schema_name != "gameplay_plan_review":
             raise AssertionError(f"Unexpected schema_name: {schema_name}")
         return {
-            "score": 72,
+            "score": 100,
             "feedback": "The plan is ready for implementation, but the review drifted into approval bookkeeping.",
             "missing_sections": [],
             "section_reviews": [
                 {"section": "Overview", "score": 10, "status": "pass", "rationale": "The gameplay goal and scope are clear.", "action_items": []},
-                {"section": "Task Type", "score": 6, "status": "needs-work", "rationale": "The section says round metadata is stale for the current review context.", "action_items": ["Update round metadata to match the active review round."]},
+                {"section": "Task Type", "score": 10, "status": "pass", "rationale": "The task framing and implementation class are clear.", "action_items": []},
                 {"section": "Existing Docs", "score": 10, "status": "pass", "rationale": "The docs and owner paths are grounded.", "action_items": []},
-                {"section": "Implementation Steps", "score": 15, "status": "needs-work", "rationale": "The implementation is concrete, but the verification artifact naming still references the prior round.", "action_items": ["Rename the verification artifacts for the active review round."]},
+                {"section": "Implementation Steps", "score": 25, "status": "pass", "rationale": "The implementation steps are concrete and anchored on the owner path.", "action_items": []},
                 {"section": "Unit Tests", "score": 20, "status": "pass", "rationale": "Recharge, cap, and adjacent-path tests are covered.", "action_items": []},
                 {"section": "Risks", "score": 10, "status": "pass", "rationale": "Risks and mitigations are concrete.", "action_items": []},
-                {"section": "Acceptance Criteria", "score": 9, "status": "needs-work", "rationale": "Acceptance criteria still require an independent verifier sign-off artifact.", "action_items": ["Add a sign-off artifact for the active review round."]},
+                {"section": "Acceptance Criteria", "score": 15, "status": "pass", "rationale": "Acceptance criteria are player-visible and verifiable.", "action_items": []},
             ],
             "blocking_issues": [
                 "Task Type: Update round metadata to match the active review round.",
@@ -2457,11 +2457,14 @@ class WorkflowDrivenRuntimeTests(unittest.TestCase):
             final_plan = (artifact_dir / "solution_plan.md").read_text(encoding="utf-8")
 
             self.assertEqual(result["planning_round"], 3)
-            self.assertEqual(result["score"], 100)
+            self.assertEqual(result["score"], 95)
             self.assertTrue(result["approved"])
             self.assertEqual(result["loop_status"], "passed")
             self.assertEqual(result["final_report"]["status"], "completed")
             self.assertEqual(result["final_report"]["planning_rounds"], 3)
+            self.assertEqual(result["final_report"]["score"], 95)
+            self.assertEqual(result["score_confidence_label"], "strong")
+            self.assertIn("noise floor", result["score_confidence_reason"])
             self.assertIn("docs/designer/wall_jump_recharge.md", result["doc_hits"])
             self.assertIn("src/traversal_runtime.py", result["source_hits"])
             self.assertIn("tests/test_traversal_runtime.py", final_plan)
@@ -2488,6 +2491,8 @@ class WorkflowDrivenRuntimeTests(unittest.TestCase):
             self.assertIn("Edge and Regression Coverage:", review_round_2)
             self.assertIn("non-wall-jump aerial path leaves charges unchanged", review_round_2)
             self.assertIn("- Approved: True", review_round_3)
+            self.assertIn("- Score: 95/100", review_round_3)
+            self.assertIn("- Scoring confidence: strong", review_round_3)
             self.assertEqual(len(planner_manager.planner_client.research_inputs), 3)
             self.assertEqual(len(planner_manager.planner_client.plan_inputs), 3)
             self.assertRegex(planner_manager.planner_client.plan_inputs[1], r"Previous score: \d+/100")

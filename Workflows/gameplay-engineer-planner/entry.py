@@ -11,6 +11,7 @@ from core.graph_logging import trace_graph_node, trace_route_decision
 from core.llm import LLMError
 from core.models import WorkflowContext, WorkflowMetadata
 from core.quality_loop import QualityLoopSpec, evaluate_quality_loop
+from core.scoring import ScoreAssessment, ScorePolicy, evaluate_score_decision
 from core.text_utils import keyword_tokens, normalize_text, slugify, tokenize
 
 
@@ -64,6 +65,14 @@ SECTION_WEIGHTS = (
     ("Validation Plan", 15),
     ("Risks and Open Questions", 15),
 )
+SECTION_WEIGHT_MAP = dict(SECTION_WEIGHTS)
+PLAN_SCORE_POLICY = ScorePolicy(
+    system_id="gameplay-solution-plan-review",
+    threshold=APPROVAL_SCORE,
+    require_blocker_free=True,
+    require_missing_section_free=True,
+    require_explicit_approval=True,
+)
 
 
 class PlannerSectionReview(TypedDict):
@@ -95,6 +104,9 @@ class PlannerState(TypedDict):
     loop_should_continue: bool
     loop_completed: bool
     loop_stagnated_rounds: int
+    score_confidence: NotRequired[float | None]
+    score_confidence_label: NotRequired[str]
+    score_confidence_reason: NotRequired[str]
     doc_hits: list[str]
     source_hits: list[str]
     test_hits: list[str]
@@ -293,127 +305,47 @@ def _fallback_solution_plan(state: PlannerState, context_hits: dict[str, list[st
     )
 
 
-def _parse_sections(document: str) -> dict[str, str]:
-    sections: dict[str, str] = {}
-    heading: str | None = None
-    buffer: list[str] = []
-    for line in document.splitlines():
-        if line.startswith("## "):
-            if heading is not None:
-                sections[heading] = "\n".join(buffer).strip()
-            heading = line[3:].strip()
-            buffer = []
-            continue
-        if heading is not None:
-            buffer.append(line)
-    if heading is not None:
-        sections[heading] = "\n".join(buffer).strip()
-    return sections
-
-
-def _clean_lines(section_text: str) -> list[str]:
-    return [line.strip() for line in section_text.splitlines() if line.strip()]
-
-
-def _fallback_section_review(name: str, weight: int, sections: dict[str, str]) -> PlannerSectionReview:
-    content = sections.get(name, "").strip()
-    lines = _clean_lines(content)
-    lowered = content.lower()
-    score = 0
-    status = "missing"
-    rationale = ""
-    if content:
-        score = max(1, round(weight * 0.6))
-        status = "needs-work"
-
-    if name == "Problem Framing":
-        if content and len(lines) >= 2:
-            score = weight
+def _normalize_section_reviews(section_reviews: list[PlannerSectionReview]) -> list[PlannerSectionReview]:
+    review_lookup = {item["section"]: item for item in section_reviews}
+    normalized: list[PlannerSectionReview] = []
+    for section, weight in SECTION_WEIGHTS:
+        item = review_lookup[section]
+        score = max(0, min(int(item["score"]), weight))
+        raw_status = str(item["status"]).strip().lower()
+        if raw_status == "missing" or score == 0:
+            status = "missing"
+        elif raw_status in {"pass", "approved"} and score >= weight:
             status = "pass"
-            rationale = "The gameplay planning goal and boundaries are clear."
-        elif content:
-            rationale = "The goal is present, but the boundary around the gameplay problem still needs sharpening."
         else:
-            rationale = "The plan does not frame the gameplay problem clearly enough."
-    elif name == "Current Context":
-        if content and "/" in content:
-            score = weight
-            status = "pass"
-            rationale = "The current context is grounded in concrete docs, code, or tests."
-        elif content:
-            rationale = "Some context exists, but it is not grounded enough in concrete evidence."
-        else:
-            rationale = "The plan does not name the grounded evidence for the solution."
-    elif name == "Validation Plan":
-        if content and len(lines) >= 2 and "test" in lowered:
-            score = weight
-            status = "pass"
-            rationale = "The validation plan names concrete regression checks."
-        elif content:
-            rationale = "Validation is mentioned, but the exact checks are still vague."
-        else:
-            rationale = "The plan does not explain how the solution will be validated."
-    else:
-        if content and len(lines) >= 2:
-            score = weight
-            status = "pass"
-            rationale = "This section is concrete enough to support implementation."
-        elif content:
-            rationale = "This section exists, but it is still too generic."
-        else:
-            rationale = f"The plan is missing `{name}`."
-
-    actions = {
-        "Problem Framing": "Clarify the player outcome and scope boundary.",
-        "Current Context": "Ground the plan in concrete docs, runtime paths, or tests.",
-        "Proposed Solution": "Anchor the solution on the live gameplay owner instead of a generic path.",
-        "Execution Plan": "Expand the ordered handoff into concrete implementation steps.",
-        "Validation Plan": "List the exact regression checks and edge-case assertions.",
-        "Risks and Open Questions": "Name the main adjacent-state risk and close the remaining question explicitly.",
-    }
-    return {
-        "section": name,
-        "score": score,
-        "status": status,
-        "rationale": rationale,
-        "action_items": [] if status == "pass" else [actions[name]],
-    }
+            status = "needs-work"
+        normalized.append(
+            {
+                "section": section,
+                "score": score,
+                "status": status,
+                "rationale": str(item["rationale"]).strip(),
+                "action_items": (
+                    []
+                    if status == "pass"
+                    else _dedupe([str(action).strip() for action in item.get("action_items", []) if str(action).strip()])
+                ),
+            }
+        )
+    return normalized
 
 
-def _fallback_review(solution_plan: str) -> dict[str, Any]:
-    sections = _parse_sections(solution_plan)
-    section_reviews = [_fallback_section_review(name, weight, sections) for name, weight in SECTION_WEIGHTS]
-    missing_sections = [item["section"] for item in section_reviews if item["status"] == "missing"]
-    blocking_issues = _dedupe(
-        [
-            f"{item['section']}: {item['action_items'][0]}"
-            for item in section_reviews
-            if item["section"] in {"Proposed Solution", "Execution Plan", "Validation Plan"} and item["status"] != "pass"
-        ]
-    )
-    improvement_actions = _dedupe(
-        [
-            action
-            for item in section_reviews
-            if item["status"] != "pass"
-            for action in item["action_items"]
-        ]
-    )
-    score = sum(item["score"] for item in section_reviews)
-    approved = score >= APPROVAL_SCORE and not blocking_issues and not missing_sections
-    return {
-        "score": score,
-        "feedback": (
-            "The gameplay solution plan is implementation-ready."
-            if approved
-            else "The gameplay solution plan still needs more grounded detail before implementation."
-        ),
-        "missing_sections": missing_sections,
-        "section_reviews": section_reviews,
-        "blocking_issues": blocking_issues,
-        "improvement_actions": improvement_actions,
-        "approved": approved,
-    }
+def _to_score_assessments(section_reviews: list[PlannerSectionReview]) -> list[ScoreAssessment]:
+    return [
+        ScoreAssessment(
+            label=item["section"],
+            score=int(item["score"]),
+            max_score=SECTION_WEIGHT_MAP[item["section"]],
+            status=item["status"],
+            rationale=item["rationale"],
+            action_items=tuple(item["action_items"]),
+        )
+        for item in section_reviews
+    ]
 
 
 def _compose_review_feedback(
@@ -421,6 +353,9 @@ def _compose_review_feedback(
     planning_round: int,
     score: int,
     approved: bool,
+    confidence_label: str,
+    confidence_reason: str,
+    confidence: float | None,
     loop_status: str,
     loop_reason: str,
     section_reviews: list[PlannerSectionReview],
@@ -435,6 +370,8 @@ def _compose_review_feedback(
         f"- Planning round: {planning_round}",
         f"- Approved: {approved}",
         f"- Score: {score}/100",
+        f"- Scoring confidence: {confidence_label}{f' ({confidence:.1f}x noise floor)' if confidence is not None else ''}",
+        f"- Confidence reason: {confidence_reason}",
         f"- Loop Status: {loop_status}",
         f"- Loop Reason: {loop_reason}",
         f"- Approval bar: >= {APPROVAL_SCORE}/100 and zero blocking issues",
@@ -473,6 +410,9 @@ def _blocked_review_response(
         planning_round=planning_round,
         score=0,
         approved=False,
+        confidence_label="unmeasured",
+        confidence_reason="MAD confidence is unavailable because no LLM-generated assessments were produced.",
+        confidence=None,
         loop_status=loop_status,
         loop_reason=reason,
         section_reviews=[],
@@ -495,6 +435,9 @@ def _blocked_review_response(
         "loop_should_continue": False,
         "loop_completed": True,
         "loop_stagnated_rounds": 0,
+        "score_confidence": None,
+        "score_confidence_label": "unmeasured",
+        "score_confidence_reason": "MAD confidence is unavailable because no LLM-generated assessments were produced.",
         "summary": f"{metadata.name} stopped because gameplay solution-plan assessments were unavailable.",
     }
 
@@ -659,16 +602,17 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
                 next(item for item in raw_section_reviews if item["section"] == section)
                 for section, _ in SECTION_WEIGHTS
             ]
+            normalized_section_reviews = _normalize_section_reviews(ordered_section_reviews)
             review_result = {
-                "score": sum(item["score"] for item in ordered_section_reviews),
+                "score": sum(item["score"] for item in normalized_section_reviews),
                 "feedback": str(generated.get("feedback", "")).strip(),
                 "missing_sections": _dedupe(
                     [
                         *[str(item) for item in generated.get("missing_sections", []) if str(item).strip()],
-                        *[item["section"] for item in ordered_section_reviews if item["status"].strip().lower() == "missing"],
+                        *[item["section"] for item in normalized_section_reviews if item["status"] == "missing"],
                     ]
                 ),
-                "section_reviews": ordered_section_reviews,
+                "section_reviews": normalized_section_reviews,
                 "blocking_issues": _dedupe([str(item) for item in generated.get("blocking_issues", []) if str(item).strip()]),
                 "improvement_actions": _dedupe(
                     [str(item) for item in generated.get("improvement_actions", []) if str(item).strip()]
@@ -684,16 +628,26 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
                 loop_status="llm-error",
             )
 
+        score_decision = evaluate_score_decision(
+            PLAN_SCORE_POLICY,
+            round_index=planning_round,
+            assessments=_to_score_assessments(review_result["section_reviews"]),
+            explicit_approval=bool(review_result.get("approved", False)),
+            blocking_issues=review_result["blocking_issues"],
+            missing_sections=review_result["missing_sections"],
+            improvement_actions=review_result["improvement_actions"],
+            artifact_dir=artifact_dir,
+        )
         previous_score = int(state.get("score", 0)) if planning_round > 1 else None
         prior_stagnated_rounds = int(state.get("loop_stagnated_rounds", 0)) if planning_round > 1 else 0
         progress = evaluate_quality_loop(
             PLAN_LOOP_SPEC,
             round_index=planning_round,
-            score=review_result["score"],
-            approved=bool(review_result.get("approved", False)),
-            missing_sections=review_result["missing_sections"],
-            blocking_issues=review_result["blocking_issues"],
-            improvement_actions=review_result["improvement_actions"],
+            score=score_decision.score,
+            approved=score_decision.approved,
+            missing_sections=score_decision.missing_sections,
+            blocking_issues=score_decision.blocking_issues,
+            improvement_actions=score_decision.improvement_actions,
             previous_score=previous_score,
             prior_stagnated_rounds=prior_stagnated_rounds,
         )
@@ -701,6 +655,9 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
             planning_round=planning_round,
             score=progress.score,
             approved=progress.approved,
+            confidence_label=score_decision.confidence_label,
+            confidence_reason=score_decision.confidence_reason,
+            confidence=score_decision.confidence,
             loop_status=progress.status,
             loop_reason=progress.reason,
             section_reviews=review_result["section_reviews"],
@@ -710,9 +667,8 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
             reviewer_feedback=review_result["feedback"],
         )
         (artifact_dir / f"planner_review_round_{planning_round}.md").write_text(feedback, encoding="utf-8")
-        final_score = 100 if progress.approved else progress.score
         return {
-            "score": final_score,
+            "score": progress.score,
             "feedback": feedback,
             "missing_sections": list(progress.missing_sections),
             "section_reviews": list(review_result["section_reviews"]),
@@ -724,6 +680,9 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
             "loop_should_continue": progress.should_continue,
             "loop_completed": progress.completed,
             "loop_stagnated_rounds": progress.stagnated_rounds,
+            "score_confidence": score_decision.confidence,
+            "score_confidence_label": score_decision.confidence_label,
+            "score_confidence_reason": score_decision.confidence_reason,
             "summary": (
                 f"{metadata.name} approved planning round {planning_round}."
                 if progress.approved
@@ -738,6 +697,8 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
     def finalize(state: PlannerState) -> dict[str, Any]:
         artifact_dir = _artifact_dir(context, metadata, state)
         final_status = "completed" if state["approved"] else "review-blocked"
+        confidence_value = state.get("score_confidence")
+        confidence_suffix = f" ({confidence_value:.1f}x noise floor)" if confidence_value is not None else ""
         final_report = {
             "status": final_status,
             "planning_rounds": int(state.get("planning_round", 0)),
@@ -745,9 +706,14 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
             "approved": bool(state.get("approved", False)),
             "loop_status": str(state.get("loop_status", "unknown")),
             "loop_reason": str(state.get("loop_reason", "")),
+            "score_confidence": state.get("score_confidence"),
+            "score_confidence_label": str(state.get("score_confidence_label", "unmeasured")),
+            "score_confidence_reason": str(state.get("score_confidence_reason", "")),
             "doc_hits": list(state.get("doc_hits", [])),
             "source_hits": list(state.get("source_hits", [])),
             "test_hits": list(state.get("test_hits", [])),
+            "blocking_issues": list(state.get("blocking_issues", [])),
+            "improvement_actions": list(state.get("improvement_actions", [])),
         }
         (artifact_dir / "final_report.md").write_text(
             "\n".join(
@@ -758,8 +724,16 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
                     f"- Planning rounds: {state.get('planning_round', 0)}",
                     f"- Score: {state.get('score', 0)}/100",
                     f"- Approved: {state.get('approved', False)}",
+                    f"- Scoring confidence: {state.get('score_confidence_label', 'unmeasured')}{confidence_suffix}",
+                    f"- Confidence reason: {state.get('score_confidence_reason', '')}",
                     f"- Loop Status: {state.get('loop_status', 'unknown')}",
                     f"- Loop Reason: {state.get('loop_reason', '')}",
+                    "",
+                    "## Blocking Issues",
+                    *([f"- {item}" for item in state.get("blocking_issues", [])] or ["- None."]),
+                    "",
+                    "## Improvement Actions",
+                    *([f"- {item}" for item in state.get("improvement_actions", [])] or ["- None."]),
                     "",
                     "## Latest Review",
                     state.get("feedback", ""),
