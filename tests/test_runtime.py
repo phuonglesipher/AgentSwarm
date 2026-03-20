@@ -175,6 +175,9 @@ class AlwaysBadLLMManager:
 
 
 class AlmostApprovedLLMClient:
+    def __init__(self) -> None:
+        self._review_calls = 0
+
     def is_enabled(self) -> bool:
         return True
 
@@ -249,14 +252,14 @@ class AlmostApprovedLLMClient:
                     "",
                     "## Implementation Steps",
                     (
-                        "- Inspect the melee combo state machine and the extension points for the new branch."
+                        "- Inspect src/combat_combo.py for the melee combo state machine and the extension points for the new branch."
                         if feature_prompt
-                        else "- Inspect the dodge cancel state machine and the melee timing gates."
+                        else "- Inspect src/combat_dodge.py for the dodge cancel state machine and the melee timing gates."
                     ),
                     (
-                        "- Add the new branch while preserving valid transition order."
+                        "- Add the new branch in src/combat_combo.py while preserving valid transition order."
                         if feature_prompt
-                        else "- Update the timing logic while preserving valid transition order."
+                        else "- Update the timing logic in src/combat_dodge.py while preserving valid transition order."
                     ),
                     "- Add debug breadcrumbs so regressions are easy to spot.",
                     "",
@@ -322,9 +325,40 @@ class AlmostApprovedLLMClient:
                 implementation_medium_reason="The test fixture is source-owned and validated by Python runtime tests.",
             )
         if schema_name == "gameplay_plan_review":
+            self._review_calls += 1
+            task_type_score = 5 if self._review_calls == 1 else 10
+            task_type_status = "needs-work" if self._review_calls == 1 else "pass"
+            task_type_rationale = (
+                "The plan names the task type but does not fully justify it."
+                if self._review_calls == 1
+                else "The task type rationale is now explicit enough for approval."
+            )
+            task_type_actions = (
+                [
+                    (
+                        "Add one sentence justifying why this work is classified as a feature."
+                        if feature_prompt
+                        else "Add one sentence justifying why this work is classified as a bugfix."
+                    )
+                ]
+                if self._review_calls == 1
+                else []
+            )
+            risks_score = 10 if self._review_calls == 1 else 5
+            risks_status = "pass" if self._review_calls == 1 else "needs-work"
+            risks_rationale = (
+                "Risks and mitigations are documented."
+                if self._review_calls == 1
+                else "A small residual implementation risk remains, but it is not blocking."
+            )
+            risks_actions = [] if self._review_calls == 1 else ["Monitor adjacent cancel windows during implementation review."]
             return {
                 "score": 95,
-                "feedback": "The plan is implementation-ready. Only the task type rationale could be more explicit.",
+                "feedback": (
+                    "The plan is implementation-ready. Only the task type rationale could be more explicit."
+                    if self._review_calls == 1
+                    else "The plan is implementation-ready and the remaining risk is non-blocking."
+                ),
                 "missing_sections": [],
                 "section_reviews": [
                     {
@@ -336,16 +370,10 @@ class AlmostApprovedLLMClient:
                     },
                     {
                         "section": "Task Type",
-                        "score": 5,
-                        "status": "needs-work",
-                        "rationale": "The plan names the task type but does not fully justify it.",
-                        "action_items": [
-                            (
-                                "Add one sentence justifying why this work is classified as a feature."
-                                if feature_prompt
-                                else "Add one sentence justifying why this work is classified as a bugfix."
-                            )
-                        ],
+                        "score": task_type_score,
+                        "status": task_type_status,
+                        "rationale": task_type_rationale,
+                        "action_items": task_type_actions,
                     },
                     {
                         "section": "Existing Docs",
@@ -370,10 +398,10 @@ class AlmostApprovedLLMClient:
                     },
                     {
                         "section": "Risks",
-                        "score": 10,
-                        "status": "pass",
-                        "rationale": "Risks and mitigations are documented.",
-                        "action_items": [],
+                        "score": risks_score,
+                        "status": risks_status,
+                        "rationale": risks_rationale,
+                        "action_items": risks_actions,
                     },
                     {
                         "section": "Acceptance Criteria",
@@ -384,14 +412,8 @@ class AlmostApprovedLLMClient:
                     },
                 ],
                 "blocking_issues": [],
-                "improvement_actions": [
-                    (
-                        "Add one sentence justifying why this work is classified as a feature."
-                        if feature_prompt
-                        else "Add one sentence justifying why this work is classified as a bugfix."
-                    )
-                ],
-                "approved": True,
+                "improvement_actions": [*task_type_actions, *risks_actions],
+                "approved": self._review_calls >= 2,
             }
         raise AssertionError(f"Unexpected schema_name: {schema_name}")
 
@@ -414,6 +436,112 @@ class MixedLLMManager:
 
     def available_profiles(self) -> list[str]:
         return ["default", "reviewer", "codegen"]
+
+
+class RepairAwareCodegenLLMClient:
+    def __init__(self) -> None:
+        self.inputs: list[str] = []
+        self.calls = 0
+
+    def is_enabled(self) -> bool:
+        return True
+
+    def describe(self) -> str:
+        return "repair-aware codegen test client"
+
+    def generate_text(self, *, instructions: str, input_text: str, effort: str | None = None) -> str:
+        raise AssertionError("Repair-aware codegen should not call generate_text")
+
+    def generate_json(
+        self,
+        *,
+        instructions: str,
+        input_text: str,
+        schema_name: str,
+        schema: dict,
+        effort: str | None = None,
+    ) -> dict:
+        del instructions, schema, effort
+        if schema_name != "gameplay_code_bundle":
+            raise AssertionError(f"Unexpected schema_name: {schema_name}")
+        self.calls += 1
+        self.inputs.append(input_text)
+        if self.calls == 1:
+            return {
+                "source_code": "\n".join(
+                    [
+                        "class PlayerCharacter:",
+                        "    def __init__(self):",
+                        "        self.can_move = False",
+                        "",
+                        "    def spawn(self):",
+                        "        return self",
+                        "",
+                        "    def move(self):",
+                        "        return self.can_move",
+                    ]
+                ),
+                "test_code": "\n".join(
+                    [
+                        "from src.player_movement import PlayerCharacter",
+                        "",
+                        "def test_player_can_move_after_spawn():",
+                        "    player = PlayerCharacter().spawn()",
+                        "    assert player.move() is True, 'repair me'",
+                    ]
+                ),
+                "implementation_notes": "First attempt keeps the failing behavior so the repair loop has concrete feedback.",
+            }
+        return {
+            "source_code": "\n".join(
+                [
+                    "class PlayerCharacter:",
+                    "    def __init__(self):",
+                    "        self.can_move = False",
+                    "",
+                    "    def spawn(self):",
+                    "        self.can_move = True",
+                    "        return self",
+                    "",
+                    "    def move(self):",
+                    "        return self.can_move",
+                ]
+            ),
+            "test_code": "\n".join(
+                [
+                    "from src.player_movement import PlayerCharacter",
+                    "",
+                    "def test_player_can_move_after_spawn():",
+                    "    player = PlayerCharacter().spawn()",
+                    "    assert player.move() is True",
+                ]
+            ),
+            "implementation_notes": "Second attempt fixes the spawn path after reading the failing self-test output.",
+        }
+
+
+class RepairAwareCodegenLLMManager:
+    def __init__(self) -> None:
+        self._default_client = DisabledLLMClient()
+        self._codegen_client = RepairAwareCodegenLLMClient()
+
+    @property
+    def client(self) -> RepairAwareCodegenLLMClient:
+        return self._codegen_client
+
+    def resolve(self, profile: str | None = None):
+        if profile == "codegen":
+            return self._codegen_client
+        return self._default_client
+
+    def is_enabled(self, profile: str | None = None) -> bool:
+        return self.resolve(profile).is_enabled()
+
+    def describe(self, profile: str | None = None) -> str:
+        return f"{profile or 'default'}: {self.resolve(profile).describe()}"
+
+    def available_profiles(self) -> list[str]:
+        return ["default", "codegen"]
 
 
 class ContextOnlyInvestigationLLMClient:
@@ -1881,6 +2009,8 @@ class WorkflowDrivenRuntimeTests(unittest.TestCase):
                 "gameplay-engineer-planner",
                 "gameplay-engineer-workflow",
                 "gameplay-reviewer-workflow",
+                "template-investigation-reviewer-workflow",
+                "template-investigation-workflow",
             ],
         )
 
@@ -1890,6 +2020,7 @@ class WorkflowDrivenRuntimeTests(unittest.TestCase):
             [
                 "gameplay-engineer-planner",
                 "gameplay-engineer-workflow",
+                "template-investigation-workflow",
             ],
         )
 
@@ -2188,8 +2319,11 @@ class WorkflowDrivenRuntimeTests(unittest.TestCase):
             artifact_dir = self._single_workflow_artifact_dir(run_dir, "gameplay-engineer-workflow")
             self.assertTrue((artifact_dir / "plan_doc.md").exists())
             self.assertTrue((artifact_dir / "architecture_plan.md").exists())
-            self.assertTrue((artifact_dir / "pull_request.md").exists())
-            self.assertTrue((artifact_dir / "self_test.txt").exists())
+            self.assertTrue((artifact_dir / "review_abort.md").exists())
+            self.assertTrue((artifact_dir / "final_report.md").exists())
+            self.assertFalse((artifact_dir / "pull_request.md").exists())
+            self.assertFalse((artifact_dir / "self_test.txt").exists())
+            self.assertIn("never reached gameplay plan approval", result["final_response"])
 
             trace_output = trace_log.read_text(encoding="utf-8")
             self.assertIn("[main_graph] [analyze_prompt] ENTER", trace_output)
@@ -2198,8 +2332,6 @@ class WorkflowDrivenRuntimeTests(unittest.TestCase):
             self.assertIn("output_keys=", trace_output)
             self.assertIn(f"details={GRAPH_DEBUG_TRACE_FILE}#", trace_output)
             self.assertIn("next=agentswarm__gameplay-engineer-workflow", trace_output)
-            self.assertIn("[gameplay-engineer-workflow] [gameplay-reviewer-workflow] SUBGRAPH_ENTER", trace_output)
-            self.assertIn("[gameplay-engineer-workflow] [gameplay-reviewer-workflow] SUBGRAPH_EXIT", trace_output)
             self.assertIn("[gameplay-engineer-workflow] [request_review] ENTER", trace_output)
             self.assertIn("[gameplay-reviewer-workflow] [review_plan] ENTER", trace_output)
             self.assertIn("[main_graph] [finalize] EXIT", trace_output)
@@ -2765,6 +2897,7 @@ class WorkflowDrivenRuntimeTests(unittest.TestCase):
 
             artifact_dir = Path(result["artifact_dir"])
             patch_note = host_root / "Content" / "Combat" / "BP_DodgeCancel.agentswarm_fix.md"
+            instructions_doc = (artifact_dir / "blueprint_fix_instructions.md").read_text(encoding="utf-8")
 
             self.assertEqual(result["execution_track"], "bugfix")
             self.assertFalse(result["requires_architecture_review"])
@@ -2778,6 +2911,10 @@ class WorkflowDrivenRuntimeTests(unittest.TestCase):
             self.assertFalse((artifact_dir / "review_round_1.md").exists())
             self.assertEqual(result["final_report"]["status"], "manual-validation-required")
             self.assertIn("Manual Unreal Editor", result["workspace_write_summary"])
+            self.assertIn("## Goal", instructions_doc)
+            self.assertIn("## Safe Patch Steps", instructions_doc)
+            self.assertIn("## Verification Checklist", instructions_doc)
+            self.assertIn("BP_DodgeCancel", instructions_doc)
 
     def test_engineer_workflow_clamps_code_only_mixed_noise_to_code_path(self) -> None:
         with tempfile.TemporaryDirectory(prefix="agentswarm-host-code-only-noise-") as temp_dir:
@@ -2990,8 +3127,19 @@ class WorkflowDrivenRuntimeTests(unittest.TestCase):
                     "Validation Plan": 10,
                     "Noise Control": 5,
                 }
+                normalized_checks = [
+                    {
+                        "section": label,
+                        "score": weights[label] if passed else max(1, round(weights[label] * 0.4)),
+                        "max_score": weights[label],
+                        "status": "pass" if passed else "needs-work",
+                        "rationale": rationale,
+                        "action_items": [] if passed else [rationale],
+                    }
+                    for label, passed, rationale in checks
+                ]
                 score = sum(weights[label] for label, passed, _ in checks if passed)
-                missing_sections = [label for label, passed, _ in checks if not passed]
+                missing_sections = [item["section"] for item in normalized_checks if item["status"] != "pass"]
                 blocking_issues = []
                 if state["investigation_round"] == 1:
                     blocking_issues = [
@@ -3022,7 +3170,7 @@ class WorkflowDrivenRuntimeTests(unittest.TestCase):
                     approved=progress.approved,
                     blocking_issues=list(progress.blocking_issues),
                     improvement_actions=list(progress.improvement_actions),
-                    sections=checks,
+                    sections=normalized_checks,
                     loop_reason=progress.reason,
                 )
                 return (
@@ -3050,7 +3198,7 @@ class WorkflowDrivenRuntimeTests(unittest.TestCase):
                         "active_loop_blocking_issues": list(progress.blocking_issues),
                         "active_loop_improvement_actions": list(progress.improvement_actions),
                     },
-                    checks,
+                    normalized_checks,
                 )
 
             run_dir = host_root / ".agentswarm" / "runs" / "strict-feature-loop"
@@ -3104,13 +3252,13 @@ class WorkflowDrivenRuntimeTests(unittest.TestCase):
             self.assertIn("- Approved: False", review_round_2)
             self.assertIn("Acceptance Criteria: Add a player-visible pass condition for the non-wall-jump aerial path.", review_round_2)
             self.assertIn("- Approved: True", review_round_3)
-            self.assertIn("Approve round 3", review_round_3)
+            self.assertIn("The plan is ready for implementation.", review_round_3)
             self.assertIn("non-wall-jump", plan_doc)
             self.assertIn("## Previous Learning Summary", strict_manager.client.strategy_inputs[1])
             self.assertIn("still needs another pass", strict_manager.client.strategy_inputs[1])
             self.assertIn("## Previous Retained Evidence", strict_manager.client.strategy_inputs[2])
             self.assertIn("src/traversal_runtime.py", strict_manager.client.strategy_inputs[2])
-            self.assertIn("Blocking issues:", strict_manager.client.plan_inputs[1])
+            self.assertIn("## Open blocking issues", strict_manager.client.plan_inputs[1])
             self.assertIn(
                 "Implementation Steps: Name the owning runtime file and the exact wall-jump recharge hook.",
                 strict_manager.client.plan_inputs[1],
@@ -3131,7 +3279,7 @@ class WorkflowDrivenRuntimeTests(unittest.TestCase):
                 (host_root / "tests" / "test_traversal_runtime.py").read_text(encoding="utf-8"),
             )
 
-    def test_engineer_workflow_converges_when_investigation_evidence_is_already_sufficient(self) -> None:
+    def test_engineer_workflow_requires_two_investigation_rounds_before_converging(self) -> None:
         with tempfile.TemporaryDirectory(prefix="agentswarm-host-investigation-loop-") as temp_dir:
             host_root = Path(temp_dir) / "host-project"
             (host_root / "Scripts").mkdir(parents=True, exist_ok=True)
@@ -3169,12 +3317,19 @@ class WorkflowDrivenRuntimeTests(unittest.TestCase):
             )
 
             artifact_dir = Path(result["artifact_dir"])
-            self.assertEqual(result["investigation_round"], 1)
+            review_round_1 = (artifact_dir / "investigation_review_round_1.md").read_text(encoding="utf-8")
+            review_round_2 = (artifact_dir / "investigation_review_round_2.md").read_text(encoding="utf-8")
+            self.assertEqual(result["investigation_round"], 2)
             self.assertEqual(result["investigation_loop_status"], "passed")
             self.assertIn("Scripts/runtime.py", result["source_hits"])
             self.assertIn("Validation/test_runtime.py", result["test_hits"])
             self.assertTrue((artifact_dir / "engineer_investigation_round_1.md").exists())
             self.assertTrue((artifact_dir / "investigation_review_round_1.md").exists())
+            self.assertTrue((artifact_dir / "engineer_investigation_round_2.md").exists())
+            self.assertTrue((artifact_dir / "investigation_review_round_2.md").exists())
+            self.assertIn("Minimum verification depth: 2 round(s)", review_round_1)
+            self.assertIn("Approved: False", review_round_1)
+            self.assertIn("Approved: True", review_round_2)
             self.assertEqual(result["final_report"]["investigation_loop_status"], "passed")
 
     def test_engineer_workflow_carries_learning_between_investigation_rounds(self) -> None:
@@ -3301,9 +3456,9 @@ class WorkflowDrivenRuntimeTests(unittest.TestCase):
 
             result = engineer_graph.invoke(
                 {
-                    "prompt": "Summarize one accessible gameplay doc without changing files",
-                    "task_prompt": "Summarize one accessible gameplay doc without changing files",
-                    "task_id": "task-1-summarize-doc",
+                    "prompt": "Add a melee combo extension feature and keep 3C responsiveness stable",
+                    "task_prompt": "Add a melee combo extension feature and keep 3C responsiveness stable",
+                    "task_id": "task-1-add-melee-combo-feature-review-cap",
                     "run_dir": str(run_dir),
                     "messages": [],
                 }
@@ -3317,7 +3472,7 @@ class WorkflowDrivenRuntimeTests(unittest.TestCase):
         self.assertEqual(result["final_report"]["review_loop_status"], "stagnated")
         self.assertFalse(result["final_report"]["compile_ok"])
         self.assertFalse(result["final_report"]["tests_ok"])
-        self.assertIn("never reached approval", result["summary"])
+        self.assertIn("never reached gameplay plan approval", result["summary"])
 
     def test_engineer_workflow_accepts_reviewer_approval_below_perfect_score(self) -> None:
         mixed_registry = load_workflows(
@@ -3343,16 +3498,90 @@ class WorkflowDrivenRuntimeTests(unittest.TestCase):
             )
 
             artifact_dir = Path(result["artifact_dir"])
-            review_round = (artifact_dir / "review_round_1.md").read_text(encoding="utf-8")
+            review_round_1 = (artifact_dir / "review_round_1.md").read_text(encoding="utf-8")
+            review_round_2 = (artifact_dir / "review_round_2.md").read_text(encoding="utf-8")
 
         self.assertEqual(result["review_score"], 95)
         self.assertTrue(result["review_approved"])
-        self.assertEqual(result["review_round"], 1)
+        self.assertEqual(result["review_round"], 2)
         self.assertEqual(result["final_report"]["status"], "completed")
         self.assertEqual(result["final_report"]["review_loop_status"], "passed")
-        self.assertIn("Approved: True", review_round)
-        self.assertIn("Loop Status: passed", review_round)
-        self.assertIn("Task Type: 5/10", review_round)
+        self.assertIn("Approved: False", review_round_1)
+        self.assertIn("Minimum review depth is 2 rounds", review_round_1)
+        self.assertIn("Approved: True", review_round_2)
+        self.assertIn("Loop Status: passed", review_round_2)
+        self.assertIn("Risks: 5/10", review_round_2)
+
+    def test_engineer_workflow_codegen_prompt_carries_workspace_context_into_repair_rounds(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="agentswarm-host-codegen-prompt-") as temp_dir:
+            host_root = Path(temp_dir) / "host-project"
+            (host_root / "src").mkdir(parents=True, exist_ok=True)
+            (host_root / "tests").mkdir(parents=True, exist_ok=True)
+            (host_root / "src" / "player_movement.py").write_text(
+                "\n".join(
+                    [
+                        "class PlayerCharacter:",
+                        "    def __init__(self):",
+                        "        self.can_move = False",
+                        "",
+                        "    def spawn(self):",
+                        "        return self",
+                        "",
+                        "    def move(self):",
+                        "        return self.can_move",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            (host_root / "tests" / "test_player_movement.py").write_text(
+                "\n".join(
+                    [
+                        "from src.player_movement import PlayerCharacter",
+                        "",
+                        "def test_player_cannot_move_before_spawn():",
+                        "    assert PlayerCharacter().move() is False",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            prompt_manager = RepairAwareCodegenLLMManager()
+            paths, _ = initialize_host_project(agent_root=self.project_root, host_root=host_root)
+            config = load_agentswarm_config(paths)
+            manifest = load_project_manifest(paths)
+            registry = load_workflows(
+                project_root=self.project_root,
+                workflows_root=self.workflows_root,
+                llm_manager=prompt_manager,
+                runtime_paths=paths,
+                config=config,
+                manifest=manifest,
+            )
+            engineer_graph = registry.get("gameplay-engineer-workflow").graph
+            self.assertIsNotNone(engineer_graph)
+
+            run_dir = host_root / ".agentswarm" / "runs" / "codegen-prompt"
+            run_dir.mkdir(parents=True, exist_ok=True)
+            result = engineer_graph.invoke(
+                {
+                    "prompt": "Fix gameplay bug: the player cannot move after spawning",
+                    "task_prompt": "Fix gameplay bug: the player cannot move after spawning",
+                    "task_id": "task-1-fix-player-spawn-movement",
+                    "run_dir": str(run_dir),
+                    "messages": [],
+                }
+            )
+
+            self.assertEqual(result["final_report"]["status"], "completed")
+            self.assertTrue(result["compile_ok"])
+            self.assertTrue(result["tests_ok"])
+            self.assertGreaterEqual(len(prompt_manager.client.inputs), 2)
+            self.assertIn("## Current source file contents", prompt_manager.client.inputs[0])
+            self.assertIn("class PlayerCharacter:", prompt_manager.client.inputs[0])
+            self.assertIn("## Current test file contents", prompt_manager.client.inputs[0])
+            self.assertIn("test_player_cannot_move_before_spawn", prompt_manager.client.inputs[0])
+            self.assertIn("## Previous self-test output", prompt_manager.client.inputs[1])
+            self.assertIn("repair me", prompt_manager.client.inputs[1])
 
     def test_main_graph_xray_mermaid_includes_workflow_subgraphs(self) -> None:
         graph = build_main_graph(registry=self.registry, llm_manager=self.llm_manager)
