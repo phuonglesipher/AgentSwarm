@@ -18,24 +18,55 @@ from core.llm import LLMError
 from core.models import WorkflowContext, WorkflowMetadata
 from core.natural_language_prompts import build_prompt_brief
 from core.quality_loop import QualityLoopSpec, evaluate_quality_loop
+from core.scoring import ScoreAssessment, ScorePolicy, evaluate_score_decision
 from core.text_utils import keyword_tokens, normalize_text, slugify, tokenize
 
 
 APPROVAL_SCORE = 90
+MIN_INVESTIGATION_ROUNDS = 2
 MAX_REVIEW_ROUNDS = 3
 MAX_REPAIR_ROUNDS = 3
-INVESTIGATION_SCORE = 70
+INVESTIGATION_SCORE = 85
+MANDATORY_INVESTIGATION_VERIFICATION_ACTION = (
+    "Run one more investigation pass that independently re-validates the live runtime owner, "
+    "root-cause hypothesis, and concrete verification path before planning or implementation."
+)
 INVESTIGATION_LOOP_SPEC = QualityLoopSpec(
     loop_id="gameplay-investigation",
     threshold=INVESTIGATION_SCORE,
     max_rounds=3,
-    min_rounds=1,
+    min_rounds=MIN_INVESTIGATION_ROUNDS,
     require_blocker_free=True,
     require_missing_section_free=False,
     require_explicit_approval=True,
     min_score_delta=1,
     stagnation_limit=2,
 )
+INVESTIGATION_SCORE_POLICY = ScorePolicy(
+    system_id="gameplay-investigation",
+    threshold=INVESTIGATION_SCORE,
+    require_blocker_free=True,
+    require_missing_section_free=False,
+    require_explicit_approval=True,
+)
+INVESTIGATION_SECTION_WEIGHTS = (
+    ("Supporting References", 10),
+    ("Runtime Owner Precision", 25),
+    ("Current vs Legacy Split", 10),
+    ("Ownership Summary", 10),
+    ("Root Cause Hypothesis", 15),
+    ("Investigation Summary", 10),
+    ("Implementation Medium", 5),
+    ("Validation Plan", 10),
+    ("Noise Control", 5),
+)
+INVESTIGATION_SECTION_WEIGHT_MAP = dict(INVESTIGATION_SECTION_WEIGHTS)
+INVESTIGATION_BLOCKING_SECTIONS = {
+    "Runtime Owner Precision",
+    "Current vs Legacy Split",
+    "Root Cause Hypothesis",
+    "Validation Plan",
+}
 SOURCE_EXTENSIONS = {
     ".c",
     ".cc",
@@ -111,8 +142,6 @@ NON_GAMEPLAY_KEYWORDS = {
     "ux",
     "web",
 }
-
-
 PROCESS_ONLY_REVIEW_PATTERNS = (
     r"\breview round\b",
     r"\bround metadata\b",
@@ -164,6 +193,9 @@ class EngineerState(TypedDict):
     investigation_loop_status: str
     investigation_loop_reason: str
     investigation_loop_stagnated_rounds: int
+    investigation_score_confidence: NotRequired[float | None]
+    investigation_score_confidence_label: NotRequired[str]
+    investigation_score_confidence_reason: NotRequired[str]
     investigation_focus_terms: list[str]
     investigation_avoid_terms: list[str]
     investigation_search_notes: list[str]
@@ -277,6 +309,10 @@ def _format_bullets(items: list[str], *, empty_message: str = "None.") -> str:
     if not cleaned:
         return f"- {empty_message}"
     return "\n".join(f"- {item}" for item in cleaned)
+
+
+def _contains_path_hint(text: str) -> bool:
+    return bool(re.search(r"[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)+", text))
 
 
 def _should_skip(path: Path, scope_root: Path, exclude_roots: tuple[str, ...]) -> bool:
@@ -960,6 +996,22 @@ def _collect_engineering_context(context: WorkflowContext, state: EngineerState)
     payload["runtime_path_hypotheses"] = _dedupe(
         [str(item) for item in payload.get("runtime_path_hypotheses", []) if str(item).strip()]
     )
+    if not str(payload.get("ownership_summary", "")).strip():
+        owner = (
+            payload["current_runtime_paths"][:1]
+            or payload["source_hits"][:1]
+            or payload["blueprint_hits"][:1]
+            or payload["blueprint_text_hits"][:1]
+        )
+        validation = payload["test_hits"][:1] or payload["blueprint_text_hits"][:1] or payload["doc_hits"][:1]
+        if owner:
+            owner_note = f"Current gameplay ownership is anchored on {owner[0]}."
+            validation_note = (
+                f"Supporting validation or reference context is grounded in {validation[0]}."
+                if validation
+                else "Supporting validation still needs a stronger explicit anchor."
+            )
+            payload["ownership_summary"] = f"{owner_note} {validation_note}".strip()
     return payload
 
 
@@ -988,6 +1040,10 @@ def _build_investigation_learning(state: EngineerState, payload: dict[str, Any])
         reminder = "The investigation still needs a stronger runtime owner before implementation or handoff."
         if reminder.lower() not in summary.lower():
             summary = f"{summary.rstrip('.')} {reminder}".strip()
+    if state.get("investigation_improvement_actions") or int(state.get("investigation_round", 1)) < MIN_INVESTIGATION_ROUNDS:
+        next_pass_reminder = "This still needs another pass before implementation or handoff."
+        if next_pass_reminder.lower() not in summary.lower():
+            summary = f"{summary.rstrip('.')} {next_pass_reminder}".strip()
     focus = (
         f"Keep investigating {retained[0]}."
         if retained
@@ -1119,11 +1175,24 @@ def _compose_bug_context_doc(context: WorkflowContext, state: EngineerState) -> 
                     "Write a concise markdown bug investigation brief with the sections Bug Summary and Current Signals. "
                     "Keep it grounded in gameplay ownership and validation paths."
                 ),
-                input_text=(
-                    f"Task prompt:\n{state['task_prompt']}\n\n"
-                    f"Ownership summary:\n{state['ownership_summary']}\n\n"
-                    f"Current runtime paths:\n{_format_bullets(list(state.get('current_runtime_paths', [])))}\n\n"
-                    f"Test hits:\n{_format_bullets(list(state.get('test_hits', [])))}\n"
+                input_text=build_prompt_brief(
+                    opening="Prepare the gameplay bug context that the delivery workflow will carry forward.",
+                    sections=[
+                        ("Task request", state["task_prompt"].strip()),
+                        (
+                            "Grounded owner and current signals",
+                            state["ownership_summary"].strip() or "Ownership is still being narrowed.",
+                        ),
+                        (
+                            "Confirmed runtime paths",
+                            _format_bullets(list(state.get("current_runtime_paths", []))),
+                        ),
+                        (
+                            "Confirmed validation paths",
+                            _format_bullets(list(state.get("test_hits", []))),
+                        ),
+                    ],
+                    closing="Stay narrow, grounded, and ready for an implementer to act on without re-opening broad investigation.",
                 ),
             )
             return f"{generated.rstrip()}\n{metadata_block}"
@@ -1161,10 +1230,20 @@ def _compose_design_doc(context: WorkflowContext, state: EngineerState) -> str:
                     "Write a concise markdown design context document with these exact sections: Overview, Existing References, "
                     "Player-Facing Behavior, Technical Notes, Risks."
                 ),
-                input_text=(
-                    f"Task prompt:\n{state['task_prompt']}\n\n"
-                    f"Doc hits:\n{_format_bullets(list(state.get('doc_hits', [])))}\n\n"
-                    f"Current runtime paths:\n{_format_bullets(list(state.get('current_runtime_paths', [])))}\n"
+                input_text=build_prompt_brief(
+                    opening="Prepare the gameplay design context that will ground planning and review.",
+                    sections=[
+                        ("Task request", state["task_prompt"].strip()),
+                        (
+                            "Grounded references",
+                            _format_bullets(list(state.get("doc_hits", []))),
+                        ),
+                        (
+                            "Grounded runtime ownership",
+                            _format_bullets(list(state.get("current_runtime_paths", []))),
+                        ),
+                    ],
+                    closing="Keep the design context concrete, scoped to gameplay ownership, and explicit about nearby behavior that must remain stable.",
                 ),
             )
         except Exception:
@@ -1312,6 +1391,87 @@ def _fallback_code_bundle(state: EngineerState, scope_root: Path) -> dict[str, s
     }
 
 
+def _compose_blueprint_handoff(
+    context: WorkflowContext,
+    state: EngineerState,
+    *,
+    scope_root: Path,
+    blueprint_target: str,
+) -> str:
+    blueprint_text_target = next(
+        (
+            item
+            for item in [*list(state.get("blueprint_text_hits", [])), *list(state.get("blueprint_hits", []))]
+            if str(item).strip()
+        ),
+        "",
+    )
+    blueprint_text = _safe_read_text(scope_root / blueprint_text_target, limit=2000) if blueprint_text_target else ""
+    fallback = "\n".join(
+        [
+            "# Blueprint Fix Instructions",
+            "",
+            "## Goal",
+            f"- {state['task_prompt']}",
+            "- Keep the Blueprint-only change narrow and protect adjacent gameplay states.",
+            "",
+            "## Scope",
+            f"- Target asset: {blueprint_target or 'No concrete Blueprint target found.'}",
+            f"- Text mirror: {blueprint_text_target or 'None.'}",
+            "",
+            "## Safe Patch Steps",
+            "1. Create a backup copy of the target Blueprint in Unreal Editor before editing.",
+            "2. Open the narrowest EventGraph or helper path that owns the failing gameplay transition described below.",
+            "3. Adjust the transition so the requested gameplay behavior stays correct without broadening ownership into adjacent states.",
+            "4. Preserve existing gates for nearby states, interrupts, and cleanup paths unless the bug context proves they are wrong.",
+            "5. After the manual edit, update the text mirror so it matches the final in-editor behavior.",
+            "",
+            "## Verification Checklist",
+            "- Reproduce the original bug and confirm the requested gameplay behavior now works.",
+            "- Re-test the adjacent gameplay path that must remain unchanged.",
+            "- Capture a short validation note or screenshot proving the final Blueprint wiring.",
+            "",
+            "## Notes For Text Mirror",
+            "- Update the `.copy` or exported Blueprint text after the manual patch.",
+            "- Keep the text mirror aligned with the final EventGraph so future investigations stay grounded.",
+            "",
+            "## Grounded Context",
+            state.get("bug_context_doc", "").strip() or "No additional bug context was available.",
+            "",
+            "## Current Blueprint Text Mirror",
+            blueprint_text or "No readable Blueprint text mirror was available in the workspace.",
+        ]
+    )
+    handoff_llm = context.get_llm("codegen")
+    if handoff_llm.is_enabled():
+        try:
+            return handoff_llm.generate_text(
+                instructions=(
+                    "Write a precise markdown manual Blueprint handoff using these exact sections: Goal, Scope, Safe Patch Steps, "
+                    "Verification Checklist, Notes For Text Mirror, Grounded Context, Current Blueprint Text Mirror. "
+                    "Do not claim the binary asset was edited. Keep the steps asset-specific, safe, and grounded in the provided evidence."
+                ),
+                input_text=build_prompt_brief(
+                    opening="Prepare the manual Blueprint handoff for a gameplay-only fix.",
+                    sections=[
+                        ("Task request", state["task_prompt"].strip()),
+                        ("Blueprint target", blueprint_target or "None."),
+                        ("Blueprint text mirror target", blueprint_text_target or "None."),
+                        ("Grounded bug context", state.get("bug_context_doc", "").strip() or "None."),
+                        ("Blueprint-specific context", state.get("blueprint_context", "").strip() or "None."),
+                        (
+                            "Readable Blueprint text mirror",
+                            blueprint_text or "No readable Blueprint text mirror was available in the workspace.",
+                        ),
+                    ],
+                    closing="Keep the handoff safe, asset-specific, and explicit about what must be validated manually in Unreal Editor.",
+                ),
+            )
+        except Exception:
+            return fallback
+    return fallback
+
+
 def _compose_loop_feedback(
     *,
     title: str,
@@ -1319,6 +1479,9 @@ def _compose_loop_feedback(
     score: int,
     threshold: int,
     approved: bool,
+    confidence_label: str = "unmeasured",
+    confidence_reason: str = "",
+    confidence: float | None = None,
     blocking_issues: list[str],
     improvement_actions: list[str],
     sections: list[InvestigationCheck],
@@ -1330,6 +1493,9 @@ def _compose_loop_feedback(
         f"- Round: {round_index}",
         f"- Score: {score}/100",
         f"- Threshold: {threshold}/100",
+        f"- Scoring confidence: {confidence_label}{f' ({confidence:.1f}x noise floor)' if confidence is not None else ''}",
+        f"- Confidence reason: {confidence_reason}",
+        f"- Minimum verification depth: {MIN_INVESTIGATION_ROUNDS} round(s)",
         f"- Approved: {approved}",
         f"- Loop Reason: {loop_reason}",
         "",
@@ -1344,8 +1510,24 @@ def _compose_loop_feedback(
     return "\n".join(lines)
 
 
+def _to_score_assessments(checks: list[InvestigationCheck]) -> list[ScoreAssessment]:
+    return [
+        ScoreAssessment(
+            label=item["section"],
+            score=int(item["score"]),
+            max_score=INVESTIGATION_SECTION_WEIGHT_MAP[item["section"]],
+            status=item["status"],
+            rationale=item["rationale"],
+            action_items=tuple(item["action_items"]),
+        )
+        for item in checks
+    ]
+
+
 def _evaluate_investigation_quality(state: EngineerState) -> tuple[dict[str, Any], list[InvestigationCheck]]:
     checks: list[InvestigationCheck] = []
+    artifact_dir_value = str(state.get("artifact_dir", "")).strip()
+    score_history_dir = Path(artifact_dir_value) if artifact_dir_value else None
 
     def add_check(section: str, max_score: int, passed: bool, rationale: str, action: str) -> None:
         checks.append(
@@ -1359,60 +1541,149 @@ def _evaluate_investigation_quality(state: EngineerState) -> tuple[dict[str, Any
             }
         )
 
-    has_owner = bool(state.get("current_runtime_paths"))
-    has_validation = (
-        bool(state.get("test_hits"))
-        or bool(state.get("investigation_validation_plan"))
-        or bool(state.get("blueprint_hits"))
-        or bool(state.get("blueprint_text_hits"))
+    current_runtime_paths = [str(item).strip() for item in state.get("current_runtime_paths", []) if str(item).strip()]
+    legacy_runtime_paths = [str(item).strip() for item in state.get("legacy_runtime_paths", []) if str(item).strip()]
+    source_hits = [str(item).strip() for item in state.get("source_hits", []) if str(item).strip()]
+    test_hits = [str(item).strip() for item in state.get("test_hits", []) if str(item).strip()]
+    blueprint_hits = [str(item).strip() for item in state.get("blueprint_hits", []) if str(item).strip()]
+    blueprint_text_hits = [str(item).strip() for item in state.get("blueprint_text_hits", []) if str(item).strip()]
+    doc_hits = [str(item).strip() for item in state.get("doc_hits", []) if str(item).strip()]
+    ownership_summary = str(state.get("ownership_summary", "")).strip()
+    investigation_summary = str(state.get("investigation_summary", "")).strip()
+    implementation_medium = str(state.get("implementation_medium", "")).strip().lower()
+    implementation_medium_reason = str(state.get("implementation_medium_reason", "")).strip()
+    root_cause_text = "\n".join(
+        [
+            str(state.get("investigation_root_cause", "")).strip(),
+            *[str(item).strip() for item in state.get("runtime_path_hypotheses", []) if str(item).strip()],
+        ]
+    ).strip()
+    validation_plan = str(state.get("investigation_validation_plan", "")).strip()
+    owner_hint_text = "\n".join(
+        [
+            ownership_summary,
+            str(state.get("code_context", "")).strip(),
+            str(state.get("blueprint_context", "")).strip(),
+            root_cause_text,
+        ]
     )
-    has_evidence = bool(state.get("source_hits") or state.get("blueprint_hits") or state.get("doc_hits"))
-    has_summary = bool(str(state.get("ownership_summary", "")).strip()) and bool(str(state.get("investigation_summary", "")).strip())
-    read_only = not bool(state.get("implementation_requested", False))
+    current_set = {item.lower() for item in current_runtime_paths}
+    legacy_set = {item.lower() for item in legacy_runtime_paths}
+    has_supporting_references = bool(doc_hits or source_hits or blueprint_hits or blueprint_text_hits)
+    has_live_owner = bool(current_runtime_paths or blueprint_hits or blueprint_text_hits)
+    has_owner_precision = has_live_owner and (
+        bool(current_runtime_paths)
+        or _contains_path_hint(owner_hint_text)
+    )
+    has_current_vs_legacy_split = (not legacy_set) or bool(current_set and not current_set.intersection(legacy_set))
+    has_ownership_summary = bool(ownership_summary) and (has_live_owner or _contains_path_hint(ownership_summary))
+    has_root_cause = bool(root_cause_text) or (
+        has_live_owner
+        and bool(investigation_summary)
+        and int(state.get("investigation_round", 1)) >= MIN_INVESTIGATION_ROUNDS
+    )
+    has_investigation_summary = bool(investigation_summary)
+    has_implementation_medium = implementation_medium in {"cpp", "blueprint"} and bool(implementation_medium_reason)
+    has_validation = (
+        bool(test_hits)
+        or bool(validation_plan and (_contains_path_hint(validation_plan) or "manual" in normalize_text(validation_plan)))
+        or bool(implementation_medium == "blueprint" and (blueprint_hits or blueprint_text_hits))
+    )
+    has_noise_control = (not legacy_runtime_paths) or has_live_owner
 
     add_check(
-        "Gameplay Scope",
-        20,
-        state.get("gameplay_scope_verdict") == "gameplay",
-        "The request stays inside gameplay-only ownership." if state.get("gameplay_scope_verdict") == "gameplay" else "The request is not clearly gameplay-owned.",
-        "Reject or reroute work that is not clearly gameplay-owned.",
+        "Supporting References",
+        10,
+        has_supporting_references,
+        "Relevant docs, source files, or Blueprint assets support the investigation."
+        if has_supporting_references
+        else "The investigation still lacks grounded supporting references.",
+        "Ground the investigation in concrete docs, source files, or Blueprint assets before planning.",
     )
     add_check(
-        "Ownership",
+        "Runtime Owner Precision",
         25,
-        has_owner or bool(state.get("blueprint_hits") or state.get("blueprint_text_hits")),
-        "A likely live runtime owner is grounded." if has_owner else "A live owner still needs to be isolated.",
-        "Identify the current runtime owner before implementation or handoff.",
+        has_owner_precision,
+        "The investigation isolated a current runtime owner with grounded path-level evidence."
+        if has_owner_precision
+        else "The live gameplay runtime owner is still too ambiguous.",
+        "Identify the current runtime owner and anchor the handoff on the exact gameplay path.",
     )
     add_check(
-        "Evidence",
-        20,
-        has_evidence,
-        "The investigation cites grounded docs, code, or Blueprint evidence." if has_evidence else "The investigation still lacks grounded evidence.",
-        "Ground the investigation in concrete docs, runtime paths, or Blueprint assets.",
+        "Current vs Legacy Split",
+        10,
+        has_current_vs_legacy_split,
+        "The investigation separated current runtime ownership from stale or archival references."
+        if has_current_vs_legacy_split
+        else "Legacy references still blur the live runtime owner.",
+        "Separate the live gameplay owner from stale or archival references before implementation.",
     )
     add_check(
-        "Validation",
-        20,
-        has_validation or read_only,
-        "A validation path is present." if (has_validation or read_only) else "The validation path is still too vague.",
-        "Name the regression tests or validation steps for the gameplay path.",
+        "Ownership Summary",
+        10,
+        has_ownership_summary,
+        "The ownership summary names the likely owner and why it is responsible."
+        if has_ownership_summary
+        else "The ownership handoff is still too thin.",
+        "Tighten the ownership summary so it names the owner and the reason it owns this behavior.",
     )
     add_check(
-        "Summary",
+        "Root Cause Hypothesis",
         15,
-        has_summary,
-        "The investigation summary and ownership handoff are concrete enough." if has_summary else "The investigation summary still needs a tighter owner and outcome.",
-        "Tighten the ownership summary and investigation handoff before proceeding.",
+        has_root_cause,
+        "The investigation names a plausible causal hypothesis for the gameplay behavior."
+        if has_root_cause
+        else "The investigation still needs a concrete causal hypothesis.",
+        "State the likely failing transition, hook, or runtime condition before implementation.",
+    )
+    add_check(
+        "Investigation Summary",
+        10,
+        has_investigation_summary,
+        "The investigation summary is concrete enough to hand off."
+        if has_investigation_summary
+        else "The investigation summary still needs a tighter handoff.",
+        "Summarize the grounded owner, likely cause, and next proof step in one handoff-ready note.",
+    )
+    add_check(
+        "Implementation Medium",
+        5,
+        has_implementation_medium,
+        "The investigation classified the work as code or Blueprint with rationale."
+        if has_implementation_medium
+        else "The implementation medium is still under-justified.",
+        "Explain whether the fix belongs in code or Blueprint and why.",
+    )
+    add_check(
+        "Validation Plan",
+        10,
+        has_validation,
+        "A concrete automated or manual validation path is present."
+        if has_validation
+        else "The validation path is still too vague.",
+        "Name the exact regression test, validation path, or manual Blueprint verification flow.",
+    )
+    add_check(
+        "Noise Control",
+        5,
+        has_noise_control,
+        "The evidence set stayed focused on the live gameplay owner."
+        if has_noise_control
+        else "The investigation still carries too much stale or noisy evidence.",
+        "Trim stale evidence and keep the brief focused on the live gameplay owner only.",
     )
 
     blocking_issues = _dedupe(
         [
             f"{item['section']}: {item['action_items'][0]}"
             for item in checks
-            if item["section"] in {"Gameplay Scope", "Ownership", "Validation"} and item["status"] != "pass"
+            if item["section"] in INVESTIGATION_BLOCKING_SECTIONS and item["status"] != "pass"
         ]
     )
+    if int(state.get("investigation_round", 1)) < MIN_INVESTIGATION_ROUNDS:
+        blocking_issues.append(
+            f"Minimum verification depth is {MIN_INVESTIGATION_ROUNDS} rounds, so this investigation still needs one more independent pass."
+        )
     improvement_actions = _dedupe(
         [
             action
@@ -1421,14 +1692,25 @@ def _evaluate_investigation_quality(state: EngineerState) -> tuple[dict[str, Any
             for action in item["action_items"]
         ]
     )
-    score = sum(item["score"] for item in checks)
+    if int(state.get("investigation_round", 1)) < MIN_INVESTIGATION_ROUNDS:
+        improvement_actions.append(MANDATORY_INVESTIGATION_VERIFICATION_ACTION)
+    proposed_score = sum(item["score"] for item in checks)
+    score_decision = evaluate_score_decision(
+        INVESTIGATION_SCORE_POLICY,
+        round_index=max(1, int(state.get("investigation_round", 1))),
+        assessments=_to_score_assessments(checks),
+        explicit_approval=proposed_score >= INVESTIGATION_SCORE and not blocking_issues,
+        blocking_issues=blocking_issues,
+        improvement_actions=improvement_actions,
+        artifact_dir=score_history_dir,
+    )
     progress = evaluate_quality_loop(
         INVESTIGATION_LOOP_SPEC,
         round_index=max(1, int(state.get("investigation_round", 1))),
-        score=score,
-        approved=score >= INVESTIGATION_SCORE and not blocking_issues,
-        blocking_issues=blocking_issues,
-        improvement_actions=improvement_actions,
+        score=score_decision.score,
+        approved=score_decision.approved,
+        blocking_issues=score_decision.blocking_issues,
+        improvement_actions=score_decision.improvement_actions,
         previous_score=int(state.get("investigation_score", 0)) if int(state.get("investigation_round", 1)) > 1 else None,
         prior_stagnated_rounds=int(state.get("investigation_loop_stagnated_rounds", 0)) if int(state.get("investigation_round", 1)) > 1 else 0,
     )
@@ -1438,6 +1720,9 @@ def _evaluate_investigation_quality(state: EngineerState) -> tuple[dict[str, Any
         score=progress.score,
         threshold=progress.threshold,
         approved=progress.approved,
+        confidence_label=score_decision.confidence_label,
+        confidence_reason=score_decision.confidence_reason,
+        confidence=score_decision.confidence,
         blocking_issues=list(progress.blocking_issues),
         improvement_actions=list(progress.improvement_actions),
         sections=checks,
@@ -1454,6 +1739,9 @@ def _evaluate_investigation_quality(state: EngineerState) -> tuple[dict[str, Any
             "investigation_loop_status": progress.status,
             "investigation_loop_reason": progress.reason,
             "investigation_loop_stagnated_rounds": progress.stagnated_rounds,
+            "investigation_score_confidence": score_decision.confidence,
+            "investigation_score_confidence_label": score_decision.confidence_label,
+            "investigation_score_confidence_reason": score_decision.confidence_reason,
             "active_loop_should_continue": progress.should_continue,
             "active_loop_completed": progress.completed,
             "active_loop_status": progress.status,
@@ -1555,7 +1843,7 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
             "legacy_runtime_paths": list(payload["legacy_runtime_paths"]),
             "runtime_path_hypotheses": list(payload["runtime_path_hypotheses"]),
             "ownership_summary": str(payload.get("ownership_summary", "")).strip(),
-            "investigation_summary": str(payload.get("investigation_summary", "")).strip(),
+            "investigation_summary": str(payload.get("investigation_summary", "")).strip() or learning_summary,
             "doc_context": str(payload.get("doc_context", "")).strip(),
             "code_context": str(payload.get("code_context", "")).strip(),
             "blueprint_context": str(payload.get("blueprint_context", "")).strip(),
@@ -1744,14 +2032,11 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
                 blueprint_target = str(state["blueprint_hits"][0])
             elif state.get("blueprint_text_hits"):
                 blueprint_target = str(state["blueprint_text_hits"][0])
-            instructions_doc = "\n".join(
-                [
-                    "# Blueprint Fix Instructions",
-                    "",
-                    f"- Target: {blueprint_target or 'No concrete Blueprint target found.'}",
-                    "- Manual Unreal Editor validation is required for this gameplay change.",
-                    "- Apply the narrowest gameplay fix and confirm adjacent gameplay states remain unchanged.",
-                ]
+            instructions_doc = _compose_blueprint_handoff(
+                context,
+                state,
+                scope_root=scope_root,
+                blueprint_target=blueprint_target,
             )
             manifest_doc = "\n".join(
                 [

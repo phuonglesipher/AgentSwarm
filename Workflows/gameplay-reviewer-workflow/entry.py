@@ -13,16 +13,22 @@ from core.llm import LLMError
 from core.models import WorkflowContext, WorkflowMetadata
 from core.natural_language_prompts import build_prompt_brief
 from core.quality_loop import QualityLoopSpec, evaluate_quality_loop
+from core.scoring import ScoreAssessment, ScorePolicy, evaluate_score_decision
 from core.text_utils import normalize_text, slugify
 
 
 APPROVAL_SCORE = 90
+MIN_REVIEW_ROUNDS = 2
 MAX_REVIEW_ROUNDS = 3
+MANDATORY_VERIFICATION_ACTION = (
+    "Run one more plan revision pass that independently tightens the player-visible outcome, "
+    "grounded owner evidence, and regression coverage before implementation."
+)
 PLAN_REVIEW_SPEC = QualityLoopSpec(
     loop_id="gameplay-plan-review",
     threshold=APPROVAL_SCORE,
     max_rounds=MAX_REVIEW_ROUNDS,
-    min_rounds=1,
+    min_rounds=MIN_REVIEW_ROUNDS,
     require_blocker_free=True,
     require_missing_section_free=True,
     require_explicit_approval=True,
@@ -37,6 +43,14 @@ SECTION_WEIGHTS = (
     ("Unit Tests", 20),
     ("Risks", 10),
     ("Acceptance Criteria", 15),
+)
+SECTION_WEIGHT_MAP = dict(SECTION_WEIGHTS)
+PLAN_REVIEW_SCORE_POLICY = ScorePolicy(
+    system_id="gameplay-plan-review",
+    threshold=APPROVAL_SCORE,
+    require_blocker_free=True,
+    require_missing_section_free=True,
+    require_explicit_approval=True,
 )
 BLOCKING_SECTIONS = {"Task Type", "Implementation Steps", "Unit Tests", "Acceptance Criteria"}
 PROCESS_ONLY_REVIEW_PATTERNS = (
@@ -105,6 +119,9 @@ class ReviewerState(TypedDict):
     review_loop_should_continue: bool
     review_loop_completed: bool
     review_loop_stagnated_rounds: int
+    review_score_confidence: NotRequired[float | None]
+    review_score_confidence_label: NotRequired[str]
+    review_score_confidence_reason: NotRequired[str]
     summary: str
 
 
@@ -146,33 +163,18 @@ def _is_process_only_section_review(item: SectionReview) -> bool:
 
 def _apply_process_drift_guardrails(
     *,
+    plan_doc: str,
     review_result: dict[str, Any],
     fallback_section_reviews: list[SectionReview],
 ) -> dict[str, Any]:
     fallback_lookup = {item["section"]: item for item in fallback_section_reviews}
     sanitized_section_reviews: list[SectionReview] = []
     for item in review_result["section_reviews"]:
-        section = str(item.get("section", "")).strip()
-        fallback = fallback_lookup.get(section, item)
-        candidate: SectionReview = {
-            "section": section or fallback["section"],
-            "score": max(0, int(item.get("score", fallback["score"]))),
-            "status": str(item.get("status", fallback["status"])).strip() or fallback["status"],
-            "rationale": str(item.get("rationale", fallback["rationale"])).strip() or fallback["rationale"],
-            "action_items": [
-                str(action).strip()
-                for action in item.get("action_items", [])
-                if str(action).strip()
-            ]
-            or list(fallback["action_items"]),
-        }
-        sanitized_section_reviews.append(fallback if _is_process_only_section_review(candidate) else candidate)
+        fallback = fallback_lookup.get(item["section"], item)
+        sanitized_section_reviews.append(fallback if _is_process_only_section_review(item) else item)
 
-    if not sanitized_section_reviews:
-        sanitized_section_reviews = list(fallback_section_reviews)
-
-    missing_sections = [item["section"] for item in sanitized_section_reviews if item["status"] == "missing"]
-    blocking_issues = _dedupe(
+    generated_missing_sections = _dedupe([str(item) for item in review_result.get("missing_sections", []) if str(item).strip()])
+    generated_blocking_issues = _dedupe(
         [
             str(item)
             for item in review_result.get("blocking_issues", [])
@@ -180,48 +182,32 @@ def _apply_process_drift_guardrails(
         ]
     )
     if all(item["status"] == "pass" for item in sanitized_section_reviews):
-        blocking_issues = _dedupe(
+        generated_blocking_issues = _dedupe(
             [
                 item
-                for item in blocking_issues
+                for item in generated_blocking_issues
                 if not any(item.startswith(prefix) for prefix in GENERIC_HARD_BLOCKER_PREFIXES)
             ]
         )
-    derived_blocking_issues = _dedupe(
-        [
-            f"{item['section']}: {item['action_items'][0]}"
-            for item in sanitized_section_reviews
-            if item["section"] in BLOCKING_SECTIONS and item["status"] != "pass" and item["action_items"]
-        ]
-    )
-    if not blocking_issues:
-        blocking_issues = derived_blocking_issues
-
-    improvement_actions = _dedupe(
+    generated_improvement_actions = _dedupe(
         [
             str(item)
             for item in review_result.get("improvement_actions", [])
             if str(item).strip() and not _is_process_only_review_item(str(item))
         ]
     )
-    derived_improvement_actions = _dedupe(
-        [
-            action
-            for item in sanitized_section_reviews
-            if item["status"] != "pass"
-            for action in item["action_items"]
-        ]
+    derived_missing_sections, derived_blocking_issues, derived_improvement_actions = _derive_review_requirements(
+        plan_doc,
+        sanitized_section_reviews,
     )
-    if not improvement_actions:
-        improvement_actions = derived_improvement_actions
-
     score = sum(item["score"] for item in sanitized_section_reviews)
+    missing_sections = _dedupe([*generated_missing_sections, *derived_missing_sections])
+    blocking_issues = _dedupe([*generated_blocking_issues, *derived_blocking_issues])
+    improvement_actions = _dedupe([*generated_improvement_actions, *derived_improvement_actions])
     approved = bool(review_result.get("approved", False))
     if score >= APPROVAL_SCORE and not missing_sections and not blocking_issues:
         approved = True
-
     return {
-        **review_result,
         "score": score,
         "approved": approved,
         "missing_sections": missing_sections,
@@ -270,6 +256,10 @@ def _clean_lines(section_text: str) -> list[str]:
     return [line.strip() for line in section_text.splitlines() if line.strip()]
 
 
+def _contains_path_hint(text: str) -> bool:
+    return bool(re.search(r"[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)+", text))
+
+
 def _fallback_action(section: str) -> str:
     actions = {
         "Overview": "Clarify the player-facing gameplay goal and nearby systems that must remain stable.",
@@ -281,6 +271,125 @@ def _fallback_action(section: str) -> str:
         "Acceptance Criteria": "Write player-visible pass conditions and edge-case expectations.",
     }
     return actions[section]
+
+
+def _to_score_assessments(section_reviews: list[SectionReview]) -> list[ScoreAssessment]:
+    return [
+        ScoreAssessment(
+            label=item["section"],
+            score=int(item["score"]),
+            max_score=SECTION_WEIGHT_MAP[item["section"]],
+            status=item["status"],
+            rationale=item["rationale"],
+            action_items=tuple(item["action_items"]),
+        )
+        for item in section_reviews
+    ]
+
+
+def _normalize_section_reviews(
+    section_reviews: list[SectionReview],
+    fallback_reviews: list[SectionReview],
+) -> list[SectionReview]:
+    fallback_lookup = {item["section"]: item for item in fallback_reviews}
+    normalized_lookup: dict[str, SectionReview] = {}
+
+    for item in section_reviews:
+        section = str(item.get("section", "")).strip()
+        if section not in SECTION_WEIGHT_MAP or section in normalized_lookup:
+            continue
+        weight = SECTION_WEIGHT_MAP[section]
+        fallback = fallback_lookup[section]
+        score = max(0, min(int(item.get("score", 0)), weight))
+        raw_status = str(item.get("status", "")).strip().lower()
+        if raw_status == "missing" or score == 0:
+            status = "missing"
+        elif raw_status in {"pass", "approved"} and score >= weight:
+            status = "pass"
+        else:
+            status = "needs-work"
+        if section in BLOCKING_SECTIONS and status == "needs-work":
+            score = min(max(1, score), max(1, round(weight * 0.6)))
+        action_items = _dedupe(
+            [str(action).strip() for action in item.get("action_items", []) if str(action).strip()]
+        )
+        normalized_lookup[section] = {
+            "section": section,
+            "score": score,
+            "status": status,
+            "rationale": str(item.get("rationale", "")).strip() or fallback["rationale"],
+            "action_items": [] if status == "pass" else (action_items or list(fallback["action_items"])),
+        }
+
+    normalized: list[SectionReview] = []
+    for section, _ in SECTION_WEIGHTS:
+        normalized.append(normalized_lookup.get(section, fallback_lookup[section]))
+    return normalized
+
+
+def _derive_review_requirements(
+    plan_doc: str,
+    section_reviews: list[SectionReview],
+) -> tuple[list[str], list[str], list[str]]:
+    sections = _parse_sections(plan_doc)
+    review_lookup = {item["section"]: item for item in section_reviews}
+    missing_sections = [item["section"] for item in section_reviews if item["status"] == "missing"]
+    blocking_issues = _dedupe(
+        [
+            f"{item['section']}: {(item['action_items'] or [_fallback_action(item['section'])])[0]}"
+            for item in section_reviews
+            if item["section"] in BLOCKING_SECTIONS and item["status"] != "pass"
+        ]
+    )
+    improvement_actions = _dedupe(
+        [
+            action
+            for item in section_reviews
+            if item["status"] != "pass"
+            for action in (item["action_items"] or [_fallback_action(item["section"])])
+        ]
+    )
+
+    overview_lines = _clean_lines(sections.get("Overview", ""))
+    acceptance_lines = _clean_lines(sections.get("Acceptance Criteria", ""))
+    docs_text = sections.get("Existing Docs", "")
+    implementation_text = sections.get("Implementation Steps", "")
+    tests_text = sections.get("Unit Tests", "")
+    risks_text = sections.get("Risks", "")
+    lower_combined = "\n".join([tests_text, risks_text, "\n".join(acceptance_lines)]).lower()
+
+    hard_blockers: list[str] = []
+    hard_actions: list[str] = []
+    if len(overview_lines) < 2 or len(acceptance_lines) < 2:
+        hard_blockers.append(
+            "Player Outcome: Name the player-visible result and the nearby gameplay boundary that must remain stable."
+        )
+        hard_actions.append("Clarify the player-visible outcome and the nearby gameplay boundary.")
+    if not (_contains_path_hint(docs_text) and _contains_path_hint(implementation_text)):
+        hard_blockers.append(
+            "Current Behavior Evidence: Cite grounded docs, runtime paths, and the owning gameplay file before implementation."
+        )
+        hard_actions.append("Ground the plan in concrete docs, runtime paths, and the owning gameplay file.")
+    if not _contains_path_hint(implementation_text) or "confirm the owning" in implementation_text.lower():
+        hard_blockers.append(
+            "Speculation Control: Anchor the implementation steps on the current runtime owner instead of an unconfirmed path."
+        )
+        hard_actions.append("Anchor the implementation steps on the current runtime owner instead of an unconfirmed path.")
+    if len(_clean_lines(tests_text)) < 2 or not any(
+        marker in lower_combined for marker in ("neighbor", "adjacent", "unchanged", "regression", "edge", "non-")
+    ):
+        hard_blockers.append(
+            "Edge and Regression Coverage: Protect the adjacent gameplay path with explicit regression tests and acceptance criteria."
+        )
+        hard_actions.append(
+            "Protect the adjacent gameplay path with explicit regression tests and acceptance criteria."
+        )
+
+    return (
+        _dedupe([*missing_sections]),
+        _dedupe([*blocking_issues, *hard_blockers]),
+        _dedupe([*improvement_actions, *hard_actions]),
+    )
 
 
 def _score_section(name: str, weight: int, sections: dict[str, str], task_type: str) -> SectionReview:
@@ -371,22 +480,7 @@ def _score_section(name: str, weight: int, sections: dict[str, str], task_type: 
 def _fallback_review(plan_doc: str, task_type: str) -> dict[str, Any]:
     sections = _parse_sections(plan_doc)
     section_reviews = [_score_section(name, weight, sections, task_type) for name, weight in SECTION_WEIGHTS]
-    missing_sections = [item["section"] for item in section_reviews if item["status"] == "missing"]
-    blocking_issues = _dedupe(
-        [
-            f"{item['section']}: {item['action_items'][0]}"
-            for item in section_reviews
-            if item["section"] in BLOCKING_SECTIONS and item["status"] != "pass"
-        ]
-    )
-    improvement_actions = _dedupe(
-        [
-            action
-            for item in section_reviews
-            if item["status"] != "pass"
-            for action in item["action_items"]
-        ]
-    )
+    missing_sections, blocking_issues, improvement_actions = _derive_review_requirements(plan_doc, section_reviews)
     score = sum(item["score"] for item in section_reviews)
     approved = score >= APPROVAL_SCORE and not blocking_issues and not missing_sections
     return {
@@ -404,6 +498,9 @@ def _compose_feedback(
     review_round: int,
     score: int,
     approved: bool,
+    confidence_label: str,
+    confidence_reason: str,
+    confidence: float | None,
     loop_status: str,
     loop_reason: str,
     section_reviews: list[SectionReview],
@@ -418,14 +515,23 @@ def _compose_feedback(
         f"- Review round: {review_round}",
         f"- Approved: {approved}",
         f"- Score: {score}/100",
+        f"- Scoring confidence: {confidence_label}{f' ({confidence:.1f}x noise floor)' if confidence is not None else ''}",
+        f"- Confidence reason: {confidence_reason}",
         f"- Loop Status: {loop_status}",
         f"- Loop Reason: {loop_reason}",
         f"- Approval bar: >= {APPROVAL_SCORE}/100 and zero blocking issues",
+        f"- Minimum review depth: {MIN_REVIEW_ROUNDS} round(s)",
+        "",
+        "## Hard Blocker And Scoring Rules",
+        "- [hard blocker] Player Outcome: the plan must name the player-visible result and scope boundary.",
+        "- [hard blocker] Current Behavior Evidence: the plan must cite grounded docs, runtime paths, and the owner.",
+        "- [hard blocker] Speculation Control: implementation steps must stay anchored on current ownership.",
+        "- [hard blocker] Edge and Regression Coverage: tests and acceptance criteria must protect adjacent gameplay paths.",
         "",
         "## Section Scores",
     ]
     for item in section_reviews:
-        max_score = dict(SECTION_WEIGHTS)[item["section"]]
+        max_score = SECTION_WEIGHT_MAP[item["section"]]
         lines.append(f"- {item['section']}: {item['score']}/{max_score} - {item['rationale']}")
     lines.extend(["", "## Missing Sections"])
     lines.extend([f"- {item}" for item in missing_sections] or ["- None."])
@@ -489,8 +595,10 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
                     instructions=(
                         "You are gameplay-reviewer-workflow. Review a gameplay implementation plan like a strict senior gameplay engineer. "
                         "Score the plan against these exact sections: Overview, Task Type, Existing Docs, Implementation Steps, Unit Tests, "
-                        "Risks, Acceptance Criteria. Return structured JSON only. Approval requires a score >= 90, no blocking issues, and "
+                        "Risks, Acceptance Criteria. Approval requires a score >= 90, no blocking issues, and "
                         "no missing required sections. Focus on technical clarity, owner paths, regression coverage, and player-visible acceptance. "
+                        f"Minimum final-approval depth is {MIN_REVIEW_ROUNDS} review rounds. Do not approve early just because round one sounds plausible. "
+                        "Hard blockers: player outcome, grounded current-behavior evidence, speculation control around the owning runtime path, and adjacent-path regression coverage. "
                         "Do not block on review-round bookkeeping, artifact naming, sign-off records, or other process-only approval trace details."
                     ),
                     input_text=build_prompt_brief(
@@ -528,11 +636,8 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
                     schema_name="gameplay_plan_review",
                     schema=schema,
                 )
-                review_result = {
-                    "score": int(generated.get("score", fallback["score"])),
-                    "approved": bool(generated.get("approved", False)),
-                    "missing_sections": [str(item) for item in generated.get("missing_sections", []) if str(item).strip()],
-                    "section_reviews": [
+                normalized_section_reviews = _normalize_section_reviews(
+                    [
                         {
                             "section": str(item["section"]).strip(),
                             "score": max(0, int(item["score"])),
@@ -544,34 +649,68 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
                         }
                         for item in generated.get("section_reviews", [])
                         if str(item.get("section", "")).strip()
-                    ]
-                    or fallback["section_reviews"],
-                    "blocking_issues": _dedupe([str(item) for item in generated.get("blocking_issues", []) if str(item).strip()]),
+                    ],
+                    fallback["section_reviews"],
+                )
+                review_result = {
+                    "score": sum(item["score"] for item in normalized_section_reviews),
+                    "approved": bool(generated.get("approved", False)),
+                    "missing_sections": _dedupe(
+                        [str(item) for item in generated.get("missing_sections", []) if str(item).strip()]
+                    ),
+                    "section_reviews": normalized_section_reviews,
+                    "blocking_issues": _dedupe(
+                        [str(item) for item in generated.get("blocking_issues", []) if str(item).strip()]
+                    ),
                     "improvement_actions": _dedupe(
                         [str(item) for item in generated.get("improvement_actions", []) if str(item).strip()]
                     ),
                 }
-                if not review_result["blocking_issues"] and not review_result["approved"]:
-                    review_result["blocking_issues"] = fallback["blocking_issues"]
-                if not review_result["improvement_actions"] and not review_result["approved"]:
-                    review_result["improvement_actions"] = fallback["improvement_actions"]
                 review_result = _apply_process_drift_guardrails(
+                    plan_doc=state["plan_doc"],
                     review_result=review_result,
                     fallback_section_reviews=fallback["section_reviews"],
                 )
             except LLMError:
                 review_result = fallback
 
+        if review_round < MIN_REVIEW_ROUNDS:
+            enforced_actions = _dedupe([*review_result["improvement_actions"], MANDATORY_VERIFICATION_ACTION])
+            notes = "\n".join(
+                item
+                for item in [
+                    str(review_result.get("feedback", "")).strip(),
+                    f"Minimum review depth is {MIN_REVIEW_ROUNDS} rounds, so this plan still needs one more independent pass.",
+                ]
+                if item
+            ).strip()
+            review_result = {
+                **review_result,
+                "approved": False,
+                "improvement_actions": enforced_actions,
+                "feedback": notes,
+            }
+
+        score_decision = evaluate_score_decision(
+            PLAN_REVIEW_SCORE_POLICY,
+            round_index=review_round,
+            assessments=_to_score_assessments(review_result["section_reviews"]),
+            explicit_approval=bool(review_result["approved"]),
+            blocking_issues=review_result["blocking_issues"],
+            missing_sections=review_result["missing_sections"],
+            improvement_actions=review_result["improvement_actions"],
+            artifact_dir=artifact_dir,
+        )
         previous_score = int(state.get("score", 0)) if review_round > 1 else None
         prior_stagnated_rounds = int(state.get("loop_stagnated_rounds", 0)) if review_round > 1 else 0
         progress = evaluate_quality_loop(
             PLAN_REVIEW_SPEC,
             round_index=review_round,
-            score=review_result["score"],
-            approved=bool(review_result["approved"]),
-            missing_sections=review_result["missing_sections"],
-            blocking_issues=review_result["blocking_issues"],
-            improvement_actions=review_result["improvement_actions"],
+            score=score_decision.score,
+            approved=score_decision.approved,
+            missing_sections=score_decision.missing_sections,
+            blocking_issues=score_decision.blocking_issues,
+            improvement_actions=score_decision.improvement_actions,
             previous_score=previous_score,
             prior_stagnated_rounds=prior_stagnated_rounds,
         )
@@ -579,6 +718,9 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
             review_round=review_round,
             score=progress.score,
             approved=progress.approved,
+            confidence_label=score_decision.confidence_label,
+            confidence_reason=score_decision.confidence_reason,
+            confidence=score_decision.confidence,
             loop_status=progress.status,
             loop_reason=progress.reason,
             section_reviews=review_result["section_reviews"],
@@ -614,6 +756,9 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
             "review_loop_should_continue": progress.should_continue,
             "review_loop_completed": progress.completed,
             "review_loop_stagnated_rounds": progress.stagnated_rounds,
+            "review_score_confidence": score_decision.confidence,
+            "review_score_confidence_label": score_decision.confidence_label,
+            "review_score_confidence_reason": score_decision.confidence_reason,
             "summary": (
                 f"{metadata.name} approved review round {review_round} with score {progress.score}/100."
                 if progress.approved
