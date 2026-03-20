@@ -4,12 +4,14 @@
 Load this file when shaping a new workflow, refactoring a workflow into subgraphs, or checking whether the repo default loop-and-score pattern should apply.
 
 ## Primary Repo Examples
-- `Workflows/root-project-investigation-workflow/Workflow.md`
-- `Workflows/root-project-investigation-workflow/entry.py`
-- `Workflows/root-project-investigation-reviewer-workflow/Workflow.md`
-- `Workflows/root-project-investigation-reviewer-workflow/entry.py`
+- `Workflows/template-investigation-workflow/Workflow.md`
+- `Workflows/template-investigation-workflow/entry.py`
+- `Workflows/template-investigation-reviewer-workflow/Workflow.md`
+- `Workflows/template-investigation-reviewer-workflow/entry.py`
 - `core/quality_loop.py`
-- `tests/test_root_project_investigation_workflow.py`
+- `tests/test_template_investigation_workflow.py`
+
+Treat these two template workflows as the repository's canonical examples for workflow quality. New non-trivial parent/reviewer loops should inherit their discipline around reviewer isolation, blocker normalization, minimum review depth, and artifact-by-artifact verification.
 
 ## Decomposition Rules
 ### Keep One Workflow
@@ -50,6 +52,7 @@ Load this file when shaping a new workflow, refactoring a workflow into subgraph
 - Keep reviewer output in markdown, not JSON.
 - Filter process-only review asks if the workflow is supposed to judge technical quality rather than process hygiene.
 - Make final approval impossible before the minimum round count is satisfied.
+- When in doubt, copy the structure and rigor of `template-investigation-workflow` plus `template-investigation-reviewer-workflow` before inventing a lighter custom loop.
 
 Use the same core criteria unless the task genuinely needs different ones:
 - Focus

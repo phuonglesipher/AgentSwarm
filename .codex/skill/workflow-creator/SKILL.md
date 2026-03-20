@@ -8,6 +8,8 @@ description: Design or refactor AgentSwarm workflows for this repository. Use wh
 ## Overview
 Create workflows that fit this repo's architecture instead of treating every request as a brand-new graph. Decide whether to reuse an existing workflow, embed an internal reviewer subgraph, or add a new reusable child workflow, then wire a score-gated loop that keeps iterating until the work is technically strong enough.
 
+Treat `template-investigation-workflow` and `template-investigation-reviewer-workflow` as the repository's canonical workflow-quality templates. When you design or refactor another non-trivial workflow, match their standards for loop ownership, strict reviewer gating, blocker handling, minimum review depth, natural-language handoff, and regression-test expectations unless there is a clear reason to diverge.
+
 ## Start With Workflow Triage
 1. Inspect `Workflows/*/Workflow.md` and the relevant `entry.py` files before creating anything new.
 2. Reuse an existing workflow if its capability and state contract already fit with only light adaptation.
@@ -20,6 +22,7 @@ For non-trivial investigation, planning, design, or implementation-prep flows, d
 2. A strict reviewer workflow, usually `exposed: false`, wired as a subgraph with `context.get_workflow_graph(...)`.
 3. A score-based loop that returns to the parent work state until the reviewer score reaches the approval threshold.
 4. At least two review rounds so the second pass acts as an independent verification round.
+5. The same quality bar demonstrated by `template-investigation-workflow` and `template-investigation-reviewer-workflow`, including blocker-aware score normalization, clear improvement actions, and reviewer feedback that stays technical instead of drifting into process-only asks.
 
 ## Keep Prompts Natural
 Write prompts as natural-language instructions and pass only the few state fields the next step needs:

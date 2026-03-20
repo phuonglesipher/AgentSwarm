@@ -202,7 +202,7 @@ class CompareCodexCliVsAgentSwarmTests(unittest.TestCase):
             self.assertIn("### Review Round 2", report)
             self.assertIn("Direct final test changes present already: True", report)
 
-    def test_build_report_understands_root_project_investigation_artifacts(self) -> None:
+    def test_build_report_understands_template_investigation_artifacts(self) -> None:
         with tempfile.TemporaryDirectory(prefix="agentswarm-compare-root-investigation-") as temp_dir:
             temp_root = Path(temp_dir)
             source_root = temp_root / "source"
@@ -234,13 +234,13 @@ class CompareCodexCliVsAgentSwarmTests(unittest.TestCase):
                 / "20260319_120000"
                 / "tasks"
                 / "task-1-investigate-player-movement"
-                / "root-project-investigation-workflow"
+                / "template-investigation-workflow"
             )
             artifact_dir.mkdir(parents=True, exist_ok=True)
             (artifact_dir / "investigation_round_1.md").write_text(
                 "\n".join(
                     [
-                        "# Root Project Investigation",
+                        "# Template Investigation",
                         "",
                         "## Project Root Findings",
                         "- [docs/player_movement.md](C:/temp/docs/player_movement.md) defines the movement contract.",
@@ -273,7 +273,7 @@ class CompareCodexCliVsAgentSwarmTests(unittest.TestCase):
             (artifact_dir / "final_report.md").write_text(
                 "\n".join(
                     [
-                        "# Root Project Investigation Final Report",
+                        "# Template Investigation Final Report",
                         "",
                         "- Status: completed",
                         "- Loop Status: passed",
@@ -296,7 +296,7 @@ class CompareCodexCliVsAgentSwarmTests(unittest.TestCase):
                 agentswarm_stderr=temp_root / "agent.stderr.txt",
             )
 
-            self.assertIn("Artifact flavor: root-project-investigation", report)
+            self.assertIn("Artifact flavor: template-investigation", report)
             self.assertIn("Final workflow status: completed", report)
             self.assertIn("### Investigation Round 1", report)
             self.assertIn("Decision: APPROVE", report)

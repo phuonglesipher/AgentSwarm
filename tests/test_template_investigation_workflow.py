@@ -66,7 +66,7 @@ class LoopingInvestigationLLMClient:
             if self.investigation_calls == 1:
                 return "\n".join(
                     [
-                        "# Root Project Investigation",
+                        "# Template Investigation",
                         "",
                         "## Task Framing",
                         "- Request: investigate player movement regression.",
@@ -101,7 +101,7 @@ class LoopingInvestigationLLMClient:
                 raise AssertionError("Second investigation round should receive the previous review feedback.")
             return "\n".join(
                 [
-                    "# Root Project Investigation",
+                    "# Template Investigation",
                     "",
                     "## Task Framing",
                     "- Request: investigate player movement regression.",
@@ -231,7 +231,7 @@ class ProcessOnlyReviewLLMClient:
         if "Investigate the host project root like a senior engineer" in instructions:
             return "\n".join(
                 [
-                    "# Root Project Investigation",
+                    "# Template Investigation",
                     "",
                     "## Task Framing",
                     "- Request: investigate player movement regression.",
@@ -334,7 +334,7 @@ class NonePrefixedApprovalLLMClient:
         if "Investigate the host project root like a senior engineer" in instructions:
             return "\n".join(
                 [
-                    "# Root Project Investigation",
+                    "# Template Investigation",
                     "",
                     "## Task Framing",
                     "- Request: investigate player movement regression.",
@@ -423,7 +423,7 @@ class NonePrefixedApprovalLLMManager:
         return ["default", "reviewer"]
 
 
-class RootProjectInvestigationWorkflowTests(unittest.TestCase):
+class TemplateInvestigationWorkflowTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.project_root = Path(__file__).resolve().parents[1]
@@ -472,13 +472,13 @@ class RootProjectInvestigationWorkflowTests(unittest.TestCase):
             self._prepare_host_project(host_root)
             registry = self._load_registry(host_root, DisabledLLMManager())
 
-            workflow = registry.get("root-project-investigation-workflow").graph
-            reviewer_workflow = registry.get("root-project-investigation-reviewer-workflow").graph
+            workflow = registry.get("template-investigation-workflow").graph
+            reviewer_workflow = registry.get("template-investigation-reviewer-workflow").graph
 
             self.assertIsNotNone(workflow)
             self.assertIsNotNone(reviewer_workflow)
             subgraphs = dict(workflow.get_subgraphs())
-            self.assertIn("root-project-investigation-reviewer-workflow", subgraphs)
+            self.assertIn("template-investigation-reviewer-workflow", subgraphs)
 
     def test_workflow_loads_and_completes_without_llm(self) -> None:
         with tempfile.TemporaryDirectory(prefix="agentswarm-root-investigation-fallback-") as temp_dir:
@@ -486,7 +486,7 @@ class RootProjectInvestigationWorkflowTests(unittest.TestCase):
             self._prepare_host_project(host_root)
             registry = self._load_registry(host_root, DisabledLLMManager())
 
-            workflow = registry.get("root-project-investigation-workflow").graph
+            workflow = registry.get("template-investigation-workflow").graph
             self.assertIsNotNone(workflow)
 
             run_dir = host_root / ".agentswarm" / "runs" / "fallback"
@@ -516,7 +516,7 @@ class RootProjectInvestigationWorkflowTests(unittest.TestCase):
             self._prepare_host_project(host_root)
             registry = self._load_registry(host_root, LoopingInvestigationLLMManager())
 
-            workflow = registry.get("root-project-investigation-workflow").graph
+            workflow = registry.get("template-investigation-workflow").graph
             self.assertIsNotNone(workflow)
 
             run_dir = host_root / ".agentswarm" / "runs" / "loop"
@@ -546,7 +546,7 @@ class RootProjectInvestigationWorkflowTests(unittest.TestCase):
             self._prepare_host_project(host_root)
             registry = self._load_registry(host_root, ProcessOnlyReviewLLMManager())
 
-            workflow = registry.get("root-project-investigation-workflow").graph
+            workflow = registry.get("template-investigation-workflow").graph
             self.assertIsNotNone(workflow)
 
             run_dir = host_root / ".agentswarm" / "runs" / "process-only"
@@ -573,7 +573,7 @@ class RootProjectInvestigationWorkflowTests(unittest.TestCase):
             self._prepare_host_project(host_root)
             registry = self._load_registry(host_root, NonePrefixedApprovalLLMManager())
 
-            workflow = registry.get("root-project-investigation-workflow").graph
+            workflow = registry.get("template-investigation-workflow").graph
             self.assertIsNotNone(workflow)
 
             run_dir = host_root / ".agentswarm" / "runs" / "none-prefixed"

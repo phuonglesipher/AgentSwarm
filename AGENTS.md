@@ -28,6 +28,7 @@
 
 ## Workflow Architecture Defaults
 - When adding or refactoring a workflow, inspect `Workflows/*/Workflow.md` first and reuse an existing workflow or internal subgraph before creating a new one.
+- Treat `template-investigation-workflow` and `template-investigation-reviewer-workflow` as the canonical quality templates for strict parent-plus-reviewer workflow design.
 - Prefer a parent workflow plus internal subgraphs when a capability is reusable or when the reviewer logic should evolve independently. Wire reusable child graphs with `context.get_workflow_graph(...)`.
 - Keep internal reviewer or support workflows `exposed: false` unless they are intended for direct user routing.
 - For non-trivial investigation, planning, design, or implementation-prep flows, default to a strict loop: work state -> reviewer workflow -> score and approval gate -> iterate until the work reaches the threshold or the loop stops.

@@ -215,7 +215,7 @@ def detect_artifact_flavor(artifact_dir: Path) -> str:
     if any(artifact_dir.glob("engineer_investigation_round_*.md")):
         return "gameplay-engineer"
     if any(artifact_dir.glob("investigation_round_*.md")):
-        return "root-project-investigation"
+        return "template-investigation"
     return "unknown"
 
 
@@ -227,7 +227,7 @@ def collect_investigation_round_docs(artifact_dir: Path) -> tuple[str, list[Path
             sorted(artifact_dir.glob("engineer_investigation_round_*.md"), key=parse_round_number),
             {parse_round_number(path): path for path in artifact_dir.glob("investigation_review_round_*.md")},
         )
-    if flavor == "root-project-investigation":
+    if flavor == "template-investigation":
         return (
             flavor,
             sorted(artifact_dir.glob("investigation_round_*.md"), key=parse_round_number),

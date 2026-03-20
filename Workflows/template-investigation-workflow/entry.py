@@ -48,7 +48,7 @@ TEXT_SUFFIXES = {
     ".yml",
 }
 LOOP_SPEC = QualityLoopSpec(
-    loop_id="root-project-investigation-review",
+    loop_id="template-investigation-review",
     threshold=APPROVAL_SCORE,
     max_rounds=MAX_REVIEW_ROUNDS,
     min_rounds=MIN_REVIEW_ROUNDS,
@@ -740,7 +740,7 @@ def _fallback_investigation_doc(
         previous_investigation=previous_investigation,
     )
     lines = [
-        "# Root Project Investigation",
+        "# Template Investigation",
         "",
         "## Task Framing",
         f"- Round: {investigation_round}",
@@ -789,7 +789,7 @@ def _fallback_investigation_doc(
 
 def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
     graph_name = metadata.name
-    reviewer_graph = context.get_workflow_graph("root-project-investigation-reviewer-workflow")
+    reviewer_graph = context.get_workflow_graph("template-investigation-reviewer-workflow")
 
     def investigate(state: InvestigationLoopState) -> dict[str, Any]:
         investigation_round = int(state.get("investigation_round", 0)) + 1
@@ -820,7 +820,7 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
                 )
                 investigation_doc = investigator_llm.generate_text(
                     instructions=(
-                        "You are root-project-investigation-workflow. Investigate the host project root like a senior engineer "
+                        "You are template-investigation-workflow. Investigate the host project root like a senior engineer "
                         "trying to converge on the most credible root cause and owner. Write a markdown investigation brief using "
                         "this exact section order: Task Framing, Project Root Findings, Candidate Ownership, Root Cause Hypothesis, "
                         "Architecture Notes, Clean Code Notes, Optimization Notes, Verification Plan, Open Questions. "
@@ -907,7 +907,7 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
         (artifact_path / "final_report.md").write_text(
             "\n".join(
                 [
-                    "# Root Project Investigation Final Report",
+                    "# Template Investigation Final Report",
                     "",
                     f"- Status: {final_status}",
                     f"- Review Score: {state['review_score']}/100",
@@ -942,15 +942,15 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
         "request_review",
         trace_graph_node(graph_name=graph_name, node_name="request_review", node_fn=request_review),
     )
-    graph.add_node("root-project-investigation-reviewer-workflow", reviewer_graph)
+    graph.add_node("template-investigation-reviewer-workflow", reviewer_graph)
     graph.add_node(
         "capture_review_result",
         trace_graph_node(graph_name=graph_name, node_name="capture_review_result", node_fn=capture_review_result),
     )
     graph.add_edge(START, "investigate")
     graph.add_edge("investigate", "request_review")
-    graph.add_edge("request_review", "root-project-investigation-reviewer-workflow")
-    graph.add_edge("root-project-investigation-reviewer-workflow", "capture_review_result")
+    graph.add_edge("request_review", "template-investigation-reviewer-workflow")
+    graph.add_edge("template-investigation-reviewer-workflow", "capture_review_result")
     graph.add_conditional_edges(
         "capture_review_result",
         trace_route_decision(graph_name=graph_name, router_name="review_gate", route_fn=review_gate),
