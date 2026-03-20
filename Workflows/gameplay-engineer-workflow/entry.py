@@ -16,6 +16,7 @@ from typing_extensions import NotRequired, TypedDict
 from core.graph_logging import trace_graph_node, trace_route_decision
 from core.llm import LLMError
 from core.models import WorkflowContext, WorkflowMetadata
+from core.natural_language_prompts import build_prompt_brief
 from core.quality_loop import QualityLoopSpec, evaluate_quality_loop
 from core.text_utils import keyword_tokens, normalize_text, slugify, tokenize
 
@@ -624,7 +625,11 @@ def _classify_task(context: WorkflowContext, task_prompt: str) -> tuple[str, str
                     "Classify a gameplay-engineering request. Return one of: bugfix, feature, maintenance, or non_gameplay. "
                     "Use non_gameplay only when the task is clearly outside gameplay ownership."
                 ),
-                input_text=f"Prompt:\n{task_prompt}",
+                input_text=build_prompt_brief(
+                    opening="Decide how this gameplay-engineering request should be classified.",
+                    sections=[("Request", task_prompt.strip())],
+                    closing="Choose the track that best matches the real gameplay ownership and user intent.",
+                ),
                 schema_name="gameplay_task_classification",
                 schema=schema,
             )
@@ -693,14 +698,26 @@ def _prepare_investigation_strategy_payload(
         try:
             result = context.llm.generate_json(
                 instructions=(
-                    "Plan the next gameplay investigation round. Return focused search terms, avoid terms, search notes, and the current "
-                    "implementation-medium hypothesis as JSON only."
+                    "Plan the next gameplay investigation round. Propose the next focus terms, avoid terms, search notes, and the current "
+                    "implementation-medium hypothesis."
                 ),
-                input_text=(
-                    f"Task prompt:\n{task_prompt}\n\n"
-                    f"Task type: {state.get('task_type', 'bugfix')}\n"
-                    f"Investigation round: {int(state.get('investigation_round', 0)) + 1}\n\n"
-                    f"{previous_learning}\n"
+                input_text=build_prompt_brief(
+                    opening="Plan the next grounded gameplay investigation pass.",
+                    sections=[
+                        ("Task request", task_prompt.strip()),
+                        (
+                            "Current round",
+                            (
+                                f"This is investigation round {int(state.get('investigation_round', 0)) + 1} "
+                                f"for a {state.get('task_type', 'bugfix')} task."
+                            ),
+                        ),
+                        ("What survived from the previous pass", previous_learning),
+                    ],
+                    closing=(
+                        "Tighten the next pass around the live runtime owner, the clearest causal hypothesis, "
+                        "and the most concrete validation path."
+                    ),
                 ),
                 schema_name="gameplay_investigation_strategy",
                 schema=schema,
@@ -764,7 +781,6 @@ def _collect_engineering_context(context: WorkflowContext, state: EngineerState)
         "blueprint_context": "",
         "implementation_medium": "",
         "implementation_medium_reason": str(state.get("implementation_medium_reason", "")),
-        "bug_context_doc": "",
     }
     llm_source_hits_raw: list[str] = []
     llm_current_runtime_paths_raw: list[str] = []
@@ -775,7 +791,6 @@ def _collect_engineering_context(context: WorkflowContext, state: EngineerState)
             "properties": {
                 "doc_hits": {"type": "array", "items": {"type": "string"}},
                 "doc_context": {"type": "string"},
-                "config_hits": {"type": "array", "items": {"type": "string"}},
                 "source_hits": {"type": "array", "items": {"type": "string"}},
                 "test_hits": {"type": "array", "items": {"type": "string"}},
                 "blueprint_hits": {"type": "array", "items": {"type": "string"}},
@@ -789,12 +804,10 @@ def _collect_engineering_context(context: WorkflowContext, state: EngineerState)
                 "blueprint_context": {"type": "string"},
                 "implementation_medium": {"type": "string"},
                 "implementation_medium_reason": {"type": "string"},
-                "bug_context_doc": {"type": "string"},
             },
             "required": [
                 "doc_hits",
                 "doc_context",
-                "config_hits",
                 "source_hits",
                 "test_hits",
                 "blueprint_hits",
@@ -808,7 +821,6 @@ def _collect_engineering_context(context: WorkflowContext, state: EngineerState)
                 "blueprint_context",
                 "implementation_medium",
                 "implementation_medium_reason",
-                "bug_context_doc",
             ],
             "additionalProperties": False,
         }
@@ -818,15 +830,31 @@ def _collect_engineering_context(context: WorkflowContext, state: EngineerState)
                     "Inspect the grounded gameplay context and return the best current ownership summary, runtime paths, test paths, and "
                     "implementation-medium hypothesis as JSON. Prefer current runtime ownership over legacy notes."
                 ),
-                input_text=(
-                    f"Task prompt:\n{state['task_prompt']}\n\n"
-                    f"Focus terms:\n{_format_bullets(list(state.get('investigation_focus_terms', [])))}\n\n"
-                    f"Avoid terms:\n{_format_bullets(list(state.get('investigation_avoid_terms', [])))}\n\n"
-                    f"Suggested doc hits:\n{_format_bullets(local_doc_hits)}\n\n"
-                    f"Suggested source hits:\n{_format_bullets(local_source_hits)}\n\n"
-                    f"Suggested test hits:\n{_format_bullets(local_test_hits)}\n\n"
-                    f"Suggested blueprint hits:\n{_format_bullets(local_blueprint_hits)}\n\n"
-                    f"Suggested blueprint text hits:\n{_format_bullets(local_blueprint_text_hits)}\n"
+                input_text=build_prompt_brief(
+                    opening="Review the grounded gameplay evidence and identify the live owner of the work.",
+                    sections=[
+                        ("Task request", state["task_prompt"].strip()),
+                        (
+                            "Current investigation focus",
+                            _format_bullets(list(state.get("investigation_focus_terms", []))),
+                        ),
+                        (
+                            "Evidence to ignore or de-prioritize",
+                            _format_bullets(list(state.get("investigation_avoid_terms", []))),
+                        ),
+                        ("Suggested design references", _format_bullets(local_doc_hits)),
+                        ("Suggested runtime code paths", _format_bullets(local_source_hits)),
+                        ("Suggested validation paths", _format_bullets(local_test_hits)),
+                        ("Suggested Blueprint assets", _format_bullets(local_blueprint_hits)),
+                        (
+                            "Suggested Blueprint text mirrors",
+                            _format_bullets(local_blueprint_text_hits),
+                        ),
+                    ],
+                    closing=(
+                        "Prefer the current runtime owner over archival or speculative references, "
+                        "and keep the ownership story tight enough for implementation."
+                    ),
                 ),
                 schema_name="gameplay_engineering_context",
                 schema=schema,
@@ -1705,17 +1733,57 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
                 "additionalProperties": False,
             }
             try:
+                source_path = scope_root / state["workspace_source_file"]
+                test_path = scope_root / state["workspace_test_file"]
+                current_source_code = _safe_read_text(source_path, limit=6000)
+                current_test_code = _safe_read_text(test_path, limit=6000)
                 generated = codegen_llm.generate_json(
                     instructions=(
-                        "Generate a gameplay code bundle. Return JSON with source_code, test_code, and implementation_notes only."
+                        "Generate a gameplay code bundle. Edit the provided workspace source and test files instead of rewriting blindly. "
+                        "Preserve unrelated behavior, keep the change scoped to the grounded owner, and respond directly to any prior self-test failures."
                     ),
-                    input_text=(
-                        f"Task prompt:\n{state['task_prompt']}\n\n"
-                        f"Task type: {state['task_type']}\n"
-                        f"Workspace source file: {state['workspace_source_file']}\n"
-                        f"Workspace test file: {state['workspace_test_file']}\n\n"
-                        f"Plan document:\n{state.get('plan_doc', '')}\n\n"
-                        f"Bug context:\n{state.get('bug_context_doc', '')}\n"
+                    input_text=build_prompt_brief(
+                        opening="Prepare the next gameplay code-and-tests bundle for this grounded owner path.",
+                        sections=[
+                            ("Task request", state["task_prompt"].strip()),
+                            (
+                                "Implementation frame",
+                                "\n".join(
+                                    [
+                                        f"- Task type: {state['task_type']}",
+                                        f"- Execution track: {state['execution_track']}",
+                                        f"- Workspace source file: {state['workspace_source_file']}",
+                                        f"- Workspace test file: {state['workspace_test_file']}",
+                                    ]
+                                ),
+                            ),
+                            (
+                                "Grounded runtime owner",
+                                _format_bullets(list(state.get("current_runtime_paths", []))),
+                            ),
+                            (
+                                "Grounded validation paths",
+                                _format_bullets(list(state.get("test_hits", []))),
+                            ),
+                            ("Investigation summary", state.get("investigation_doc", "").strip() or "None."),
+                            ("Review feedback", state.get("review_feedback", "").strip() or "None."),
+                            ("Plan document", state.get("plan_doc", "").strip() or "None."),
+                            ("Design context", state.get("design_doc", "").strip() or "None."),
+                            ("Bug context", state.get("bug_context_doc", "").strip() or "None."),
+                            (
+                                "Previous self-test output",
+                                state.get("self_test_output", "").strip() or "None. This is the first code attempt.",
+                            ),
+                            (
+                                "Current source file contents",
+                                current_source_code or "File is empty or missing.",
+                            ),
+                            (
+                                "Current test file contents",
+                                current_test_code or "File is empty or missing.",
+                            ),
+                        ],
+                        closing="Keep the change narrow, preserve adjacent gameplay behavior, and make the tests prove the intended player-visible outcome.",
                     ),
                     schema_name="gameplay_code_bundle",
                     schema=schema,

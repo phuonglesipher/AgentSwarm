@@ -106,6 +106,45 @@ class CodexCliLLMClientTests(unittest.TestCase):
         self.assertEqual(result, "sandbox override works")
         self.assertEqual(captured[0][captured[0].index("--sandbox") + 1], "workspace-write")
 
+    def test_generate_json_uses_natural_language_prompt_wrapper(self) -> None:
+        client = CodexCliLLMClient(
+            CodexCLIConfig(
+                command="codex",
+                model="gpt-5.3-codex",
+                timeout_seconds=30,
+            )
+        )
+        resolved_command = r"C:\Users\phuong.le\AppData\Roaming\npm\codex.cmd"
+        captured: dict[str, object] = {}
+
+        def fake_run(command: list[str], **kwargs) -> subprocess.CompletedProcess[str]:
+            captured["command"] = command
+            captured["input"] = kwargs["input"]
+            output_path = Path(command[command.index("-o") + 1])
+            output_path.write_text('{"value":"ok"}', encoding="utf-8")
+            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+        with mock.patch("core.llm.shutil.which", return_value=resolved_command):
+            with mock.patch("core.llm.subprocess.run", side_effect=fake_run):
+                result = client.generate_json(
+                    instructions="Classify the gameplay request and keep the response concise.",
+                    input_text="The player cannot move after spawning.",
+                    schema_name="tiny",
+                    schema={
+                        "type": "object",
+                        "properties": {"value": {"type": "string"}},
+                        "required": ["value"],
+                        "additionalProperties": False,
+                    },
+                )
+
+        self.assertEqual(result, {"value": "ok"})
+        prompt = str(captured["input"])
+        self.assertNotIn("System instructions:", prompt)
+        self.assertNotIn("Task input:", prompt)
+        self.assertIn("Here is the current working context:", prompt)
+        self.assertIn("configured structured output channel", prompt)
+
 
 if __name__ == "__main__":
     unittest.main()

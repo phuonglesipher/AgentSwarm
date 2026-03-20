@@ -11,6 +11,8 @@ import tempfile
 from typing import Any
 from urllib import error, request
 
+from core.natural_language_prompts import build_llm_request
+
 
 class LLMError(RuntimeError):
     """Raised when an LLM backend fails or returns unusable output."""
@@ -285,23 +287,11 @@ class CodexCliLLMClient(LLMClient):
 
 
 def _merge_prompt(*, instructions: str, input_text: str, require_json: bool) -> str:
-    sections = [
-        "System instructions:",
-        instructions.strip(),
-        "",
-        "Task input:",
-        input_text.strip(),
-    ]
-    if require_json:
-        sections.extend(
-            [
-                "",
-                "Output requirements:",
-                "- Return only a JSON object matching the provided schema.",
-                "- Do not include markdown fences or explanatory text.",
-            ]
-        )
-    return "\n".join(sections).strip()
+    return build_llm_request(
+        instructions=instructions,
+        input_text=input_text,
+        require_structured_output=require_json,
+    )
 
 
 def _parse_json_object(value: str) -> dict[str, Any]:

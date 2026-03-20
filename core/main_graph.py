@@ -12,6 +12,7 @@ from typing_extensions import TypedDict
 from core.graph_ids import to_graph_node_name
 from core.graph_logging import trace_graph_node, trace_route_decision
 from core.llm import LLMError, LLMManager
+from core.natural_language_prompts import build_prompt_brief
 from core.registry import WorkflowRegistry
 from core.text_utils import normalize_text, slugify
 
@@ -126,7 +127,17 @@ def _llm_plan_tasks(llm, prompt: str, workspace_context: str = "") -> list[str]:
             "Return concise task descriptions that can each be routed to one workflow. "
             "Operate on the host project, not on the AgentSwarm engine internals, unless the user explicitly asks to modify AgentSwarm."
         ),
-        input_text=f"{workspace_context}User prompt:\n{prompt}",
+        input_text=build_prompt_brief(
+            opening="Break the user's request into a small set of workflow-owned implementation tasks.",
+            sections=[
+                (
+                    "Workspace context",
+                    workspace_context.strip() or "The runtime did not provide explicit host or engine paths.",
+                ),
+                ("User request", prompt.strip()),
+            ],
+            closing="Keep each task scoped so one workflow can own it cleanly from investigation through delivery.",
+        ),
         schema_name="main_graph_task_plan",
         schema=schema,
     )
@@ -184,7 +195,18 @@ def _llm_route_tasks(
             "Use each workflow's description and capabilities, and assign every task to exactly one workflow. "
             "Default to workflows that operate on the host project."
         ),
-        input_text=f"{workspace_context}Available workflows:\n{candidate_descriptions}\n\nTasks:\n{task_block}",
+        input_text=build_prompt_brief(
+            opening="Choose the best workflow for each requested task.",
+            sections=[
+                (
+                    "Workspace context",
+                    workspace_context.strip() or "The runtime did not provide explicit host or engine paths.",
+                ),
+                ("Available workflows", candidate_descriptions),
+                ("Tasks to route", task_block),
+            ],
+            closing="Assign every task to exactly one workflow and prefer host-project workflows unless the request explicitly targets AgentSwarm itself.",
+        ),
         schema_name="main_graph_routes",
         schema=schema,
     )

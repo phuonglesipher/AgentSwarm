@@ -11,6 +11,7 @@ from typing_extensions import NotRequired, TypedDict
 from core.graph_logging import trace_graph_node
 from core.llm import LLMError
 from core.models import WorkflowContext, WorkflowMetadata
+from core.natural_language_prompts import build_prompt_brief
 from core.quality_loop import QualityLoopSpec, evaluate_quality_loop
 from core.text_utils import normalize_text, slugify
 
@@ -365,12 +366,34 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
                         "Risks, Acceptance Criteria. Return structured JSON only. Approval requires a score >= 90, no blocking issues, and "
                         "no missing required sections. Focus on technical clarity, owner paths, regression coverage, and player-visible acceptance."
                     ),
-                    input_text=(
-                        f"Task prompt:\n{state['task_prompt']}\n\n"
-                        f"Task type: {task_type}\n"
-                        f"Execution track: {state.get('execution_track', task_type)}\n"
-                        f"Review round: {review_round}\n\n"
-                        f"Plan document:\n{state['plan_doc']}\n"
+                    input_text=build_prompt_brief(
+                        opening="Review the current gameplay implementation plan as a strict senior gameplay engineer.",
+                        sections=[
+                            ("Task request", state["task_prompt"].strip()),
+                            (
+                                "Review context",
+                                "\n".join(
+                                    [
+                                        f"- Task type: {task_type}",
+                                        f"- Execution track: {state.get('execution_track', task_type)}",
+                                        f"- Review round: {review_round}",
+                                    ]
+                                ),
+                            ),
+                            (
+                                "Hard blocker and scoring rules",
+                                "\n".join(
+                                    [
+                                        "- [hard blocker] Player Outcome: the plan must name the player-visible result and scope boundary.",
+                                        "- [hard blocker] Current Behavior Evidence: the plan must cite grounded docs, runtime paths, and the owner.",
+                                        "- [hard blocker] Speculation Control: implementation steps must stay anchored on current ownership.",
+                                        "- [hard blocker] Edge and Regression Coverage: tests and acceptance criteria must protect adjacent gameplay paths.",
+                                    ]
+                                ),
+                            ),
+                            ("Plan document", state["plan_doc"].strip()),
+                        ],
+                        closing="Score it hard, keep the feedback technical, and require another independent verification pass before final approval can stick.",
                     ),
                     schema_name="gameplay_plan_review",
                     schema=schema,
