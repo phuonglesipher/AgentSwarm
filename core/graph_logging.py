@@ -188,6 +188,33 @@ def _ensure_markdown_header(path: Path, title: str) -> None:
     path.write_text(f"# {title}\n\n", encoding="utf-8")
 
 
+def _write_llm_trace_entry(
+    *,
+    active_context: _ActiveTraceContext,
+    event_id: int | None,
+    entry_kind: str,
+    metadata_lines: list[str],
+    sections: list[tuple[str, str]],
+) -> None:
+    trace_path = active_context.run_dir / LLM_PROMPT_TRACE_FILE
+    with _TRACE_LOCK:
+        _ensure_markdown_header(trace_path, "LLM Prompt Trace")
+        with trace_path.open("a", encoding="utf-8") as handle:
+            handle.write(f"## {entry_kind} Event {event_id or '?'} | {datetime.now().isoformat(timespec='seconds')}\n\n")
+            handle.write(f"- Graph node: `{active_context.graph_name}.{active_context.node_name}`\n")
+            if active_context.state_context:
+                handle.write(f"- Context: `{active_context.state_context}`\n")
+            for line in metadata_lines:
+                handle.write(f"- {line}\n")
+            handle.write("\n")
+            for title, body in sections:
+                handle.write(f"### {title}\n")
+                handle.write("```text\n")
+                rendered_body = _clip_multiline_text(str(body))
+                handle.write(rendered_body + "\n" if rendered_body else "(empty)\n")
+                handle.write("```\n\n")
+
+
 def _append_timeline_entry(
     *,
     run_dir: Path,
@@ -346,10 +373,10 @@ def log_llm_prompt_event(
     require_structured_output: bool,
     schema_name: str | None = None,
     effort: str | None = None,
-) -> None:
+) -> int | None:
     active_context = _get_active_trace_context()
     if active_context is None:
-        return
+        return None
 
     payload = {
         "client": client_label,
@@ -395,36 +422,124 @@ def log_llm_prompt_event(
         run_dir_override=active_context.run_dir,
         state_context_override=active_context.state_context,
     )
+    metadata_lines = [
+        f"Client: `{client_label}`",
+        f"Transport: `{transport}`",
+        f"Mode: `{'json' if require_structured_output else 'text'}`",
+    ]
+    if schema_name:
+        metadata_lines.append(f"Schema: `{schema_name}`")
+    if effort:
+        metadata_lines.append(f"Effort: `{effort}`")
+    metadata_lines.extend(
+        [
+            f"Instructions chars: `{len(instructions.strip())}`",
+            f"Input chars: `{len(input_text.strip())}`",
+            f"Final prompt chars: `{len(final_prompt.strip())}`",
+        ]
+    )
+    _write_llm_trace_entry(
+        active_context=active_context,
+        event_id=event_id,
+        entry_kind="Prompt",
+        metadata_lines=metadata_lines,
+        sections=[
+            ("Instructions", instructions),
+            ("Input Text", input_text),
+            ("Final Prompt", final_prompt),
+        ],
+    )
+    return event_id
 
-    prompt_path = active_context.run_dir / LLM_PROMPT_TRACE_FILE
-    with _TRACE_LOCK:
-        _ensure_markdown_header(prompt_path, "LLM Prompt Trace")
-        with prompt_path.open("a", encoding="utf-8") as handle:
-            header = f"## Event {event_id or '?'} | {datetime.now().isoformat(timespec='seconds')}"
-            handle.write(header + "\n\n")
-            handle.write(f"- Graph node: `{active_context.graph_name}.{active_context.node_name}`\n")
-            if active_context.state_context:
-                handle.write(f"- Context: `{active_context.state_context}`\n")
-            handle.write(f"- Client: `{client_label}`\n")
-            handle.write(f"- Transport: `{transport}`\n")
-            handle.write(f"- Mode: `{'json' if require_structured_output else 'text'}`\n")
-            if schema_name:
-                handle.write(f"- Schema: `{schema_name}`\n")
-            if effort:
-                handle.write(f"- Effort: `{effort}`\n")
-            handle.write(f"- Instructions chars: `{len(instructions.strip())}`\n")
-            handle.write(f"- Input chars: `{len(input_text.strip())}`\n")
-            handle.write(f"- Final prompt chars: `{len(final_prompt.strip())}`\n\n")
-            for title, body in (
-                ("Instructions", instructions),
-                ("Input Text", input_text),
-                ("Final Prompt", final_prompt),
-            ):
-                handle.write(f"### {title}\n")
-                handle.write("```text\n")
-                rendered_body = _clip_multiline_text(body)
-                handle.write(rendered_body + "\n" if rendered_body else "(empty)\n")
-                handle.write("```\n\n")
+
+def log_llm_response_event(
+    *,
+    client_label: str,
+    transport: str,
+    require_structured_output: bool,
+    response_text: str,
+    elapsed_ms: float | None,
+    schema_name: str | None = None,
+    request_event_id: int | None = None,
+    error: str | None = None,
+) -> int | None:
+    active_context = _get_active_trace_context()
+    if active_context is None:
+        return None
+
+    clean_response = response_text.strip()
+    clean_error = str(error).strip() if error else ""
+    status = "error" if clean_error else "ok"
+    payload = {
+        "client": client_label,
+        "transport": transport,
+        "require_structured_output": require_structured_output,
+        "schema_name": schema_name or "",
+        "request_event_id": request_event_id,
+        "status": status,
+        "elapsed_ms": elapsed_ms,
+        "response_chars": len(clean_response),
+        "response_text": clean_response,
+        "error": clean_error,
+    }
+    details = [
+        f"client={client_label}",
+        f"transport={transport}",
+        f"mode={'json' if require_structured_output else 'text'}",
+        f"status={status}",
+    ]
+    if schema_name:
+        details.append(f"schema={schema_name}")
+    if request_event_id is not None:
+        details.append(f"request={request_event_id}")
+    if elapsed_ms is not None:
+        details.append(f"elapsed_ms={elapsed_ms}")
+    event_id = _write_debug_trace_record(
+        state=None,
+        graph_name=active_context.graph_name,
+        node_name=active_context.node_name,
+        phase="RESPONSE",
+        payload_label="response",
+        payload=payload,
+        message=" ".join(details),
+        run_dir_override=active_context.run_dir,
+        state_context_override=active_context.state_context,
+    )
+    if event_id is not None:
+        details.append(f"details={LLM_PROMPT_TRACE_FILE}#{event_id}")
+    log_graph_event(
+        state=None,
+        graph_name=active_context.graph_name,
+        node_name=active_context.node_name,
+        phase="RESPONSE",
+        message=" ".join(details),
+        run_dir_override=active_context.run_dir,
+        state_context_override=active_context.state_context,
+    )
+    metadata_lines = [
+        f"Client: `{client_label}`",
+        f"Transport: `{transport}`",
+        f"Mode: `{'json' if require_structured_output else 'text'}`",
+        f"Status: `{status}`",
+    ]
+    if schema_name:
+        metadata_lines.append(f"Schema: `{schema_name}`")
+    if request_event_id is not None:
+        metadata_lines.append(f"Request event: `{request_event_id}`")
+    if elapsed_ms is not None:
+        metadata_lines.append(f"Elapsed ms: `{elapsed_ms}`")
+    metadata_lines.append(f"Response chars: `{len(clean_response)}`")
+    sections = [("Model Response", clean_response)]
+    if clean_error:
+        sections.append(("Error", clean_error))
+    _write_llm_trace_entry(
+        active_context=active_context,
+        event_id=event_id,
+        entry_kind="Response",
+        metadata_lines=metadata_lines,
+        sections=sections,
+    )
+    return event_id
 
 
 def trace_graph_node(

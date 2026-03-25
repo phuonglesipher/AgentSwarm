@@ -93,7 +93,7 @@ def main() -> None:
     print(f"\nArtifacts: {run_dir}")
     print(f"Traversal log: {run_dir / GRAPH_TRACE_FILE}")
     print(f"Timeline log: {run_dir / GRAPH_TIMELINE_FILE}")
-    print(f"Prompt trace: {run_dir / LLM_PROMPT_TRACE_FILE}")
+    print(f"LLM trace: {run_dir / LLM_PROMPT_TRACE_FILE}")
 
 
 if __name__ == "__main__":

@@ -15,7 +15,7 @@ from core.host_setup import initialize_host_project
 from core.runtime_paths import resolve_runtime_paths
 from core.tool_loader import load_tools
 from core.workflow_loader import load_workflows
-from core.graph_logging import GRAPH_DEBUG_TRACE_FILE, GRAPH_TIMELINE_FILE
+from core.graph_logging import GRAPH_DEBUG_TRACE_FILE, GRAPH_TIMELINE_FILE, LLM_PROMPT_TRACE_FILE
 from core.main_graph import build_initial_state, build_main_graph, build_runtime_config
 
 
@@ -2532,6 +2532,12 @@ class WorkflowDrivenRuntimeTests(unittest.TestCase):
             self.assertIn("[hard blocker]", planner_manager.reviewer_client.review_inputs[0])
             self.assertIn("Planning round: 2", planner_manager.reviewer_client.review_inputs[1])
             self.assertIn("Planning round: 3", planner_manager.reviewer_client.review_inputs[2])
+            llm_trace = (run_dir / LLM_PROMPT_TRACE_FILE).read_text(encoding="utf-8")
+            self.assertIn("# LLM Prompt Trace", llm_trace)
+            self.assertIn("### Final Prompt", llm_trace)
+            self.assertIn("### Model Response", llm_trace)
+            self.assertIn("src/traversal_runtime.py", llm_trace)
+            self.assertIn("Round 3 is specific, grounded, and safe enough to approve.", llm_trace)
 
     def test_main_graph_runs_end_to_end_without_llm(self) -> None:
         graph = build_main_graph(registry=self.registry, llm_manager=self.llm_manager)

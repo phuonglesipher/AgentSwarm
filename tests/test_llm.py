@@ -7,7 +7,7 @@ import unittest
 from unittest import mock
 
 from core.graph_logging import GRAPH_TIMELINE_FILE, LLM_PROMPT_TRACE_FILE, bind_active_trace_context
-from core.llm import CodexCLIConfig, CodexCliLLMClient
+from core.llm import CodexCLIConfig, CodexCliLLMClient, ensure_traced_llm_client
 
 
 class CodexCliLLMClientTests(unittest.TestCase):
@@ -196,14 +196,73 @@ class CodexCliLLMClientTests(unittest.TestCase):
             self.assertIn("### Instructions", prompt_trace)
             self.assertIn("### Input Text", prompt_trace)
             self.assertIn("### Final Prompt", prompt_trace)
+            self.assertIn("### Model Response", prompt_trace)
             self.assertIn("Classify the gameplay request and keep the response concise.", prompt_trace)
             self.assertIn("The player cannot move after spawning.", prompt_trace)
+            self.assertIn('{"value":"ok"}', prompt_trace)
 
             timeline_trace = (run_dir / GRAPH_TIMELINE_FILE).read_text(encoding="utf-8")
             self.assertIn("# Graph Timeline", timeline_trace)
             self.assertIn("`main_graph.route_tasks`", timeline_trace)
             self.assertIn("`PROMPT`", timeline_trace)
+            self.assertIn("`RESPONSE`", timeline_trace)
             self.assertIn(f"details={LLM_PROMPT_TRACE_FILE}#", timeline_trace)
+
+    def test_wrapped_fake_client_writes_prompt_and_response_trace_when_graph_context_is_bound(self) -> None:
+        class FakeClient:
+            def is_enabled(self) -> bool:
+                return True
+
+            def describe(self) -> str:
+                return "wrapped fake client"
+
+            def generate_text(self, *, instructions: str, input_text: str, effort: str | None = None) -> str:
+                raise AssertionError("This test should exercise generate_json only")
+
+            def generate_json(
+                self,
+                *,
+                instructions: str,
+                input_text: str,
+                schema_name: str,
+                schema: dict,
+                effort: str | None = None,
+            ) -> dict:
+                del instructions, input_text, schema_name, schema, effort
+                return {"value": "wrapped"}
+
+        with tempfile.TemporaryDirectory(prefix="codex-llm-wrapped-trace-") as temp_dir:
+            run_dir = Path(temp_dir) / "run"
+            run_dir.mkdir(parents=True, exist_ok=True)
+            state = {
+                "run_dir": str(run_dir),
+                "task_id": "task-2",
+            }
+
+            with bind_active_trace_context(state=state, graph_name="workflow_graph", node_name="review"):
+                result = ensure_traced_llm_client(FakeClient()).generate_json(
+                    instructions="Return a tiny structured review summary.",
+                    input_text="Review the movement recovery request.",
+                    schema_name="tiny",
+                    schema={
+                        "type": "object",
+                        "properties": {"value": {"type": "string"}},
+                        "required": ["value"],
+                        "additionalProperties": False,
+                    },
+                )
+            prompt_trace = (run_dir / LLM_PROMPT_TRACE_FILE).read_text(encoding="utf-8")
+            timeline_trace = (run_dir / GRAPH_TIMELINE_FILE).read_text(encoding="utf-8")
+
+        self.assertEqual(result, {"value": "wrapped"})
+        self.assertIn("wrapped fake client", prompt_trace)
+        self.assertIn("### Final Prompt", prompt_trace)
+        self.assertIn("### Model Response", prompt_trace)
+        self.assertIn('"value": "wrapped"', prompt_trace)
+
+        self.assertIn("`workflow_graph.review`", timeline_trace)
+        self.assertIn("`PROMPT`", timeline_trace)
+        self.assertIn("`RESPONSE`", timeline_trace)
 
 
 if __name__ == "__main__":

@@ -7,7 +7,7 @@ from typing import Any
 
 from core.config_loader import load_agentswarm_config, load_project_manifest
 from core.front_matter import parse_markdown_front_matter
-from core.llm import LLMManager
+from core.llm import LLMManager, ensure_traced_llm_client
 from core.models import WorkflowContext, WorkflowMetadata, WorkflowRuntime
 from core.registry import WorkflowRegistry
 from core.runtime_paths import RuntimePaths, resolve_runtime_paths
@@ -141,9 +141,11 @@ def load_workflows(
                 config=active_config,
                 manifest=active_manifest,
                 target_scope=active_config.target_scope,
-                llm=llm_manager.resolve(metadata.llm_profile),
+                llm=ensure_traced_llm_client(llm_manager.resolve(metadata.llm_profile)),
                 llm_manager=llm_manager,
-                get_llm=lambda profile=None, active_manager=llm_manager: active_manager.resolve(profile),
+                get_llm=lambda profile=None, active_manager=llm_manager: ensure_traced_llm_client(
+                    active_manager.resolve(profile)
+                ),
                 get_tool=lambda target_name, active_registry=tool_registry: active_registry.get(target_name),
                 register_tools=lambda tool_names, state_schema, active_registry=tool_registry: {
                     active_registry.get(tool_name).metadata.qualified_name: build_tool_subgraph(

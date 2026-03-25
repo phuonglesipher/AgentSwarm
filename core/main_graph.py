@@ -11,7 +11,7 @@ from typing_extensions import TypedDict
 
 from core.graph_ids import to_graph_node_name
 from core.graph_logging import trace_graph_node, trace_route_decision
-from core.llm import LLMError, LLMManager
+from core.llm import LLMError, LLMManager, ensure_traced_llm_client
 from core.natural_language_prompts import build_prompt_brief
 from core.registry import WorkflowRegistry
 from core.text_utils import normalize_text, slugify
@@ -386,7 +386,7 @@ def build_main_graph(
     def plan_tasks(state: MainState) -> dict[str, Any]:
         planning_notes: list[str] = []
         descriptions = _fallback_plan_tasks(state["prompt"])
-        planner_llm = llm_manager.resolve("planner")
+        planner_llm = ensure_traced_llm_client(llm_manager.resolve("planner"))
         if planner_llm.is_enabled():
             try:
                 descriptions = _llm_plan_tasks(planner_llm, state["prompt"], workspace_context)
@@ -425,7 +425,7 @@ def build_main_graph(
         routed_tasks: list[MainTask] = []
         notes = list(state["routing_notes"])
         llm_assignments: dict[str, dict[str, Any]] = {}
-        router_llm = llm_manager.resolve("router")
+        router_llm = ensure_traced_llm_client(llm_manager.resolve("router"))
         if router_llm.is_enabled() and state["tasks"]:
             try:
                 llm_assignments = _llm_route_tasks(router_llm, registry, state["tasks"], workspace_context)

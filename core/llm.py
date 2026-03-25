@@ -8,10 +8,11 @@ from pathlib import Path
 import shutil
 import subprocess
 import tempfile
+from time import perf_counter
 from typing import Any
 from urllib import error, request
 
-from core.graph_logging import log_llm_prompt_event
+from core.graph_logging import log_llm_prompt_event, log_llm_response_event
 from core.natural_language_prompts import build_llm_request
 
 
@@ -69,7 +70,7 @@ class ResponsesLLMClient(LLMClient):
     def generate_text(self, *, instructions: str, input_text: str, effort: str | None = None) -> str:
         resolved_effort = effort or self.config.reasoning_effort
         prompt_preview = _merge_prompt(instructions=instructions, input_text=input_text, require_json=False)
-        log_llm_prompt_event(
+        request_event_id = log_llm_prompt_event(
             client_label=f"responses_api/{self.config.model}",
             transport="responses_api_instructions_input",
             instructions=instructions,
@@ -78,14 +79,37 @@ class ResponsesLLMClient(LLMClient):
             require_structured_output=False,
             effort=resolved_effort,
         )
-        response = self._request(
-            {
-                "instructions": instructions,
-                "input": input_text,
-                "reasoning": {"effort": resolved_effort},
-            }
+        start_time = perf_counter()
+        output_text = ""
+        try:
+            response = self._request(
+                {
+                    "instructions": instructions,
+                    "input": input_text,
+                    "reasoning": {"effort": resolved_effort},
+                }
+            )
+            output_text = self._extract_output_text(response)
+        except Exception as exc:
+            log_llm_response_event(
+                client_label=f"responses_api/{self.config.model}",
+                transport="responses_api_instructions_input",
+                require_structured_output=False,
+                response_text=output_text,
+                elapsed_ms=round((perf_counter() - start_time) * 1000, 2),
+                request_event_id=request_event_id,
+                error=str(exc),
+            )
+            raise
+        log_llm_response_event(
+            client_label=f"responses_api/{self.config.model}",
+            transport="responses_api_instructions_input",
+            require_structured_output=False,
+            response_text=output_text,
+            elapsed_ms=round((perf_counter() - start_time) * 1000, 2),
+            request_event_id=request_event_id,
         )
-        return self._extract_output_text(response)
+        return output_text
 
     def generate_json(
         self,
@@ -98,7 +122,7 @@ class ResponsesLLMClient(LLMClient):
     ) -> dict[str, Any]:
         resolved_effort = effort or self.config.reasoning_effort
         prompt_preview = _merge_prompt(instructions=instructions, input_text=input_text, require_json=True)
-        log_llm_prompt_event(
+        request_event_id = log_llm_prompt_event(
             client_label=f"responses_api/{self.config.model}",
             transport="responses_api_instructions_input",
             instructions=instructions,
@@ -108,26 +132,51 @@ class ResponsesLLMClient(LLMClient):
             schema_name=schema_name,
             effort=resolved_effort,
         )
-        response = self._request(
-            {
-                "instructions": instructions,
-                "input": input_text,
-                "reasoning": {"effort": resolved_effort},
-                "text": {
-                    "format": {
-                        "type": "json_schema",
-                        "name": schema_name,
-                        "strict": True,
-                        "schema": schema,
-                    }
-                },
-            }
+        start_time = perf_counter()
+        output_text = ""
+        try:
+            response = self._request(
+                {
+                    "instructions": instructions,
+                    "input": input_text,
+                    "reasoning": {"effort": resolved_effort},
+                    "text": {
+                        "format": {
+                            "type": "json_schema",
+                            "name": schema_name,
+                            "strict": True,
+                            "schema": schema,
+                        }
+                    },
+                }
+            )
+            refusal = response.get("refusal")
+            if refusal:
+                raise LLMError(f"Model refused the request: {refusal}")
+            output_text = self._extract_output_text(response)
+            parsed = _parse_json_object(output_text)
+        except Exception as exc:
+            log_llm_response_event(
+                client_label=f"responses_api/{self.config.model}",
+                transport="responses_api_instructions_input",
+                require_structured_output=True,
+                response_text=output_text,
+                elapsed_ms=round((perf_counter() - start_time) * 1000, 2),
+                schema_name=schema_name,
+                request_event_id=request_event_id,
+                error=str(exc),
+            )
+            raise
+        log_llm_response_event(
+            client_label=f"responses_api/{self.config.model}",
+            transport="responses_api_instructions_input",
+            require_structured_output=True,
+            response_text=output_text,
+            elapsed_ms=round((perf_counter() - start_time) * 1000, 2),
+            schema_name=schema_name,
+            request_event_id=request_event_id,
         )
-        refusal = response.get("refusal")
-        if refusal:
-            raise LLMError(f"Model refused the request: {refusal}")
-        output_text = self._extract_output_text(response)
-        return _parse_json_object(output_text)
+        return parsed
 
     def _request(self, payload: dict[str, Any]) -> dict[str, Any]:
         if not self.config.api_key:
@@ -230,7 +279,7 @@ class CodexCliLLMClient(LLMClient):
     def generate_text(self, *, instructions: str, input_text: str, effort: str | None = None) -> str:
         del effort
         prompt = _merge_prompt(instructions=instructions, input_text=input_text, require_json=False)
-        log_llm_prompt_event(
+        request_event_id = log_llm_prompt_event(
             client_label=f"codex_cli/{self.config.model}",
             transport="codex_cli_stdin_prompt",
             instructions=instructions,
@@ -238,7 +287,30 @@ class CodexCliLLMClient(LLMClient):
             final_prompt=prompt,
             require_structured_output=False,
         )
-        return self._run_codex(prompt=prompt, schema=None)
+        start_time = perf_counter()
+        output_text = ""
+        try:
+            output_text = self._run_codex(prompt=prompt, schema=None)
+        except Exception as exc:
+            log_llm_response_event(
+                client_label=f"codex_cli/{self.config.model}",
+                transport="codex_cli_stdin_prompt",
+                require_structured_output=False,
+                response_text=output_text,
+                elapsed_ms=round((perf_counter() - start_time) * 1000, 2),
+                request_event_id=request_event_id,
+                error=str(exc),
+            )
+            raise
+        log_llm_response_event(
+            client_label=f"codex_cli/{self.config.model}",
+            transport="codex_cli_stdin_prompt",
+            require_structured_output=False,
+            response_text=output_text,
+            elapsed_ms=round((perf_counter() - start_time) * 1000, 2),
+            request_event_id=request_event_id,
+        )
+        return output_text
 
     def generate_json(
         self,
@@ -251,7 +323,7 @@ class CodexCliLLMClient(LLMClient):
     ) -> dict[str, Any]:
         del effort
         prompt = _merge_prompt(instructions=instructions, input_text=input_text, require_json=True)
-        log_llm_prompt_event(
+        request_event_id = log_llm_prompt_event(
             client_label=f"codex_cli/{self.config.model}",
             transport="codex_cli_stdin_prompt",
             instructions=instructions,
@@ -260,8 +332,33 @@ class CodexCliLLMClient(LLMClient):
             require_structured_output=True,
             schema_name=schema_name,
         )
-        output = self._run_codex(prompt=prompt, schema={"name": schema_name, "schema": schema})
-        return _parse_json_object(output)
+        start_time = perf_counter()
+        output = ""
+        try:
+            output = self._run_codex(prompt=prompt, schema={"name": schema_name, "schema": schema})
+            parsed = _parse_json_object(output)
+        except Exception as exc:
+            log_llm_response_event(
+                client_label=f"codex_cli/{self.config.model}",
+                transport="codex_cli_stdin_prompt",
+                require_structured_output=True,
+                response_text=output,
+                elapsed_ms=round((perf_counter() - start_time) * 1000, 2),
+                schema_name=schema_name,
+                request_event_id=request_event_id,
+                error=str(exc),
+            )
+            raise
+        log_llm_response_event(
+            client_label=f"codex_cli/{self.config.model}",
+            transport="codex_cli_stdin_prompt",
+            require_structured_output=True,
+            response_text=output,
+            elapsed_ms=round((perf_counter() - start_time) * 1000, 2),
+            schema_name=schema_name,
+            request_event_id=request_event_id,
+        )
+        return parsed
 
     def _run_codex(self, *, prompt: str, schema: dict[str, Any] | None) -> str:
         resolved_command = self._resolve_command_path()
@@ -335,6 +432,15 @@ def _merge_prompt(*, instructions: str, input_text: str, require_json: bool) -> 
     )
 
 
+def _serialize_trace_json(value: dict[str, Any] | None) -> str:
+    if value is None:
+        return ""
+    try:
+        return json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True)
+    except TypeError:
+        return repr(value)
+
+
 def _parse_json_object(value: str) -> dict[str, Any]:
     try:
         parsed = json.loads(value)
@@ -395,6 +501,126 @@ class LLMManager:
 
     def available_profiles(self) -> list[str]:
         return sorted(self._profiles)
+
+
+class TracedLLMClient(LLMClient):
+    def __init__(self, client: Any, *, client_label: str | None = None) -> None:
+        self._client = client
+        self._client_label = client_label or self._describe_client(client)
+
+    def is_enabled(self) -> bool:
+        return bool(self._client.is_enabled())
+
+    def describe(self) -> str:
+        return str(self._client.describe())
+
+    def generate_text(self, *, instructions: str, input_text: str, effort: str | None = None) -> str:
+        prompt = _merge_prompt(instructions=instructions, input_text=input_text, require_json=False)
+        request_event_id = log_llm_prompt_event(
+            client_label=self._client_label,
+            transport="wrapped_client_call",
+            instructions=instructions,
+            input_text=input_text,
+            final_prompt=prompt,
+            require_structured_output=False,
+            effort=effort,
+        )
+        start_time = perf_counter()
+        output_text = ""
+        try:
+            output_text = str(self._client.generate_text(instructions=instructions, input_text=input_text, effort=effort))
+        except Exception as exc:
+            log_llm_response_event(
+                client_label=self._client_label,
+                transport="wrapped_client_call",
+                require_structured_output=False,
+                response_text=output_text,
+                elapsed_ms=round((perf_counter() - start_time) * 1000, 2),
+                request_event_id=request_event_id,
+                error=str(exc),
+            )
+            raise
+        log_llm_response_event(
+            client_label=self._client_label,
+            transport="wrapped_client_call",
+            require_structured_output=False,
+            response_text=output_text,
+            elapsed_ms=round((perf_counter() - start_time) * 1000, 2),
+            request_event_id=request_event_id,
+        )
+        return output_text
+
+    def generate_json(
+        self,
+        *,
+        instructions: str,
+        input_text: str,
+        schema_name: str,
+        schema: dict[str, Any],
+        effort: str | None = None,
+    ) -> dict[str, Any]:
+        prompt = _merge_prompt(instructions=instructions, input_text=input_text, require_json=True)
+        request_event_id = log_llm_prompt_event(
+            client_label=self._client_label,
+            transport="wrapped_client_call",
+            instructions=instructions,
+            input_text=input_text,
+            final_prompt=prompt,
+            require_structured_output=True,
+            schema_name=schema_name,
+            effort=effort,
+        )
+        start_time = perf_counter()
+        response_payload: dict[str, Any] | None = None
+        try:
+            response_payload = self._client.generate_json(
+                instructions=instructions,
+                input_text=input_text,
+                schema_name=schema_name,
+                schema=schema,
+                effort=effort,
+            )
+        except Exception as exc:
+            log_llm_response_event(
+                client_label=self._client_label,
+                transport="wrapped_client_call",
+                require_structured_output=True,
+                response_text=_serialize_trace_json(response_payload),
+                elapsed_ms=round((perf_counter() - start_time) * 1000, 2),
+                schema_name=schema_name,
+                request_event_id=request_event_id,
+                error=str(exc),
+            )
+            raise
+        log_llm_response_event(
+            client_label=self._client_label,
+            transport="wrapped_client_call",
+            require_structured_output=True,
+            response_text=_serialize_trace_json(response_payload),
+            elapsed_ms=round((perf_counter() - start_time) * 1000, 2),
+            schema_name=schema_name,
+            request_event_id=request_event_id,
+        )
+        return response_payload
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._client, name)
+
+    @staticmethod
+    def _describe_client(client: Any) -> str:
+        try:
+            description = str(client.describe()).strip()
+        except Exception:
+            description = ""
+        return description or client.__class__.__name__
+
+
+def ensure_traced_llm_client(client: Any) -> Any:
+    if isinstance(client, (ResponsesLLMClient, CodexCliLLMClient, TracedLLMClient)):
+        return client
+    if not hasattr(client, "generate_text") or not hasattr(client, "generate_json"):
+        return client
+    return TracedLLMClient(client)
 
 
 def _discover_profiles(provider: str) -> list[str]:
