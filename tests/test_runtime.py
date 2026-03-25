@@ -2241,6 +2241,9 @@ class WorkflowDrivenRuntimeTests(unittest.TestCase):
         self.assertIsNotNone(planner_routed)
         self.assertEqual(planner_routed.name, "gameplay-engineer-planner")
 
+        unsupported = self.registry.route("Can you review my resume for a product manager role?")
+        self.assertIsNone(unsupported)
+
     def test_reviewer_workflow_flags_missing_sections(self) -> None:
         result = self.registry.invoke(
             "gameplay-reviewer-workflow",
@@ -2550,6 +2553,31 @@ class WorkflowDrivenRuntimeTests(unittest.TestCase):
             self.assertIn("[gameplay-engineer-workflow] [evaluate_investigation] ENTER", trace_output)
             self.assertIn("[gameplay-engineer-workflow] [prepare_investigation_blocked_delivery] ENTER", trace_output)
             self.assertIn("[main_graph] [finalize] EXIT", trace_output)
+
+    def test_main_graph_skips_unsupported_prompt_without_running_any_workflow(self) -> None:
+        graph = build_main_graph(registry=self.registry, llm_manager=self.llm_manager)
+        with tempfile.TemporaryDirectory(prefix="langgraph-skip-tests-") as temp_dir:
+            run_dir = Path(temp_dir) / "run"
+            run_dir.mkdir(parents=True, exist_ok=True)
+
+            result = graph.invoke(
+                build_initial_state(
+                    prompt="Can you review my resume for a product manager role?",
+                    run_dir=str(run_dir),
+                )
+            )
+
+            self.assertIn("No workflow ran because every task was skipped before execution.", result["final_response"])
+            self.assertIn("[skipped] via none", result["final_response"])
+            self.assertIn("no exposed workflow confidently matched this task", result["final_response"].lower())
+            self.assertTrue((run_dir / "summary.md").exists())
+
+            trace_log = run_dir / "graph_traversal.log"
+            self.assertTrue(trace_log.exists())
+            trace_output = trace_log.read_text(encoding="utf-8")
+            self.assertIn("[main_graph] [route_tasks] EXIT", trace_output)
+            self.assertNotIn("[gameplay-engineer-workflow] [", trace_output)
+            self.assertNotIn("[template-investigation-workflow] [", trace_output)
 
     def test_main_graph_registers_workflow_subgraphs(self) -> None:
         graph = build_main_graph(registry=self.registry, llm_manager=self.llm_manager)

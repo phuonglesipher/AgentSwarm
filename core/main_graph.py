@@ -150,7 +150,7 @@ def _llm_route_tasks(
     registry: WorkflowRegistry,
     tasks: list[MainTask],
     workspace_context: str = "",
-) -> dict[str, str | None]:
+) -> dict[str, dict[str, Any]]:
     candidates = registry.list_metadata(exposed_only=True, include_shadowed=False)
     if not candidates:
         return {}
@@ -177,9 +177,11 @@ def _llm_route_tasks(
                     "type": "object",
                     "properties": {
                         "task_id": {"type": "string"},
-                        "workflow_name": {"type": "string", "enum": candidate_names},
+                        "supported": {"type": "boolean"},
+                        "workflow_name": {"type": "string", "enum": ["", *candidate_names]},
+                        "reason": {"type": "string"},
                     },
-                    "required": ["task_id", "workflow_name"],
+                    "required": ["task_id", "supported", "workflow_name", "reason"],
                     "additionalProperties": False,
                 },
                 "minItems": 1,
@@ -192,7 +194,8 @@ def _llm_route_tasks(
     result = llm.generate_json(
         instructions=(
             "You route implementation tasks to the best matching workflow. "
-            "Use each workflow's description and capabilities, and assign every task to exactly one workflow. "
+            "Use each workflow's description and capabilities. "
+            "If a task is not a software-engineering request that any listed workflow can own effectively, mark it unsupported instead of forcing a bad assignment. "
             "Default to workflows that operate on the host project."
         ),
         input_text=build_prompt_brief(
@@ -205,12 +208,22 @@ def _llm_route_tasks(
                 ("Available workflows", candidate_descriptions),
                 ("Tasks to route", task_block),
             ],
-            closing="Assign every task to exactly one workflow and prefer host-project workflows unless the request explicitly targets AgentSwarm itself.",
+            closing=(
+                "For each task, either choose one workflow or mark the task unsupported with a short reason. "
+                "Prefer host-project workflows unless the request explicitly targets AgentSwarm itself."
+            ),
         ),
         schema_name="main_graph_routes",
         schema=schema,
     )
-    return {item["task_id"]: item["workflow_name"] for item in result["assignments"]}
+    return {
+        item["task_id"]: {
+            "supported": bool(item["supported"]),
+            "workflow_name": str(item["workflow_name"]).strip() or None,
+            "reason": str(item["reason"]).strip(),
+        }
+        for item in result["assignments"]
+    }
 
 
 def _write_run_summary(run_dir: Path, state: MainState) -> None:
@@ -411,7 +424,7 @@ def build_main_graph(
     def route_tasks(state: MainState) -> dict[str, Any]:
         routed_tasks: list[MainTask] = []
         notes = list(state["routing_notes"])
-        llm_assignments: dict[str, str | None] = {}
+        llm_assignments: dict[str, dict[str, Any]] = {}
         router_llm = llm_manager.resolve("router")
         if router_llm.is_enabled() and state["tasks"]:
             try:
@@ -422,11 +435,23 @@ def build_main_graph(
 
         for task in state["tasks"]:
             task_copy = dict(task)
-            workflow_name = llm_assignments.get(task["id"]) or _fallback_route_task(registry, task["description"])
+            assignment = llm_assignments.get(task["id"])
+            workflow_name = (
+                assignment.get("workflow_name")
+                if assignment and assignment.get("supported")
+                else _fallback_route_task(registry, task["description"])
+            )
             if workflow_name is None:
-                task_copy["status"] = "unroutable"
-                task_copy["error"] = "No matching workflow was found"
-                notes.append(f"{task['id']} could not be routed")
+                skip_reason = (
+                    str(assignment.get("reason", "")).strip()
+                    if assignment and not assignment.get("supported")
+                    else "Skipped because no exposed workflow confidently matched this task."
+                )
+                if not skip_reason:
+                    skip_reason = "Skipped because no exposed workflow confidently matched this task."
+                task_copy["status"] = "skipped"
+                task_copy["error"] = skip_reason
+                notes.append(f"{task['id']} skipped: {skip_reason}")
             else:
                 task_copy["workflow_name"] = workflow_name
                 task_copy["status"] = "routed"
@@ -495,14 +520,27 @@ def build_main_graph(
         }
 
     def finalize(state: MainState) -> dict[str, Any]:
+        completed_task_count = sum(1 for task in state["tasks"] if task["status"] == "completed")
+        skipped_task_count = sum(1 for task in state["tasks"] if task["status"] == "skipped")
         lines = [
             "AgentSwarm workflow-driven execution finished.",
-            "",
-            "Routing notes:",
-            *[f"- {note}" for note in state["routing_notes"]],
-            "",
-            "Task results:",
         ]
+        if state["tasks"] and completed_task_count == 0 and skipped_task_count == len(state["tasks"]):
+            lines.extend(
+                [
+                    "",
+                    "No workflow ran because every task was skipped before execution.",
+                ]
+            )
+        lines.extend(
+            [
+                "",
+                "Routing notes:",
+                *[f"- {note}" for note in state["routing_notes"]],
+                "",
+                "Task results:",
+            ]
+        )
         for task in state["tasks"]:
             lines.append(
                 f"- {task['id']} [{task['status']}] via {task['workflow_name'] or 'none'}"
