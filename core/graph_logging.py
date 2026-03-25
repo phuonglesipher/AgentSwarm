@@ -1,23 +1,38 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import datetime
 import json
 from pathlib import Path
-from threading import Lock
+from threading import Lock, local
+from time import perf_counter
 from typing import Any, Callable
 import sys
 
 
 GRAPH_TRACE_FILE = "graph_traversal.log"
+GRAPH_TIMELINE_FILE = "graph_timeline.md"
 GRAPH_DEBUG_TRACE_FILE = "graph_state_debug.jsonl"
+LLM_PROMPT_TRACE_FILE = "llm_prompt_trace.md"
 _TRACE_LOCK = Lock()
+_TRACE_CONTEXT = local()
 _DEBUG_VALUE_CHAR_LIMIT = 240
 _DEBUG_COLLECTION_ITEM_LIMIT = 8
 _DEBUG_MAPPING_KEY_LIMIT = 16
 _DEBUG_RECURSION_LIMIT = 2
 _DEBUG_KEY_SUMMARY_LIMIT = 8
+_PROMPT_TEXT_CHAR_LIMIT = 12000
 _TRACE_EVENT_ID = 0
+
+
+@dataclass(frozen=True)
+class _ActiveTraceContext:
+    run_dir: Path
+    graph_name: str
+    node_name: str
+    state_context: str
 
 
 def _resolve_run_dir(state: Mapping[str, Any] | None) -> Path | None:
@@ -60,6 +75,14 @@ def _clip_debug_text(value: str, limit: int = _DEBUG_VALUE_CHAR_LIMIT) -> str:
     if len(value) <= limit:
         return value
     return f"{value[: limit - 3]}..."
+
+
+def _clip_multiline_text(value: str, limit: int = _PROMPT_TEXT_CHAR_LIMIT) -> str:
+    clean_value = value.strip()
+    if len(clean_value) <= limit:
+        return clean_value
+    overflow = len(clean_value) - limit
+    return f"{clean_value[:limit].rstrip()}\n\n... [truncated {overflow} chars]"
 
 
 def _normalize_debug_value(value: Any, *, depth: int = 0) -> Any:
@@ -116,6 +139,77 @@ def _summarize_payload_keys(payload: Mapping[str, Any] | None) -> str:
     return summary
 
 
+def _resolve_trace_context_stack() -> list[_ActiveTraceContext]:
+    stack = getattr(_TRACE_CONTEXT, "stack", None)
+    if stack is None:
+        stack = []
+        _TRACE_CONTEXT.stack = stack
+    return stack
+
+
+def _get_active_trace_context() -> _ActiveTraceContext | None:
+    stack = getattr(_TRACE_CONTEXT, "stack", None)
+    if not stack:
+        return None
+    return stack[-1]
+
+
+@contextmanager
+def bind_active_trace_context(
+    *,
+    state: Mapping[str, Any] | None,
+    graph_name: str,
+    node_name: str,
+):
+    run_dir = _resolve_run_dir(state)
+    if run_dir is None:
+        yield
+        return
+
+    stack = _resolve_trace_context_stack()
+    stack.append(
+        _ActiveTraceContext(
+            run_dir=run_dir,
+            graph_name=graph_name,
+            node_name=node_name,
+            state_context=_summarize_state(state),
+        )
+    )
+    try:
+        yield
+    finally:
+        stack.pop()
+
+
+def _ensure_markdown_header(path: Path, title: str) -> None:
+    if path.exists() and path.stat().st_size > 0:
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(f"# {title}\n\n", encoding="utf-8")
+
+
+def _append_timeline_entry(
+    *,
+    run_dir: Path,
+    timestamp: str,
+    graph_name: str,
+    node_name: str,
+    phase: str,
+    context: str,
+    message: str,
+) -> None:
+    timeline_path = run_dir / GRAPH_TIMELINE_FILE
+    with _TRACE_LOCK:
+        _ensure_markdown_header(timeline_path, "Graph Timeline")
+        details: list[str] = [f"- {timestamp} | `{graph_name}.{node_name}` | `{phase}`"]
+        if context:
+            details.append(f"| {context}")
+        if message:
+            details.append(f"| {message}")
+        with timeline_path.open("a", encoding="utf-8") as handle:
+            handle.write(" ".join(details).rstrip() + "\n")
+
+
 def _write_debug_trace_record(
     *,
     state: Mapping[str, Any] | None,
@@ -124,8 +218,11 @@ def _write_debug_trace_record(
     phase: str,
     payload_label: str,
     payload: Mapping[str, Any] | None,
+    message: str = "",
+    run_dir_override: Path | None = None,
+    state_context_override: str | None = None,
 ) -> int | None:
-    run_dir = _resolve_run_dir(state)
+    run_dir = run_dir_override or _resolve_run_dir(state)
     if run_dir is None:
         return None
 
@@ -135,9 +232,11 @@ def _write_debug_trace_record(
         "phase": phase,
         "payload_label": payload_label,
         "payload": _normalize_debug_value(payload),
-        "state_context": _summarize_state(state),
+        "state_context": state_context_override if state_context_override is not None else _summarize_state(state),
         "timestamp": datetime.now().isoformat(timespec="seconds"),
     }
+    if message:
+        record["message"] = message
 
     with _TRACE_LOCK:
         global _TRACE_EVENT_ID
@@ -160,6 +259,8 @@ def log_graph_payload_event(
     payload_label: str,
     payload: Mapping[str, Any] | None,
     message: str = "",
+    run_dir_override: Path | None = None,
+    state_context_override: str | None = None,
 ) -> None:
     event_id = _write_debug_trace_record(
         state=state,
@@ -168,6 +269,9 @@ def log_graph_payload_event(
         phase=phase,
         payload_label=payload_label,
         payload=payload,
+        message=message,
+        run_dir_override=run_dir_override,
+        state_context_override=state_context_override,
     )
     details: list[str] = []
     if message:
@@ -181,6 +285,8 @@ def log_graph_payload_event(
         node_name=node_name,
         phase=phase,
         message=" ".join(details),
+        run_dir_override=run_dir_override,
+        state_context_override=state_context_override,
     )
 
 
@@ -191,9 +297,11 @@ def log_graph_event(
     node_name: str,
     phase: str,
     message: str = "",
+    run_dir_override: Path | None = None,
+    state_context_override: str | None = None,
 ) -> None:
     timestamp = datetime.now().isoformat(timespec="seconds")
-    context = _summarize_state(state)
+    context = state_context_override if state_context_override is not None else _summarize_state(state)
     parts = [
         f"[{timestamp}]",
         f"[{graph_name}]",
@@ -208,7 +316,7 @@ def log_graph_event(
 
     print(line, file=sys.stderr, flush=True)
 
-    run_dir = _resolve_run_dir(state)
+    run_dir = run_dir_override or _resolve_run_dir(state)
     if run_dir is None:
         return
 
@@ -217,6 +325,106 @@ def log_graph_event(
         log_path.parent.mkdir(parents=True, exist_ok=True)
         with log_path.open("a", encoding="utf-8") as handle:
             handle.write(line + "\n")
+    _append_timeline_entry(
+        run_dir=run_dir,
+        timestamp=timestamp,
+        graph_name=graph_name,
+        node_name=node_name,
+        phase=phase,
+        context=context,
+        message=message,
+    )
+
+
+def log_llm_prompt_event(
+    *,
+    client_label: str,
+    transport: str,
+    instructions: str,
+    input_text: str,
+    final_prompt: str,
+    require_structured_output: bool,
+    schema_name: str | None = None,
+    effort: str | None = None,
+) -> None:
+    active_context = _get_active_trace_context()
+    if active_context is None:
+        return
+
+    payload = {
+        "client": client_label,
+        "transport": transport,
+        "require_structured_output": require_structured_output,
+        "schema_name": schema_name or "",
+        "effort": effort or "",
+        "instructions_chars": len(instructions.strip()),
+        "input_text_chars": len(input_text.strip()),
+        "final_prompt_chars": len(final_prompt.strip()),
+        "instructions": instructions.strip(),
+        "input_text": input_text.strip(),
+        "final_prompt": final_prompt.strip(),
+    }
+    details: list[str] = [
+        f"client={client_label}",
+        f"transport={transport}",
+        f"mode={'json' if require_structured_output else 'text'}",
+    ]
+    if schema_name:
+        details.append(f"schema={schema_name}")
+    if effort:
+        details.append(f"effort={effort}")
+    event_id = _write_debug_trace_record(
+        state=None,
+        graph_name=active_context.graph_name,
+        node_name=active_context.node_name,
+        phase="PROMPT",
+        payload_label="prompt_recipe",
+        payload=payload,
+        message=" ".join(details),
+        run_dir_override=active_context.run_dir,
+        state_context_override=active_context.state_context,
+    )
+    if event_id is not None:
+        details.append(f"details={LLM_PROMPT_TRACE_FILE}#{event_id}")
+    log_graph_event(
+        state=None,
+        graph_name=active_context.graph_name,
+        node_name=active_context.node_name,
+        phase="PROMPT",
+        message=" ".join(details),
+        run_dir_override=active_context.run_dir,
+        state_context_override=active_context.state_context,
+    )
+
+    prompt_path = active_context.run_dir / LLM_PROMPT_TRACE_FILE
+    with _TRACE_LOCK:
+        _ensure_markdown_header(prompt_path, "LLM Prompt Trace")
+        with prompt_path.open("a", encoding="utf-8") as handle:
+            header = f"## Event {event_id or '?'} | {datetime.now().isoformat(timespec='seconds')}"
+            handle.write(header + "\n\n")
+            handle.write(f"- Graph node: `{active_context.graph_name}.{active_context.node_name}`\n")
+            if active_context.state_context:
+                handle.write(f"- Context: `{active_context.state_context}`\n")
+            handle.write(f"- Client: `{client_label}`\n")
+            handle.write(f"- Transport: `{transport}`\n")
+            handle.write(f"- Mode: `{'json' if require_structured_output else 'text'}`\n")
+            if schema_name:
+                handle.write(f"- Schema: `{schema_name}`\n")
+            if effort:
+                handle.write(f"- Effort: `{effort}`\n")
+            handle.write(f"- Instructions chars: `{len(instructions.strip())}`\n")
+            handle.write(f"- Input chars: `{len(input_text.strip())}`\n")
+            handle.write(f"- Final prompt chars: `{len(final_prompt.strip())}`\n\n")
+            for title, body in (
+                ("Instructions", instructions),
+                ("Input Text", input_text),
+                ("Final Prompt", final_prompt),
+            ):
+                handle.write(f"### {title}\n")
+                handle.write("```text\n")
+                rendered_body = _clip_multiline_text(body)
+                handle.write(rendered_body + "\n" if rendered_body else "(empty)\n")
+                handle.write("```\n\n")
 
 
 def trace_graph_node(
@@ -226,28 +434,32 @@ def trace_graph_node(
     node_fn: Callable[[dict[str, Any]], dict[str, Any]],
 ) -> Callable[[dict[str, Any]], dict[str, Any]]:
     def wrapper(state: dict[str, Any]) -> dict[str, Any]:
-        log_graph_payload_event(
-            state=state,
-            graph_name=graph_name,
-            node_name=node_name,
-            phase="ENTER",
-            payload_label="input",
-            payload=state,
-        )
-        try:
-            result = node_fn(state)
-        except Exception as exc:
+        start_time = perf_counter()
+        with bind_active_trace_context(state=state, graph_name=graph_name, node_name=node_name):
             log_graph_payload_event(
                 state=state,
                 graph_name=graph_name,
                 node_name=node_name,
-                phase="ERROR",
+                phase="ENTER",
                 payload_label="input",
                 payload=state,
-                message=f"{type(exc).__name__}: {exc}",
             )
-            raise
+            try:
+                result = node_fn(state)
+            except Exception as exc:
+                elapsed_ms = round((perf_counter() - start_time) * 1000, 2)
+                log_graph_payload_event(
+                    state=state,
+                    graph_name=graph_name,
+                    node_name=node_name,
+                    phase="ERROR",
+                    payload_label="input",
+                    payload=state,
+                    message=f"elapsed_ms={elapsed_ms} {type(exc).__name__}: {exc}",
+                )
+                raise
 
+        elapsed_ms = round((perf_counter() - start_time) * 1000, 2)
         updated_keys = ", ".join(sorted(result)) if result else "no_state_updates"
         log_graph_payload_event(
             state=state,
@@ -256,7 +468,7 @@ def trace_graph_node(
             phase="EXIT",
             payload_label="output",
             payload=result,
-            message=f"updated_keys={updated_keys}",
+            message=f"elapsed_ms={elapsed_ms} updated_keys={updated_keys}",
         )
         return result
 
@@ -270,25 +482,30 @@ def trace_route_decision(
     route_fn: Callable[[dict[str, Any]], str],
 ) -> Callable[[dict[str, Any]], str]:
     def wrapper(state: dict[str, Any]) -> str:
+        start_time = perf_counter()
         log_graph_event(state=state, graph_name=graph_name, node_name=router_name, phase="ROUTE_EVAL")
         try:
             next_node = route_fn(state)
         except Exception as exc:
-            log_graph_event(
+            elapsed_ms = round((perf_counter() - start_time) * 1000, 2)
+            log_graph_payload_event(
                 state=state,
                 graph_name=graph_name,
                 node_name=router_name,
                 phase="ERROR",
-                message=f"{type(exc).__name__}: {exc}",
+                payload_label="input",
+                payload=state,
+                message=f"elapsed_ms={elapsed_ms} {type(exc).__name__}: {exc}",
             )
             raise
 
+        elapsed_ms = round((perf_counter() - start_time) * 1000, 2)
         log_graph_event(
             state=state,
             graph_name=graph_name,
             node_name=router_name,
             phase="ROUTE",
-            message=f"next={next_node}",
+            message=f"elapsed_ms={elapsed_ms} next={next_node}",
         )
         return next_node
 

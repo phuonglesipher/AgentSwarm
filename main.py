@@ -10,7 +10,7 @@ from core.config_loader import load_agentswarm_config, load_project_manifest
 from core.host_setup import initialize_host_project
 from core.memory import write_memory_summary
 from core.workflow_loader import load_workflows
-from core.graph_logging import GRAPH_TRACE_FILE
+from core.graph_logging import GRAPH_TIMELINE_FILE, GRAPH_TRACE_FILE, LLM_PROMPT_TRACE_FILE
 from core.llm import LLMManager
 from core.main_graph import build_initial_state, build_main_graph, build_runtime_config
 from core.runtime_paths import RuntimePaths
@@ -92,6 +92,8 @@ def main() -> None:
     print(f"AgentSwarm: {runtime_paths.agent_root}")
     print(f"\nArtifacts: {run_dir}")
     print(f"Traversal log: {run_dir / GRAPH_TRACE_FILE}")
+    print(f"Timeline log: {run_dir / GRAPH_TIMELINE_FILE}")
+    print(f"Prompt trace: {run_dir / LLM_PROMPT_TRACE_FILE}")
 
 
 if __name__ == "__main__":

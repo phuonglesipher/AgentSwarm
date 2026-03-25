@@ -11,6 +11,7 @@ import tempfile
 from typing import Any
 from urllib import error, request
 
+from core.graph_logging import log_llm_prompt_event
 from core.natural_language_prompts import build_llm_request
 
 
@@ -66,11 +67,22 @@ class ResponsesLLMClient(LLMClient):
         return f"responses_api/{self.config.model}: enabled"
 
     def generate_text(self, *, instructions: str, input_text: str, effort: str | None = None) -> str:
+        resolved_effort = effort or self.config.reasoning_effort
+        prompt_preview = _merge_prompt(instructions=instructions, input_text=input_text, require_json=False)
+        log_llm_prompt_event(
+            client_label=f"responses_api/{self.config.model}",
+            transport="responses_api_instructions_input",
+            instructions=instructions,
+            input_text=input_text,
+            final_prompt=prompt_preview,
+            require_structured_output=False,
+            effort=resolved_effort,
+        )
         response = self._request(
             {
                 "instructions": instructions,
                 "input": input_text,
-                "reasoning": {"effort": effort or self.config.reasoning_effort},
+                "reasoning": {"effort": resolved_effort},
             }
         )
         return self._extract_output_text(response)
@@ -84,11 +96,23 @@ class ResponsesLLMClient(LLMClient):
         schema: dict[str, Any],
         effort: str | None = None,
     ) -> dict[str, Any]:
+        resolved_effort = effort or self.config.reasoning_effort
+        prompt_preview = _merge_prompt(instructions=instructions, input_text=input_text, require_json=True)
+        log_llm_prompt_event(
+            client_label=f"responses_api/{self.config.model}",
+            transport="responses_api_instructions_input",
+            instructions=instructions,
+            input_text=input_text,
+            final_prompt=prompt_preview,
+            require_structured_output=True,
+            schema_name=schema_name,
+            effort=resolved_effort,
+        )
         response = self._request(
             {
                 "instructions": instructions,
                 "input": input_text,
-                "reasoning": {"effort": effort or self.config.reasoning_effort},
+                "reasoning": {"effort": resolved_effort},
                 "text": {
                     "format": {
                         "type": "json_schema",
@@ -206,6 +230,14 @@ class CodexCliLLMClient(LLMClient):
     def generate_text(self, *, instructions: str, input_text: str, effort: str | None = None) -> str:
         del effort
         prompt = _merge_prompt(instructions=instructions, input_text=input_text, require_json=False)
+        log_llm_prompt_event(
+            client_label=f"codex_cli/{self.config.model}",
+            transport="codex_cli_stdin_prompt",
+            instructions=instructions,
+            input_text=input_text,
+            final_prompt=prompt,
+            require_structured_output=False,
+        )
         return self._run_codex(prompt=prompt, schema=None)
 
     def generate_json(
@@ -219,6 +251,15 @@ class CodexCliLLMClient(LLMClient):
     ) -> dict[str, Any]:
         del effort
         prompt = _merge_prompt(instructions=instructions, input_text=input_text, require_json=True)
+        log_llm_prompt_event(
+            client_label=f"codex_cli/{self.config.model}",
+            transport="codex_cli_stdin_prompt",
+            instructions=instructions,
+            input_text=input_text,
+            final_prompt=prompt,
+            require_structured_output=True,
+            schema_name=schema_name,
+        )
         output = self._run_codex(prompt=prompt, schema={"name": schema_name, "schema": schema})
         return _parse_json_object(output)
 

@@ -15,7 +15,7 @@ from core.host_setup import initialize_host_project
 from core.runtime_paths import resolve_runtime_paths
 from core.tool_loader import load_tools
 from core.workflow_loader import load_workflows
-from core.graph_logging import GRAPH_DEBUG_TRACE_FILE
+from core.graph_logging import GRAPH_DEBUG_TRACE_FILE, GRAPH_TIMELINE_FILE
 from core.main_graph import build_initial_state, build_main_graph, build_runtime_config
 
 
@@ -2531,6 +2531,8 @@ class WorkflowDrivenRuntimeTests(unittest.TestCase):
             trace_log = run_dir / "graph_traversal.log"
             self.assertTrue(trace_log.exists())
             self.assertTrue((run_dir / GRAPH_DEBUG_TRACE_FILE).exists())
+            timeline_log = run_dir / GRAPH_TIMELINE_FILE
+            self.assertTrue(timeline_log.exists())
 
             artifact_dir = self._single_workflow_artifact_dir(run_dir, "gameplay-engineer-workflow")
             self.assertTrue((artifact_dir / "engineer_investigation.md").exists())
@@ -2546,6 +2548,7 @@ class WorkflowDrivenRuntimeTests(unittest.TestCase):
             trace_output = trace_log.read_text(encoding="utf-8")
             self.assertIn("[main_graph] [analyze_prompt] ENTER", trace_output)
             self.assertIn("[main_graph] [dispatch_active_task] ROUTE", trace_output)
+            self.assertIn("elapsed_ms=", trace_output)
             self.assertIn("input_keys=", trace_output)
             self.assertIn("output_keys=", trace_output)
             self.assertIn(f"details={GRAPH_DEBUG_TRACE_FILE}#", trace_output)
@@ -2553,6 +2556,11 @@ class WorkflowDrivenRuntimeTests(unittest.TestCase):
             self.assertIn("[gameplay-engineer-workflow] [evaluate_investigation] ENTER", trace_output)
             self.assertIn("[gameplay-engineer-workflow] [prepare_investigation_blocked_delivery] ENTER", trace_output)
             self.assertIn("[main_graph] [finalize] EXIT", trace_output)
+
+            timeline_output = timeline_log.read_text(encoding="utf-8")
+            self.assertIn("# Graph Timeline", timeline_output)
+            self.assertIn("`main_graph.plan_tasks`", timeline_output)
+            self.assertIn("elapsed_ms=", timeline_output)
 
     def test_main_graph_skips_unsupported_prompt_without_running_any_workflow(self) -> None:
         graph = build_main_graph(registry=self.registry, llm_manager=self.llm_manager)
