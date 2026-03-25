@@ -1,20 +1,29 @@
 ---
 name: workflow-creator
-description: Design or refactor AgentSwarm workflows for this repository. Use when Codex needs to turn a new request into one or more workflow graphs under `Workflows/`, decide whether to keep the work in one workflow or split it into reusable subgraphs, reuse existing workflows before creating new ones, or enforce the repo's loop-and-score architecture with strict senior review, natural-language prompts, and non-JSON state handoffs.
+description: Design or refactor AgentSwarm workflows for this repository. Use when Codex needs to turn a new request into one or more workflow graphs under `Workflows/`, decide whether to keep the work in one workflow or split it into reusable subgraphs, reuse shared workflows before creating new ones, place generic workflows in `Workflows/Share/`, or enforce the repo's loop-and-score architecture with strict senior review, natural-language prompts, and non-JSON state handoffs.
 ---
 
 # Workflow Creator
 
 ## Overview
-Create workflows that fit this repo's architecture instead of treating every request as a brand-new graph. Decide whether to reuse an existing workflow, embed an internal reviewer subgraph, or add a new reusable child workflow, then wire a score-gated loop that keeps iterating until the work is technically strong enough.
+Create workflows that fit this repo's architecture instead of treating every request as a brand-new graph. Decide whether to reuse an existing shared workflow, embed an internal reviewer subgraph, or add a new reusable child workflow, then wire a score-gated loop that keeps iterating until the work is technically strong enough.
 
 Treat `template-investigation-workflow` and `template-investigation-reviewer-workflow` as the repository's canonical workflow-quality templates. When you design or refactor another non-trivial workflow, match their standards for loop ownership, strict reviewer gating, blocker handling, minimum review depth, natural-language handoff, and regression-test expectations unless there is a clear reason to diverge.
 
 ## Start With Workflow Triage
-1. Inspect `Workflows/*/Workflow.md` and the relevant `entry.py` files before creating anything new.
-2. Reuse an existing workflow if its capability and state contract already fit with only light adaptation.
+1. Inspect `Workflows/Share/**/Workflow.md` first, then inspect the relevant domain folders such as `Workflows/GameplayWorkflows/**/Workflow.md`, plus the relevant `entry.py` files before creating anything new.
+2. Reuse an existing shared workflow if its capability and state contract already fit with only light adaptation.
 3. Split the request into multiple workflows only when one part is reusable, independently testable, or deserves its own lifecycle.
 4. Keep tiny helpers as local functions or graph nodes; do not promote every step into a workflow.
+
+## Placement Rules
+1. If the capability is generic and likely to be reused by more than one parent workflow, place it under `Workflows/Share/`.
+2. If no shared workflow exists yet but the new capability is generic, create it under `Workflows/Share/` so later workflows can reuse it.
+3. If the capability is gameplay-only and other domains should not depend on it, place it under `Workflows/GameplayWorkflows/`.
+4. Do not place a workflow under `Workflows/GameplayWorkflows/` just because gameplay is the first caller when the capability is really cross-domain.
+5. Every workflow design/refactor output should include:
+   - a `Reuse Audit` that lists the shared workflows you checked and why they were reused or rejected
+   - a `Placement Decision` that explains why the workflow belongs in `Share` or `GameplayWorkflows`
 
 ## Apply The Repo Default
 For non-trivial investigation, planning, design, or implementation-prep flows, default to:

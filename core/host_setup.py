@@ -48,7 +48,8 @@ This folder stores host-project-specific AgentSwarm assets.
 
 - `agentswarm.yaml`: host runtime config
 - `project_manifest.yaml`: high-level project map for routing and search
-- `Workflows/`: project workflows
+- `Workflows/Share/`: shared reusable workflows
+- `Workflows/GameplayWorkflows/`: gameplay-only workflows
 - `Tools/`: project tools
 - `memory/`: runtime memory data
 - `runs/`: execution artifacts
@@ -76,6 +77,8 @@ def scaffold_host_project(paths: RuntimePaths) -> list[Path]:
 
     for path in [
         paths.project_workflows_root / ".gitkeep",
+        paths.project_workflows_root / "Share" / ".gitkeep",
+        paths.project_workflows_root / "GameplayWorkflows" / ".gitkeep",
         paths.project_tools_root / ".gitkeep",
         paths.runs_root / ".gitkeep",
     ]:

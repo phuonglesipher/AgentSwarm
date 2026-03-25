@@ -184,14 +184,14 @@ class AlwaysBadLLMClient:
             }
         if schema_name == "gameplay_engineering_context":
             return _investigation_payload(
-                doc_hits=["Workflows/gameplay-engineer-workflow/Workflow.md"],
+                doc_hits=["Workflows/GameplayWorkflows/gameplay-engineer-workflow/Workflow.md"],
                 doc_context="The workflow metadata is the only reliable document in this fixture.",
-                source_hits=["Workflows/gameplay-engineer-workflow/entry.py"],
-                current_runtime_paths=["Workflows/gameplay-engineer-workflow/entry.py"],
+                source_hits=["Workflows/GameplayWorkflows/gameplay-engineer-workflow/entry.py"],
+                current_runtime_paths=["Workflows/GameplayWorkflows/gameplay-engineer-workflow/entry.py"],
                 runtime_path_hypotheses=["The workflow entry file is the only concrete runtime owner available in this test fixture."],
                 ownership_summary="The review-cap fixture anchors on the workflow entry file because no richer host project exists.",
                 investigation_summary="Investigation is intentionally minimal so the test can focus on the review loop cap.",
-                code_context="Workflow behavior under test lives in Workflows/gameplay-engineer-workflow/entry.py.",
+                code_context="Workflow behavior under test lives in Workflows/GameplayWorkflows/gameplay-engineer-workflow/entry.py.",
                 implementation_medium="cpp",
                 implementation_medium_reason="Return code-side execution so the test can focus on the feature review loop.",
             )
@@ -387,15 +387,15 @@ class AlmostApprovedLLMClient:
             }
         if schema_name == "gameplay_engineering_context":
             return _investigation_payload(
-                doc_hits=["Workflows/gameplay-engineer-workflow/Workflow.md"],
+                doc_hits=["Workflows/GameplayWorkflows/gameplay-engineer-workflow/Workflow.md"],
                 doc_context="The workflow covers gameplay implementation, bug fixing, and planning.",
-                source_hits=["Workflows/gameplay-engineer-workflow/entry.py"],
+                source_hits=["Workflows/GameplayWorkflows/gameplay-engineer-workflow/entry.py"],
                 test_hits=["tests/test_runtime.py"],
-                current_runtime_paths=["Workflows/gameplay-engineer-workflow/entry.py"],
+                current_runtime_paths=["Workflows/GameplayWorkflows/gameplay-engineer-workflow/entry.py"],
                 runtime_path_hypotheses=["The workflow entry graph is the current owned runtime path for this test fixture."],
-                ownership_summary="The workflow behavior under test is owned by Workflows/gameplay-engineer-workflow/entry.py.",
+                ownership_summary="The workflow behavior under test is owned by Workflows/GameplayWorkflows/gameplay-engineer-workflow/entry.py.",
                 investigation_summary="The test fixture converged on the workflow entry file and runtime tests.",
-                code_context="Gameplay workflow logic is implemented in Workflows/gameplay-engineer-workflow/entry.py.",
+                code_context="Gameplay workflow logic is implemented in Workflows/GameplayWorkflows/gameplay-engineer-workflow/entry.py.",
                 implementation_medium="cpp",
                 implementation_medium_reason="The test fixture is source-owned and validated by Python runtime tests.",
             )
@@ -2244,6 +2244,26 @@ class WorkflowDrivenRuntimeTests(unittest.TestCase):
         unsupported = self.registry.route("Can you review my resume for a product manager role?")
         self.assertIsNone(unsupported)
 
+    def test_built_in_workflows_live_under_share_and_gameplay_categories(self) -> None:
+        engineer_dir = self.registry.get("gameplay-engineer-workflow").metadata.workflow_dir.relative_to(self.project_root)
+        planner_dir = self.registry.get("gameplay-engineer-planner").metadata.workflow_dir.relative_to(self.project_root)
+        reviewer_dir = self.registry.get("gameplay-reviewer-workflow").metadata.workflow_dir.relative_to(self.project_root)
+        investigation_dir = self.registry.get("template-investigation-workflow").metadata.workflow_dir.relative_to(
+            self.project_root
+        )
+        investigation_reviewer_dir = self.registry.get(
+            "template-investigation-reviewer-workflow"
+        ).metadata.workflow_dir.relative_to(self.project_root)
+
+        self.assertEqual(engineer_dir.as_posix(), "Workflows/GameplayWorkflows/gameplay-engineer-workflow")
+        self.assertEqual(planner_dir.as_posix(), "Workflows/GameplayWorkflows/gameplay-engineer-planner")
+        self.assertEqual(reviewer_dir.as_posix(), "Workflows/GameplayWorkflows/gameplay-reviewer-workflow")
+        self.assertEqual(investigation_dir.as_posix(), "Workflows/Share/template-investigation-workflow")
+        self.assertEqual(
+            investigation_reviewer_dir.as_posix(),
+            "Workflows/Share/template-investigation-reviewer-workflow",
+        )
+
     def test_reviewer_workflow_flags_missing_sections(self) -> None:
         result = self.registry.invoke(
             "gameplay-reviewer-workflow",
@@ -2931,7 +2951,13 @@ class WorkflowDrivenRuntimeTests(unittest.TestCase):
             self.assertIn("Plugins/Marketplace", config.exclude_roots)
 
     def test_engineer_helpers_normalize_descriptive_hits_for_unreal_hosts(self) -> None:
-        engineer_entry = self.project_root / "Workflows" / "gameplay-engineer-workflow" / "entry.py"
+        engineer_entry = (
+            self.project_root
+            / "Workflows"
+            / "GameplayWorkflows"
+            / "gameplay-engineer-workflow"
+            / "entry.py"
+        )
         spec = importlib.util.spec_from_file_location("test_engineer_unreal_entry", engineer_entry)
         self.assertIsNotNone(spec)
         self.assertIsNotNone(spec.loader)
@@ -3865,6 +3891,8 @@ class WorkflowDrivenRuntimeTests(unittest.TestCase):
             self.assertTrue(paths.config_path.exists())
             self.assertTrue(paths.manifest_path.exists())
             self.assertTrue((paths.project_workflows_root / ".gitkeep").exists())
+            self.assertTrue((paths.project_workflows_root / "Share" / ".gitkeep").exists())
+            self.assertTrue((paths.project_workflows_root / "GameplayWorkflows" / ".gitkeep").exists())
             self.assertTrue((paths.project_tools_root / ".gitkeep").exists())
             self.assertTrue((paths.memory_root / "project" / ".gitkeep").exists())
             self.assertTrue((paths.memory_root / "agentswarm" / ".gitkeep").exists())
@@ -3932,7 +3960,7 @@ class WorkflowDrivenRuntimeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="agentswarm-workflow-overlay-") as temp_dir:
             host_root = Path(temp_dir) / "host-project"
             paths, _ = initialize_host_project(agent_root=self.project_root, host_root=host_root)
-            override_dir = paths.project_workflows_root / "gameplay-engineer-workflow"
+            override_dir = paths.project_workflows_root / "GameplayWorkflows" / "gameplay-engineer-workflow"
             override_dir.mkdir(parents=True, exist_ok=True)
             (override_dir / "Workflow.md").write_text(
                 "\n".join(
@@ -3989,7 +4017,83 @@ class WorkflowDrivenRuntimeTests(unittest.TestCase):
 
             self.assertEqual(preferred.metadata.namespace, "project")
             self.assertEqual(preferred.metadata.qualified_name, "project::gameplay-engineer-workflow")
+            self.assertEqual(
+                preferred.metadata.workflow_dir.relative_to(paths.project_workflows_root).as_posix(),
+                "GameplayWorkflows/gameplay-engineer-workflow",
+            )
             self.assertEqual(fallback.metadata.namespace, "agentswarm")
+
+    def test_nested_shared_project_workflow_loads_and_sees_workflows_root(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="agentswarm-shared-workflow-overlay-") as temp_dir:
+            host_root = Path(temp_dir) / "host-project"
+            paths, _ = initialize_host_project(agent_root=self.project_root, host_root=host_root)
+            workflow_dir = paths.project_workflows_root / "Share" / "shared-check-workflow"
+            workflow_dir.mkdir(parents=True, exist_ok=True)
+            (workflow_dir / "Workflow.md").write_text(
+                "\n".join(
+                    [
+                        "---",
+                        "name: shared-check-workflow",
+                        "entry: entry.py",
+                        "version: 1.0.0",
+                        "exposed: true",
+                        "capabilities:",
+                        "  - shared nested workflow test",
+                        "---",
+                        "Project shared workflow used to validate nested workflow loading.",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            (workflow_dir / "entry.py").write_text(
+                "\n".join(
+                    [
+                        "from langgraph.graph import END, START, StateGraph",
+                        "from typing_extensions import TypedDict",
+                        "",
+                        "def build_graph(context, metadata):",
+                        "    class State(TypedDict, total=False):",
+                        "        summary: str",
+                        "",
+                        "    def summarize(state: State):",
+                        "        del state",
+                        "        return {",
+                        "            'summary': (",
+                        "                f\"root={context.workflows_root.name};\"",
+                        "                f\"parent={context.workflow_dir.parent.name};\"",
+                        "                f\"dir={context.workflow_dir.name}\"",
+                        "            )",
+                        "        }",
+                        "",
+                        "    graph = StateGraph(State)",
+                        "    graph.add_node('summarize', summarize)",
+                        "    graph.add_edge(START, 'summarize')",
+                        "    graph.add_edge('summarize', END)",
+                        "    return graph",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            config = load_agentswarm_config(paths)
+            manifest = load_project_manifest(paths)
+            registry = load_workflows(
+                project_root=self.project_root,
+                workflows_root=self.workflows_root,
+                llm_manager=self.llm_manager,
+                runtime_paths=paths,
+                config=config,
+                manifest=manifest,
+            )
+
+            shared_runtime = registry.get("shared-check-workflow")
+            self.assertEqual(shared_runtime.metadata.namespace, "project")
+            self.assertEqual(
+                shared_runtime.metadata.workflow_dir.relative_to(paths.project_workflows_root).as_posix(),
+                "Share/shared-check-workflow",
+            )
+            result = shared_runtime.invoke({})
+            self.assertEqual(result["summary"], "root=Workflows;parent=Share;dir=shared-check-workflow")
 
     def test_main_graph_checkpointer_tracks_thread_state(self) -> None:
         graph = build_main_graph(
@@ -4061,7 +4165,13 @@ class WorkflowDrivenRuntimeTests(unittest.TestCase):
         fake_graph.invoke.assert_called_once()
 
     def test_self_test_harness_supports_module_aliases_and___file__(self) -> None:
-        engineer_entry = self.project_root / "Workflows" / "gameplay-engineer-workflow" / "entry.py"
+        engineer_entry = (
+            self.project_root
+            / "Workflows"
+            / "GameplayWorkflows"
+            / "gameplay-engineer-workflow"
+            / "entry.py"
+        )
         spec = importlib.util.spec_from_file_location("test_engineer_entry", engineer_entry)
         self.assertIsNotNone(spec)
         self.assertIsNotNone(spec.loader)

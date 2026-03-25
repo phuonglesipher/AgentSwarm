@@ -15,6 +15,15 @@ from core.tool_graph import build_tool_subgraph
 from core.tool_loader import load_tools
 
 
+def _iter_workflow_markdown_files(source_root: Path) -> list[Path]:
+    if not source_root.exists():
+        return []
+    return sorted(
+        [path for path in source_root.rglob("Workflow.md") if path.is_file()],
+        key=lambda path: path.relative_to(source_root).as_posix(),
+    )
+
+
 def _load_module(module_path: Path, module_name: str) -> Any:
     spec = importlib.util.spec_from_file_location(module_name, module_path)
     if spec is None or spec.loader is None:
@@ -58,6 +67,7 @@ def load_workflows(
     manifest: Any | None = None,
 ) -> WorkflowRegistry:
     paths = runtime_paths or resolve_runtime_paths(project_root, host_root=project_root)
+    built_in_workflows_root = Path(workflows_root).resolve()
     active_config = config or load_agentswarm_config(paths)
     active_manifest = manifest or load_project_manifest(paths)
     registry = WorkflowRegistry(preferred_namespaces=active_config.workflow_sources)
@@ -76,14 +86,12 @@ def load_workflows(
     }
 
     workflow_sources = [
-        ("agentswarm", paths.built_in_workflows_root),
+        ("agentswarm", built_in_workflows_root),
         ("project", paths.project_workflows_root),
     ]
 
     for namespace, source_root in workflow_sources:
-        if not source_root.exists():
-            continue
-        for markdown_path in sorted(source_root.glob("*/Workflow.md")):
+        for markdown_path in _iter_workflow_markdown_files(source_root):
             metadata = _parse_workflow_markdown(markdown_path, namespace=namespace)
             entry_path = metadata.workflow_dir / metadata.entry
             qualified_name = metadata.qualified_name
@@ -126,7 +134,7 @@ def load_workflows(
                 overlay_root=paths.overlay_root,
                 artifact_root=paths.runs_root,
                 memory_root=paths.memory_root,
-                workflows_root=metadata.workflow_dir.parent,
+                workflows_root=paths.project_workflows_root if metadata.namespace == "project" else built_in_workflows_root,
                 workflow_dir=metadata.workflow_dir,
                 tools_root=paths.project_tools_root if metadata.namespace == "project" else paths.built_in_tools_root,
                 runtime_paths=paths,

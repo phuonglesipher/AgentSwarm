@@ -5,7 +5,8 @@
 - `AgentSwarm.bat` is the Windows launcher that forwards a prompt to `main.py`.
 - `AgentSwarm.sh` is the macOS/Linux launcher that forwards a prompt to `main.py`.
 - `core/` contains shared runtime code: workflow loading, graph orchestration, LLM abstraction, models, and routing helpers.
-- `Workflows/<name>/` contains one workflow per folder, with a required `Workflow.md` metadata file and `entry.py` graph implementation.
+- `Workflows/Share/<name>/` contains reusable shared workflows that multiple parent workflows may call.
+- `Workflows/GameplayWorkflows/<name>/` contains gameplay-only workflows that are not meant for generic cross-domain reuse.
 - `.codex/skill/` contains repo-local Codex skills; use `workflow-creator` when designing or refactoring workflow architecture around reuse, subgraphs, and score-gated loops.
 - `docs/` stores supporting gameplay and design references used by workflows.
 - `tests/` contains repository-level unit tests.
@@ -16,7 +17,7 @@
 - `AgentSwarm.bat Fix combat dodge cancel bug...` runs the same flow from Windows.
 - `./AgentSwarm.sh Fix combat dodge cancel bug...` runs the same flow from macOS/Linux.
 - `python3 -m unittest discover -s tests -v` runs the full test suite.
-- `python3 -m py_compile main.py core/*.py Workflows/*/entry.py tests/test_runtime.py tests/test_short_term_memory_demo.py` performs a fast syntax check.
+- `python3 -m compileall main.py core Workflows tests` performs a fast recursive syntax check.
 - `codex login` is required before Codex CLI-backed LLM flows can run successfully.
 
 ## Coding Style & Naming Conventions
@@ -27,8 +28,10 @@
 - Prefer small, focused helper functions in `core/` and workflow modules. Keep comments brief and only where logic is non-obvious.
 
 ## Workflow Architecture Defaults
-- When adding or refactoring a workflow, inspect `Workflows/*/Workflow.md` first and reuse an existing workflow or internal subgraph before creating a new one.
+- When adding or refactoring a workflow, inspect `Workflows/Share/**/Workflow.md` first for reusable capabilities, then inspect the relevant domain folder such as `Workflows/GameplayWorkflows/**/Workflow.md` before creating anything new.
 - Treat `template-investigation-workflow` and `template-investigation-reviewer-workflow` as the canonical quality templates for strict parent-plus-reviewer workflow design.
+- If a new workflow is generic enough to be reused across multiple parent workflows, place it under `Workflows/Share/`.
+- If a new workflow is gameplay-specific and other domains should not depend on it, place it under `Workflows/GameplayWorkflows/`.
 - Prefer a parent workflow plus internal subgraphs when a capability is reusable or when the reviewer logic should evolve independently. Wire reusable child graphs with `context.get_workflow_graph(...)`.
 - Keep internal reviewer or support workflows `exposed: false` unless they are intended for direct user routing.
 - For non-trivial investigation, planning, design, or implementation-prep flows, default to a strict loop: work state -> reviewer workflow -> score and approval gate -> iterate until the work reaches the threshold or the loop stops.

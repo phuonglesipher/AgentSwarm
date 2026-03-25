@@ -4,10 +4,10 @@
 Load this file when shaping a new workflow, refactoring a workflow into subgraphs, or checking whether the repo default loop-and-score pattern should apply.
 
 ## Primary Repo Examples
-- `Workflows/template-investigation-workflow/Workflow.md`
-- `Workflows/template-investigation-workflow/entry.py`
-- `Workflows/template-investigation-reviewer-workflow/Workflow.md`
-- `Workflows/template-investigation-reviewer-workflow/entry.py`
+- `Workflows/Share/template-investigation-workflow/Workflow.md`
+- `Workflows/Share/template-investigation-workflow/entry.py`
+- `Workflows/Share/template-investigation-reviewer-workflow/Workflow.md`
+- `Workflows/Share/template-investigation-reviewer-workflow/entry.py`
 - `core/quality_loop.py`
 - `tests/test_template_investigation_workflow.py`
 
@@ -37,11 +37,18 @@ Treat these two template workflows as the repository's canonical examples for wo
 - Do not split when the state handoff becomes noisier than the logic itself.
 
 ## Reuse Checklist
-1. Search `Workflows/*/Workflow.md` for matching names and capabilities before adding a new folder.
-2. Inspect both exposed workflows and internal workflows because reviewer or analyzer subgraphs are often reusable patterns.
-3. Compare the expected input and output state shape before reusing a workflow.
-4. Reuse via `context.get_workflow_graph("<workflow-name>")` when the child graph should be embedded as a subgraph.
-5. Create a new workflow only when reuse would force awkward state adaptation or mismatched review criteria.
+1. Search `Workflows/Share/**/Workflow.md` for matching names and capabilities before adding a new folder.
+2. Search the relevant domain folders such as `Workflows/GameplayWorkflows/**/Workflow.md` after the shared sweep so you understand the domain-specific landscape too.
+3. Inspect both exposed workflows and internal workflows because reviewer or analyzer subgraphs are often reusable patterns.
+4. Compare the expected input and output state shape before reusing a workflow.
+5. Reuse via `context.get_workflow_graph("<workflow-name>")` when the child graph should be embedded as a subgraph.
+6. Create a new workflow only when reuse would force awkward state adaptation or mismatched review criteria.
+
+## Placement Rules
+- Put reusable reviewers, investigation helpers, analyzers, planners, and generic support workflows under `Workflows/Share/`.
+- Put gameplay-only delivery, repair, and reviewer workflows under `Workflows/GameplayWorkflows/` when other domains should not depend on them.
+- If the first caller is gameplay but the capability is structurally generic, still place it under `Workflows/Share/`.
+- Every workflow proposal should contain a `Reuse Audit` and a `Placement Decision` so future refactors can tell why the boundary exists.
 
 ## Default Loop And Score Guardrails
 - Use a strict reviewer for non-trivial investigation, planning, analysis, or implementation-prep flows.
