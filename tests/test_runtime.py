@@ -3068,6 +3068,158 @@ class WorkflowDrivenRuntimeTests(unittest.TestCase):
             self.assertTrue(workspace_source_file.startswith("Source/"))
             self.assertTrue(workspace_test_file.startswith("Source/"))
 
+    def test_engineer_helpers_classify_planning_modes_for_gameplay_intents(self) -> None:
+        engineer_entry = (
+            self.project_root
+            / "Workflows"
+            / "GameplayWorkflows"
+            / "gameplay-engineer-workflow"
+            / "entry.py"
+        )
+        spec = importlib.util.spec_from_file_location("test_engineer_planning_entry", engineer_entry)
+        self.assertIsNotNone(spec)
+        self.assertIsNotNone(spec.loader)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        context = SimpleNamespace(llm=DisabledLLMClient())
+        cases = [
+            (
+                "Fix melee dodge cancel gameplay bug where the recovery window never opens.",
+                "bugfix",
+                "bugfix",
+            ),
+            (
+                "Refactor traversal stamina gameplay code to reduce duplication while keeping behavior identical.",
+                "maintenance",
+                "refactor",
+            ),
+            (
+                "Improve the existing wall jump gameplay feature so recharge feedback is clearer without changing the cap.",
+                "feature",
+                "improve_feature",
+            ),
+            (
+                "Add a new gameplay feature for charged melee finishers after a sprint attack.",
+                "feature",
+                "new_feature",
+            ),
+        ]
+
+        for prompt, expected_task_type, expected_planning_mode in cases:
+            with self.subTest(prompt=prompt):
+                task_type, planning_mode, reason = module._classify_task(context, prompt)
+                self.assertEqual(task_type, expected_task_type)
+                self.assertEqual(planning_mode, expected_planning_mode)
+                self.assertTrue(reason)
+
+    def test_engineer_helpers_compose_mode_aware_design_and_plan_docs(self) -> None:
+        engineer_entry = (
+            self.project_root
+            / "Workflows"
+            / "GameplayWorkflows"
+            / "gameplay-engineer-workflow"
+            / "entry.py"
+        )
+        spec = importlib.util.spec_from_file_location("test_engineer_mode_docs_entry", engineer_entry)
+        self.assertIsNotNone(spec)
+        self.assertIsNotNone(spec.loader)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        context = SimpleNamespace(llm=DisabledLLMClient())
+        cases = [
+            {
+                "task_prompt": "Fix gameplay bug where dodge cancel never opens after landing.",
+                "task_type": "bugfix",
+                "planning_mode": "bugfix",
+                "requires_architecture_review": False,
+                "current_runtime_paths": ["src/combat_dodge.py"],
+                "expected_plan_lines": [
+                    "- Planning mode: bugfix",
+                    "- Keep the fix as small as the grounded owner allows and avoid redesigning unrelated gameplay systems.",
+                    "- Reproduce the bug and anchor the fix on src/combat_dodge.py.",
+                ],
+                "expected_design_lines": [
+                    "- Treat this as bugfix work: capture the broken behavior, likely failing hook, and the smallest safe fix boundary.",
+                    "- Describe the broken player-facing behavior, the intended behavior, and the neighboring path that must remain stable after the fix.",
+                ],
+            },
+            {
+                "task_prompt": "Refactor the traversal runtime to separate climb stamina bookkeeping without changing player behavior.",
+                "task_type": "maintenance",
+                "planning_mode": "refactor",
+                "requires_architecture_review": True,
+                "current_runtime_paths": ["src/traversal_runtime.py"],
+                "expected_plan_lines": [
+                    "- Planning mode: refactor",
+                    "- Preserve the current player-visible behavior unless the request explicitly calls for a visible improvement.",
+                    "- Anchor the refactor on src/traversal_runtime.py and map the seams before moving code.",
+                ],
+                "expected_design_lines": [
+                    "- Treat this as refactor work: ground the current owner, the cleanup goal, and the invariants that cannot drift.",
+                    "- Name the player-facing behavior that must remain unchanged and the hidden engineering pain the refactor is meant to remove.",
+                ],
+            },
+            {
+                "task_prompt": "Improve the existing air dash recharge feature so wall jump feedback is clearer while keeping the old cap rules.",
+                "task_type": "feature",
+                "planning_mode": "improve_feature",
+                "requires_architecture_review": True,
+                "current_runtime_paths": ["src/traversal_runtime.py"],
+                "expected_plan_lines": [
+                    "- Planning mode: improve_feature",
+                    "- Treat this as an evolution of an existing gameplay feature rather than a net-new system.",
+                    "- Anchor the improvement on src/traversal_runtime.py and compare the current behavior against the requested upgrade.",
+                ],
+                "expected_design_lines": [
+                    "- Treat this as a feature improvement: ground the current behavior first, then describe the exact upgrade the player should feel.",
+                    "- Compare the current player-facing behavior against the target improvement and call out which existing expectations must remain compatible.",
+                ],
+            },
+            {
+                "task_prompt": "Add a new gameplay feature where charged heavy attacks launch enemies after a full sprint windup.",
+                "task_type": "feature",
+                "planning_mode": "new_feature",
+                "requires_architecture_review": True,
+                "current_runtime_paths": ["src/combat_combo.py"],
+                "expected_plan_lines": [
+                    "- Planning mode: new_feature",
+                    "- Introduce the requested gameplay behavior without destabilizing adjacent systems or generic shared hooks.",
+                    "- Anchor the new capability on src/combat_combo.py and identify the exact integration hook for the new behavior.",
+                ],
+                "expected_design_lines": [
+                    "- Treat this as new feature work: define the player outcome, trigger conditions, and the gameplay boundaries around the new capability.",
+                    "- Describe the new player-facing behavior, when it triggers, and which nearby states or systems must integrate cleanly.",
+                ],
+            },
+        ]
+
+        for case in cases:
+            with self.subTest(planning_mode=case["planning_mode"]):
+                state = {
+                    "task_prompt": case["task_prompt"],
+                    "task_type": case["task_type"],
+                    "planning_mode": case["planning_mode"],
+                    "classification_reason": f"Mode-aware classification for {case['planning_mode']}.",
+                    "doc_hits": ["docs/designer/gameplay_change.md"],
+                    "current_runtime_paths": case["current_runtime_paths"],
+                    "test_hits": ["tests/test_gameplay_runtime.py"],
+                    "requires_architecture_review": case["requires_architecture_review"],
+                    "review_blocking_issues": [],
+                    "review_improvement_actions": [],
+                    "design_doc": "",
+                    "bug_context_doc": "",
+                }
+
+                design_doc = module._compose_design_doc(context, state)
+                plan_doc = module._compose_plan_doc(context, state, revise=False)
+
+                for expected_line in case["expected_design_lines"]:
+                    self.assertIn(expected_line, design_doc)
+                for expected_line in case["expected_plan_lines"]:
+                    self.assertIn(expected_line, plan_doc)
+
     def test_engineer_workflow_shortens_artifact_dir_for_long_task_ids(self) -> None:
         with tempfile.TemporaryDirectory(prefix="agentswarm-host-long-task-id-") as temp_dir:
             host_root = Path(temp_dir) / "host-project"
@@ -3508,6 +3660,7 @@ class WorkflowDrivenRuntimeTests(unittest.TestCase):
             plan_doc = (artifact_dir / "plan_doc.md").read_text(encoding="utf-8")
 
             self.assertEqual(result["task_type"], "feature")
+            self.assertEqual(result["planning_mode"], "new_feature")
             self.assertEqual(result["execution_track"], "feature")
             self.assertTrue(result["implementation_requested"])
             self.assertTrue(result["requires_architecture_review"])
@@ -3542,6 +3695,7 @@ class WorkflowDrivenRuntimeTests(unittest.TestCase):
             self.assertIn("## Previous Retained Evidence", strict_manager.client.strategy_inputs[2])
             self.assertIn("src/traversal_runtime.py", strict_manager.client.strategy_inputs[2])
             self.assertIn("## Open blocking issues", strict_manager.client.plan_inputs[1])
+            self.assertIn("- Planning mode: new_feature", strict_manager.client.plan_inputs[0])
             self.assertIn(
                 "Implementation Steps: Name the owning runtime file and the exact wall-jump recharge hook.",
                 strict_manager.client.plan_inputs[1],

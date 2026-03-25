@@ -160,6 +160,79 @@ PROCESS_ONLY_REVIEW_PATTERNS = (
     r"\blog filenames?\b",
     r"\btargeted test command",
 )
+PLANNING_MODE_TO_TASK_TYPE = {
+    "bugfix": "bugfix",
+    "refactor": "maintenance",
+    "improve_feature": "feature",
+    "new_feature": "feature",
+    "non_gameplay": "non_gameplay",
+}
+TASK_TYPE_DEFAULT_PLANNING_MODE = {
+    "bugfix": "bugfix",
+    "feature": "new_feature",
+    "maintenance": "refactor",
+    "non_gameplay": "non_gameplay",
+}
+PLANNING_MODE_LABELS = {
+    "bugfix": "bugfix",
+    "refactor": "refactor",
+    "improve_feature": "feature improvement",
+    "new_feature": "new feature",
+    "non_gameplay": "non-gameplay",
+}
+BUGFIX_INTENT_MARKERS = (
+    "fix",
+    "bug",
+    "regression",
+    "broken",
+    "failure",
+    "fails",
+    "crash",
+    "error",
+)
+REFACTOR_INTENT_MARKERS = (
+    "refactor",
+    "cleanup",
+    "clean up",
+    "restructure",
+    "reorganize",
+    "simplify",
+    "decouple",
+    "extract",
+    "stabilize",
+    "stabilise",
+    "harden",
+    "maintainability",
+    "tech debt",
+)
+IMPROVE_FEATURE_INTENT_MARKERS = (
+    "improve",
+    "enhance",
+    "extend",
+    "expand",
+    "upgrade",
+    "optimiz",
+    "polish",
+    "rebalance",
+    "tune",
+    "iterate on",
+    "adjust",
+)
+EXISTING_FEATURE_HINTS = (
+    "existing feature",
+    "current feature",
+    "existing gameplay",
+    "current gameplay",
+    "already ",
+)
+NEW_FEATURE_INTENT_MARKERS = (
+    "new feature",
+    "add ",
+    "implement ",
+    "create ",
+    "introduce ",
+    "build ",
+)
 
 
 class InvestigationCheck(TypedDict):
@@ -178,6 +251,7 @@ class EngineerState(TypedDict):
     run_dir: NotRequired[str]
     artifact_dir: str
     task_type: str
+    planning_mode: str
     execution_track: str
     gameplay_scope_verdict: str
     classification_reason: str
@@ -658,7 +732,198 @@ def _is_read_only_request(task_prompt: str) -> bool:
     return any(marker in lowered for marker in markers)
 
 
-def _classify_task(context: WorkflowContext, task_prompt: str) -> tuple[str, str]:
+def _default_planning_mode(task_type: str) -> str:
+    return TASK_TYPE_DEFAULT_PLANNING_MODE.get(task_type, "bugfix")
+
+
+def _planning_mode_label(planning_mode: str) -> str:
+    return PLANNING_MODE_LABELS.get(planning_mode, planning_mode.replace("_", " "))
+
+
+def _normalize_planning_mode(task_type: str, planning_mode: str) -> str:
+    normalized_mode = planning_mode.strip().lower()
+    allowed_modes = {
+        "bugfix": {"bugfix"},
+        "feature": {"improve_feature", "new_feature"},
+        "maintenance": {"refactor"},
+        "non_gameplay": {"non_gameplay"},
+    }
+    if normalized_mode in allowed_modes.get(task_type, set()):
+        return normalized_mode
+    return _default_planning_mode(task_type)
+
+
+def _infer_planning_mode(task_prompt: str, *, fallback_task_type: str) -> str:
+    lowered = normalize_text(task_prompt)
+    if fallback_task_type == "non_gameplay":
+        return "non_gameplay"
+    if any(marker in lowered for marker in BUGFIX_INTENT_MARKERS):
+        return "bugfix"
+    if any(marker in lowered for marker in REFACTOR_INTENT_MARKERS):
+        return "refactor"
+    mentions_existing_feature = any(marker in lowered for marker in EXISTING_FEATURE_HINTS)
+    if any(marker in lowered for marker in IMPROVE_FEATURE_INTENT_MARKERS) or (
+        fallback_task_type == "feature" and mentions_existing_feature
+    ):
+        return "improve_feature"
+    if any(marker in lowered for marker in NEW_FEATURE_INTENT_MARKERS):
+        return "new_feature"
+    return _default_planning_mode(fallback_task_type)
+
+
+def _planning_mode_profile(planning_mode: str) -> dict[str, Any]:
+    if planning_mode == "refactor":
+        return {
+            "task_focus": "Planning focus: preserve player-visible behavior while improving structure, boundaries, and maintainability.",
+            "design_overview": "- Treat this as refactor work: ground the current owner, the cleanup goal, and the invariants that cannot drift.",
+            "design_behavior": "- Name the player-facing behavior that must remain unchanged and the hidden engineering pain the refactor is meant to remove.",
+            "design_technical_note": "Capture the current seams, ordering constraints, migration boundaries, and rollback points before implementation.",
+            "design_risk": "- Risk: behavior drift can slip in while reorganizing ownership, ordering, or shared helpers.",
+            "design_focus": "Focus the brief on system boundaries, invariants, migration safety, and proof that behavior should stay stable.",
+            "plan_overview": "- Preserve the current player-visible behavior unless the request explicitly calls for a visible improvement.",
+            "plan_steps": [
+                "Split the refactor into safe slices, keep public contracts stable, and avoid mixing cleanup with unrelated behavior changes.",
+                "Protect invariants, ordering, and data flow explicitly so the new structure stays behaviorally equivalent.",
+            ],
+            "validation_focus": "Prove the refactor does not change player-visible behavior on the main path or its closest neighboring path.",
+            "default_tests": [
+                "Add or update regression coverage that proves the refactor preserved the current gameplay behavior.",
+                "Add a targeted test for the most fragile neighboring path that could drift during the cleanup.",
+            ],
+            "risks": [
+                "- Risk: hidden coupling or ordering assumptions may break once code is moved or split.",
+                "- Mitigation: refactor in narrow slices, keep interfaces stable, and cover no-behavior-drift cases with tests.",
+            ],
+            "acceptance": [
+                "- The targeted code path is cleaner, easier to own, or easier to extend without changing the intended gameplay outcome.",
+                "- Existing player-visible behavior and adjacent regression checks stay unchanged.",
+            ],
+        }
+    if planning_mode == "improve_feature":
+        return {
+            "task_focus": "Planning focus: evolve an existing gameplay feature, compare current behavior against the target improvement, and preserve compatibility.",
+            "design_overview": "- Treat this as a feature improvement: ground the current behavior first, then describe the exact upgrade the player should feel.",
+            "design_behavior": "- Compare the current player-facing behavior against the target improvement and call out which existing expectations must remain compatible.",
+            "design_technical_note": "Capture the live extension point, compatibility constraints, and edge cases that the current feature already supports.",
+            "design_risk": "- Risk: the improvement may help the main path but regress an existing contract, edge case, or balancing expectation.",
+            "design_focus": "Focus the brief on current-vs-target behavior, compatibility boundaries, and the edge cases that existing players already rely on.",
+            "plan_overview": "- Treat this as an evolution of an existing gameplay feature rather than a net-new system.",
+            "plan_steps": [
+                "Document the current behavior and hook the change into the existing feature owner instead of adding a parallel path.",
+                "Preserve supported behavior, neighboring states, and existing caps or gating rules while applying the improvement.",
+            ],
+            "validation_focus": "Cover both the upgraded behavior and the existing supported behavior that must remain compatible.",
+            "default_tests": [
+                "Add or update tests that prove the requested improvement works on the existing feature path.",
+                "Add a compatibility regression test for the old behavior or edge case that must remain intact.",
+            ],
+            "risks": [
+                "- Risk: the improvement could regress a previously supported interaction, cap, or edge case.",
+                "- Mitigation: compare current-vs-target behavior explicitly and keep compatibility coverage around the old path.",
+            ],
+            "acceptance": [
+                "- Players experience the requested improvement on the existing feature path.",
+                "- Existing supported behavior, neighboring states, and edge-case coverage remain intact.",
+            ],
+        }
+    if planning_mode == "new_feature":
+        return {
+            "task_focus": "Planning focus: define the new player-facing capability, its owning integration point, and the neighboring systems that must stay stable.",
+            "design_overview": "- Treat this as new feature work: define the player outcome, trigger conditions, and the gameplay boundaries around the new capability.",
+            "design_behavior": "- Describe the new player-facing behavior, when it triggers, and which nearby states or systems must integrate cleanly.",
+            "design_technical_note": "Capture the owning runtime hook, required gates or caps, and the integration surfaces the new path will touch.",
+            "design_risk": "- Risk: the new feature can leak into adjacent systems if hooks, trigger conditions, or caps are left too broad.",
+            "design_focus": "Focus the brief on player outcome, owning integration points, trigger rules, and the adjacent systems that need regression coverage.",
+            "plan_overview": "- Introduce the requested gameplay behavior without destabilizing adjacent systems or generic shared hooks.",
+            "plan_steps": [
+                "Implement the new capability at the confirmed owner and keep its trigger conditions, caps, and state transitions explicit.",
+                "Guard neighboring systems so the new behavior stays isolated to the intended gameplay path.",
+            ],
+            "validation_focus": "Cover the new feature path plus the closest non-triggering path that must remain unchanged.",
+            "default_tests": [
+                "Add a regression test proving the new feature activates only under the intended gameplay conditions.",
+                "Add a regression test proving the closest neighboring path does not accidentally trigger the new behavior.",
+            ],
+            "risks": [
+                "- Risk: the new capability may fire from the wrong state or bleed into nearby systems.",
+                "- Mitigation: keep the hook narrow, gate the trigger conditions explicitly, and cover adjacent paths in tests.",
+            ],
+            "acceptance": [
+                "- Players can trigger the new gameplay capability under the intended conditions.",
+                "- Adjacent gameplay paths remain stable and automated coverage proves the new behavior stays gated correctly.",
+            ],
+        }
+    if planning_mode == "non_gameplay":
+        return {
+            "task_focus": "Planning focus: this request does not belong to gameplay engineering.",
+            "design_overview": "- This request appears outside gameplay ownership.",
+            "design_behavior": "- Route the work to the owning non-gameplay discipline instead of producing a gameplay plan.",
+            "design_technical_note": "No gameplay runtime owner should be assumed for this request.",
+            "design_risk": "- Risk: a gameplay workflow could produce misleading implementation guidance for a task it does not own.",
+            "design_focus": "Keep the document limited to ownership handoff and do not invent gameplay implementation work.",
+            "plan_overview": "- Do not draft a gameplay implementation plan for non-gameplay-owned work.",
+            "plan_steps": ["Route the task to the correct owner."],
+            "validation_focus": "No gameplay validation should be proposed.",
+            "default_tests": ["No gameplay tests should be proposed for non-gameplay-owned work."],
+            "risks": ["- Risk: wrong-owner execution can waste time and create misleading artifacts."],
+            "acceptance": ["- The task is routed away from gameplay engineering."],
+        }
+    return {
+        "task_focus": "Planning focus: reproduce the issue, isolate the likely root cause, apply the narrowest safe fix, and prove the regression stays closed.",
+        "design_overview": "- Treat this as bugfix work: capture the broken behavior, likely failing hook, and the smallest safe fix boundary.",
+        "design_behavior": "- Describe the broken player-facing behavior, the intended behavior, and the neighboring path that must remain stable after the fix.",
+        "design_technical_note": "Capture the failing owner, root-cause hypothesis, and validation path before implementation begins.",
+        "design_risk": "- Risk: a broad fix could hide the symptom while shifting the regression into adjacent gameplay states.",
+        "design_focus": "Focus the brief on repro, likely root cause, the smallest safe fix boundary, and the regression path that must be retested.",
+        "plan_overview": "- Keep the fix as small as the grounded owner allows and avoid redesigning unrelated gameplay systems.",
+        "plan_steps": [
+            "Patch the smallest grounded hook or condition that explains the failure and keep adjacent state transitions unchanged.",
+            "Add or update regression coverage for the failing path and the closest neighboring gameplay path that could drift.",
+        ],
+        "validation_focus": "Prove the original regression is closed and the closest neighboring path still behaves the same.",
+        "default_tests": [
+            "Add a regression test that reproduces the original gameplay failure and proves the fix closes it.",
+            "Add a neighboring-path regression test so the narrow bugfix does not spill into adjacent gameplay states.",
+        ],
+        "risks": [
+            "- Risk: the fix may mask the symptom while leaving the root cause or a neighboring regression behind.",
+            "- Mitigation: anchor the fix on the grounded owner, keep the patch narrow, and cover the nearest adjacent path with tests.",
+        ],
+        "acceptance": [
+            "- The original gameplay bug no longer reproduces on the grounded owner path.",
+            "- The closest neighboring gameplay path remains stable and automated checks still pass.",
+        ],
+    }
+
+
+def _planning_mode_owner_step(planning_mode: str, current_runtime_paths: list[str]) -> str:
+    owner_path = current_runtime_paths[0] if current_runtime_paths else ""
+    if planning_mode == "refactor":
+        return (
+            f"Anchor the refactor on {owner_path} and map the seams before moving code."
+            if owner_path
+            else "Confirm the live runtime owner, current seams, and invariants before refactoring."
+        )
+    if planning_mode == "improve_feature":
+        return (
+            f"Anchor the improvement on {owner_path} and compare the current behavior against the requested upgrade."
+            if owner_path
+            else "Confirm the live runtime owner and document the current feature behavior before improving it."
+        )
+    if planning_mode == "new_feature":
+        return (
+            f"Anchor the new capability on {owner_path} and identify the exact integration hook for the new behavior."
+            if owner_path
+            else "Confirm the owning gameplay runtime path and the exact integration hook before adding the new feature."
+        )
+    return (
+        f"Reproduce the bug and anchor the fix on {owner_path}."
+        if owner_path
+        else "Confirm the owning gameplay runtime path and the failing hook before coding the fix."
+    )
+
+
+def _classify_task(context: WorkflowContext, task_prompt: str) -> tuple[str, str, str]:
     gameplay_hits = len(tokenize(task_prompt) & GAMEPLAY_KEYWORDS)
     non_gameplay_hits = len(tokenize(task_prompt) & NON_GAMEPLAY_KEYWORDS)
     fallback_task_type = "maintenance"
@@ -669,45 +934,61 @@ def _classify_task(context: WorkflowContext, task_prompt: str) -> tuple[str, str
         fallback_task_type = "feature"
     elif any(marker in lowered for marker in ("maintain", "maintenance", "refactor", "harden", "cleanup", "stabil")):
         fallback_task_type = "maintenance"
+    fallback_planning_mode = _infer_planning_mode(task_prompt, fallback_task_type=fallback_task_type)
 
     if non_gameplay_hits > gameplay_hits and gameplay_hits == 0:
         fallback_task_type = "non_gameplay"
+        fallback_planning_mode = "non_gameplay"
         fallback_reason = "The prompt does not appear to be gameplay-owned work."
     else:
-        fallback_reason = f"The prompt is best handled as gameplay `{fallback_task_type}` work."
+        fallback_reason = (
+            f"The prompt is best handled as gameplay `{fallback_task_type}` work using the "
+            f"`{_planning_mode_label(fallback_planning_mode)}` planning mode."
+        )
 
     if context.llm.is_enabled():
         schema = {
             "type": "object",
             "properties": {
                 "task_type": {"type": "string"},
+                "planning_mode": {"type": "string"},
                 "reason": {"type": "string"},
             },
-            "required": ["task_type", "reason"],
+            "required": ["task_type", "planning_mode", "reason"],
             "additionalProperties": False,
         }
         try:
             result = context.llm.generate_json(
                 instructions=(
-                    "Classify a gameplay-engineering request. Return one of: bugfix, feature, maintenance, or non_gameplay. "
+                    "Classify a gameplay-engineering request. Return a broad task_type and a detailed planning_mode. "
+                    "task_type must be one of: bugfix, feature, maintenance, or non_gameplay. "
+                    "planning_mode must be one of: bugfix, refactor, improve_feature, new_feature, or non_gameplay. "
+                    "Map refactor work to task_type=maintenance. Map improve_feature and new_feature to task_type=feature. "
                     "Use non_gameplay only when the task is clearly outside gameplay ownership."
                 ),
                 input_text=build_prompt_brief(
                     opening="Decide how this gameplay-engineering request should be classified.",
                     sections=[("Request", task_prompt.strip())],
-                    closing="Choose the track that best matches the real gameplay ownership and user intent.",
+                    closing=(
+                        "Choose the broad execution track and the more specific planning mode that best match the real gameplay ownership "
+                        "and user intent."
+                    ),
                 ),
                 schema_name="gameplay_task_classification",
                 schema=schema,
             )
             task_type = str(result.get("task_type", fallback_task_type)).strip().lower()
+            planning_mode = str(result.get("planning_mode", fallback_planning_mode)).strip().lower()
+            if planning_mode in PLANNING_MODE_TO_TASK_TYPE and task_type not in {"bugfix", "feature", "maintenance", "non_gameplay"}:
+                task_type = PLANNING_MODE_TO_TASK_TYPE[planning_mode]
             if task_type not in {"bugfix", "feature", "maintenance", "non_gameplay"}:
                 task_type = fallback_task_type
+            planning_mode = _normalize_planning_mode(task_type, planning_mode or fallback_planning_mode)
             reason = str(result.get("reason", fallback_reason)).strip() or fallback_reason
-            return task_type, reason
+            return task_type, planning_mode, reason
         except Exception:
-            return fallback_task_type, fallback_reason
-    return fallback_task_type, fallback_reason
+            return fallback_task_type, fallback_planning_mode, fallback_reason
+    return fallback_task_type, fallback_planning_mode, fallback_reason
 
 
 def _prepare_investigation_strategy_payload(
@@ -774,9 +1055,16 @@ def _prepare_investigation_strategy_payload(
                         ("Task request", task_prompt.strip()),
                         (
                             "Current round",
-                            (
-                                f"This is investigation round {int(state.get('investigation_round', 0)) + 1} "
-                                f"for a {state.get('task_type', 'bugfix')} task."
+                            "\n".join(
+                                [
+                                    (
+                                        f"This is investigation round {int(state.get('investigation_round', 0)) + 1} "
+                                        f"for a {state.get('task_type', 'bugfix')} task."
+                                    ),
+                                    (
+                                        f"Planning mode: {_planning_mode_label(state.get('planning_mode', _default_planning_mode(state.get('task_type', 'bugfix'))))}."
+                                    ),
+                                ]
                             ),
                         ),
                         ("What survived from the previous pass", previous_learning),
@@ -1078,6 +1366,7 @@ def _compose_investigation_doc(state: EngineerState, payload: dict[str, Any], *,
             "# Gameplay Engineer Investigation",
             "",
             f"- Task Type: {state['task_type']}",
+            f"- Planning Mode: {state.get('planning_mode', _default_planning_mode(state['task_type']))}",
             f"- Investigation Round: {round_index}",
             f"- Implementation Medium: {state['implementation_medium']}",
             f"- Implementation Medium Reason: {state['implementation_medium_reason'] or 'None.'}",
@@ -1202,25 +1491,34 @@ def _compose_bug_context_doc(context: WorkflowContext, state: EngineerState) -> 
 
 
 def _compose_design_doc(context: WorkflowContext, state: EngineerState) -> str:
+    planning_mode = _normalize_planning_mode(
+        state["task_type"],
+        str(state.get("planning_mode", _default_planning_mode(state["task_type"]))),
+    )
+    planning_profile = _planning_mode_profile(planning_mode)
+    technical_notes = [
+        *list(state.get("current_runtime_paths", [])),
+        planning_profile["design_technical_note"],
+    ]
     fallback = "\n".join(
         [
             "# Gameplay Design Context",
             "",
             "## Overview",
             f"- Request: {state['task_prompt']}",
-            "- Keep the change scoped to gameplay-only ownership and preserve adjacent gameplay states.",
+            planning_profile["design_overview"],
             "",
             "## Existing References",
             _format_bullets(list(state.get("doc_hits", [])), empty_message="No strong design references were found."),
             "",
             "## Player-Facing Behavior",
-            "- Describe the expected gameplay behavior and the neighboring path that must remain stable.",
+            planning_profile["design_behavior"],
             "",
             "## Technical Notes",
-            _format_bullets(list(state.get("current_runtime_paths", [])), empty_message="No runtime owner has been grounded yet."),
+            _format_bullets(technical_notes, empty_message="No runtime owner has been grounded yet."),
             "",
             "## Risks",
-            "- Risk: adjacent gameplay states could drift if the change is implemented too broadly.",
+            planning_profile["design_risk"],
         ]
     )
     if context.llm.is_enabled():
@@ -1228,12 +1526,22 @@ def _compose_design_doc(context: WorkflowContext, state: EngineerState) -> str:
             return context.llm.generate_text(
                 instructions=(
                     "Write a concise markdown design context document with these exact sections: Overview, Existing References, "
-                    "Player-Facing Behavior, Technical Notes, Risks."
+                    "Player-Facing Behavior, Technical Notes, Risks. "
+                    f"Treat the request as {_planning_mode_label(planning_mode)} work. {planning_profile['design_focus']}"
                 ),
                 input_text=build_prompt_brief(
                     opening="Prepare the gameplay design context that will ground planning and review.",
                     sections=[
                         ("Task request", state["task_prompt"].strip()),
+                        (
+                            "Planning frame",
+                            "\n".join(
+                                [
+                                    f"- Task type: {state['task_type']}",
+                                    f"- Planning mode: {planning_mode}",
+                                ]
+                            ),
+                        ),
                         (
                             "Grounded references",
                             _format_bullets(list(state.get("doc_hits", []))),
@@ -1243,7 +1551,10 @@ def _compose_design_doc(context: WorkflowContext, state: EngineerState) -> str:
                             _format_bullets(list(state.get("current_runtime_paths", []))),
                         ),
                     ],
-                    closing="Keep the design context concrete, scoped to gameplay ownership, and explicit about nearby behavior that must remain stable.",
+                    closing=(
+                        "Keep the design context concrete, scoped to gameplay ownership, explicit about nearby behavior that must remain stable, "
+                        f"and aligned with this {_planning_mode_label(planning_mode)} planning mode."
+                    ),
                 ),
             )
         except Exception:
@@ -1252,48 +1563,51 @@ def _compose_design_doc(context: WorkflowContext, state: EngineerState) -> str:
 
 
 def _compose_plan_doc(context: WorkflowContext, state: EngineerState, *, revise: bool) -> str:
+    planning_mode = _normalize_planning_mode(
+        state["task_type"],
+        str(state.get("planning_mode", _default_planning_mode(state["task_type"]))),
+    )
+    planning_profile = _planning_mode_profile(planning_mode)
     task_type_reason = state["classification_reason"] or f"This work is classified as {state['task_type']}."
     filtered_review_blocking_issues = _filter_plan_revision_items(list(state.get("review_blocking_issues", [])))
     filtered_review_improvement_actions = _filter_plan_revision_items(list(state.get("review_improvement_actions", [])))
+    implementation_steps = [
+        _planning_mode_owner_step(planning_mode, list(state.get("current_runtime_paths", []))),
+        *list(planning_profile["plan_steps"]),
+    ]
+    unit_test_lines = list(state.get("test_hits", []))
+    if unit_test_lines:
+        unit_test_lines.append(planning_profile["validation_focus"])
+    else:
+        unit_test_lines = list(planning_profile["default_tests"])
     fallback = "\n".join(
         [
             "# Gameplay Implementation Plan",
             "",
             "## Overview",
             f"- {state['task_prompt']}",
-            "- Keep nearby gameplay states stable while delivering the requested behavior.",
+            planning_profile["plan_overview"],
             "",
             "## Task Type",
             f"- {state['task_type']}",
+            f"- Planning mode: {planning_mode}",
             f"- Classification reason: {task_type_reason}",
+            planning_profile["task_focus"],
             "",
             "## Existing Docs",
             _format_bullets(list(state.get("doc_hits", [])), empty_message="No grounded docs found."),
             "",
             "## Implementation Steps",
-            _format_bullets(
-                [
-                    f"Anchor the change on {state['current_runtime_paths'][0]}."
-                    if state.get("current_runtime_paths")
-                    else "Confirm the owning gameplay runtime path before coding.",
-                    "Keep the change narrow and protect the neighboring gameplay transition.",
-                    "Preserve existing validation hooks and logs where possible.",
-                ]
-            ),
+            _format_bullets(implementation_steps),
             "",
             "## Unit Tests",
-            _format_bullets(
-                list(state.get("test_hits", []))
-                or ["Add or update automated regression coverage for the owning gameplay path."]
-            ),
+            _format_bullets(unit_test_lines),
             "",
             "## Risks",
-            "- Risk: adjacent gameplay states could regress if the hook is too broad.",
-            "- Mitigation: constrain the change to the grounded owner and cover the neighbor path in tests.",
+            "\n".join(planning_profile["risks"]),
             "",
             "## Acceptance Criteria",
-            "- The requested gameplay outcome is visible to the player.",
-            "- Neighboring gameplay paths remain unchanged and automated checks still pass.",
+            "\n".join(planning_profile["acceptance"]),
         ]
     )
     instruction = (
@@ -1310,7 +1624,8 @@ def _compose_plan_doc(context: WorkflowContext, state: EngineerState, *, revise:
             return context.llm.generate_text(
                 instructions=(
                     f"{instruction} using these exact sections: Overview, Task Type, Existing Docs, Implementation Steps, "
-                    "Unit Tests, Risks, Acceptance Criteria."
+                    "Unit Tests, Risks, Acceptance Criteria. "
+                    f"Shape the plan for {_planning_mode_label(planning_mode)} work. {planning_profile['task_focus']}"
                 ),
                 input_text=build_prompt_brief(
                     opening="Draft the next gameplay implementation plan for this workflow.",
@@ -1321,10 +1636,12 @@ def _compose_plan_doc(context: WorkflowContext, state: EngineerState, *, revise:
                             "\n".join(
                                 [
                                     f"- Task type: {state['task_type']}",
+                                    f"- Planning mode: {planning_mode}",
                                     f"- Architecture review required: {state['requires_architecture_review']}",
                                 ]
                             ),
                         ),
+                        ("Mode-specific guidance", planning_profile["task_focus"]),
                         (
                             "Open blocking issues",
                             _format_bullets(filtered_review_blocking_issues),
@@ -1339,7 +1656,8 @@ def _compose_plan_doc(context: WorkflowContext, state: EngineerState, *, revise:
                     closing=(
                         "Produce a plan that is implementation-ready, anchored on the current gameplay owner, "
                         "and explicit about regression coverage for adjacent behavior. Keep the plan technical and "
-                        "do not add review-round bookkeeping, sign-off workflow, or artifact naming requirements."
+                        "do not add review-round bookkeeping, sign-off workflow, or artifact naming requirements. "
+                        f"Stay aligned with this {_planning_mode_label(planning_mode)} planning mode."
                     ),
                 ),
             )
@@ -1620,6 +1938,9 @@ def _evaluate_investigation_quality(
                             [
                                 f"- Investigation round: {review_round}",
                                 f"- Task type: {state.get('task_type', 'bugfix')}",
+                                (
+                                    f"- Planning mode: {state.get('planning_mode', _default_planning_mode(state.get('task_type', 'bugfix')))}"
+                                ),
                                 f"- Execution track: {state.get('execution_track', state.get('task_type', 'bugfix'))}",
                                 f"- Approval threshold: {INVESTIGATION_SCORE}/100",
                             ]
@@ -1779,12 +2100,13 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
     reviewer_graph = context.get_workflow_graph("gameplay-reviewer-workflow")
 
     def classify_request(state: EngineerState) -> dict[str, Any]:
-        task_type, reason = _classify_task(context, state["task_prompt"])
+        task_type, planning_mode, reason = _classify_task(context, state["task_prompt"])
         gameplay_scope_verdict = "gameplay" if task_type != "non_gameplay" else "non_gameplay"
         implementation_requested = not _is_read_only_request(state["task_prompt"]) and task_type != "non_gameplay"
         execution_track = task_type if task_type in {"bugfix", "feature", "maintenance"} else "bugfix"
         return {
             "task_type": task_type,
+            "planning_mode": planning_mode,
             "execution_track": execution_track,
             "gameplay_scope_verdict": gameplay_scope_verdict,
             "classification_reason": reason,
@@ -1814,7 +2136,10 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
             "workspace_write_summary": "",
             "workspace_source_file": "",
             "workspace_test_file": "",
-            "summary": f"{metadata.name} classified the gameplay request as `{task_type}`.",
+            "summary": (
+                f"{metadata.name} classified the gameplay request as `{task_type}` with "
+                f"`{planning_mode}` planning mode."
+            ),
         }
 
     def request_investigation(state: EngineerState) -> dict[str, Any]:
@@ -1943,6 +2268,7 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
                 "# Investigation Blocked Delivery",
                 "",
                 f"- Task type: {state['task_type']}",
+                f"- Planning mode: {state.get('planning_mode', _default_planning_mode(state['task_type']))}",
                 f"- Investigation loop status: {state.get('investigation_loop_status', 'unknown')}",
                 "",
                 "## Blocking Issues",
@@ -1956,6 +2282,8 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
         final_report = {
             "status": "investigation-blocked",
             "implementation_requested": bool(state.get("implementation_requested", False)),
+            "task_type": str(state.get("task_type", "")),
+            "planning_mode": str(state.get("planning_mode", "")),
             "investigation_loop_status": str(state.get("investigation_loop_status", "unknown")),
             "review_loop_status": str(state.get("review_loop_status", "not-started")),
             "repair_loop_status": str(state.get("repair_loop_status", "not-started")),
@@ -1977,6 +2305,7 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
                 "# Investigation Delivery",
                 "",
                 f"- Task type: {state['task_type']}",
+                f"- Planning mode: {state.get('planning_mode', _default_planning_mode(state['task_type']))}",
                 f"- Execution track: {state['execution_track']}",
                 f"- Implementation requested: {state['implementation_requested']}",
                 "",
@@ -1994,6 +2323,8 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
         final_report = {
             "status": "investigation-completed",
             "implementation_requested": bool(state.get("implementation_requested", False)),
+            "task_type": str(state.get("task_type", "")),
+            "planning_mode": str(state.get("planning_mode", "")),
             "investigation_loop_status": str(state.get("investigation_loop_status", "passed")),
             "review_loop_status": str(state.get("review_loop_status", "not-started")),
             "repair_loop_status": str(state.get("repair_loop_status", "not-started")),
@@ -2115,6 +2446,7 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
                                 "\n".join(
                                     [
                                         f"- Task type: {state['task_type']}",
+                                        f"- Planning mode: {state.get('planning_mode', _default_planning_mode(state['task_type']))}",
                                         f"- Execution track: {state['execution_track']}",
                                         f"- Workspace source file: {state['workspace_source_file']}",
                                         f"- Workspace test file: {state['workspace_test_file']}",
@@ -2253,6 +2585,8 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
             [
                 "# Gameplay Delivery Summary",
                 "",
+                f"Task type: {state['task_type']}",
+                f"Planning mode: {state.get('planning_mode', _default_planning_mode(state['task_type']))}",
                 f"Implementation medium: {state['implementation_medium']}",
                 f"Blueprint fix strategy: {state['blueprint_fix_strategy']}",
                 f"Blueprint manual action required: {state['blueprint_manual_action_required']}",
@@ -2267,6 +2601,8 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
         final_report = {
             "status": final_status,
             "implementation_requested": bool(state.get("implementation_requested", False)),
+            "task_type": str(state.get("task_type", "")),
+            "planning_mode": str(state.get("planning_mode", "")),
             "implementation_medium": state["implementation_medium"],
             "blueprint_manual_action_required": bool(state.get("blueprint_manual_action_required", False)),
             "investigation_loop_status": str(state.get("investigation_loop_status", "passed")),
@@ -2295,6 +2631,8 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
         final_report = {
             "status": "repair-blocked",
             "implementation_requested": bool(state.get("implementation_requested", True)),
+            "task_type": str(state.get("task_type", "")),
+            "planning_mode": str(state.get("planning_mode", "")),
             "implementation_medium": state["implementation_medium"],
             "blueprint_manual_action_required": bool(state.get("blueprint_manual_action_required", False)),
             "investigation_loop_status": str(state.get("investigation_loop_status", "passed")),
@@ -2328,6 +2666,8 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
         final_report = {
             "status": "review-blocked",
             "implementation_requested": bool(state.get("implementation_requested", True)),
+            "task_type": str(state.get("task_type", "")),
+            "planning_mode": str(state.get("planning_mode", "")),
             "implementation_medium": state["implementation_medium"],
             "blueprint_manual_action_required": bool(state.get("blueprint_manual_action_required", False)),
             "investigation_loop_status": str(state.get("investigation_loop_status", "passed")),
