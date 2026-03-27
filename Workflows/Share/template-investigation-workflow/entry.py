@@ -9,6 +9,11 @@ from typing_extensions import NotRequired, TypedDict
 
 from core.graph_logging import trace_graph_node, trace_route_decision
 from core.llm import CodexCliLLMClient, LLMError
+from core.executor import (
+    ClaudeCodeExecutorClient,
+    build_executor_system_prompt,
+    build_executor_task_prompt,
+)
 from core.models import WorkflowContext, WorkflowMetadata
 from core.text_utils import keyword_tokens, normalize_text, slugify, tokenize
 
@@ -132,6 +137,11 @@ def _investigation_pass_mandate(investigation_round: int) -> str:
 
 
 def _select_investigator_llm(context: WorkflowContext) -> tuple[Any, str]:
+    # Prefer executor client for full tool access (Edit, Read, Bash, Grep).
+    executor = context.get_llm("executor")
+    if isinstance(executor, ClaudeCodeExecutorClient) and executor.is_enabled():
+        return executor, "claude-executor-tools"
+
     investigator_llm = context.get_llm("investigator")
     if isinstance(investigator_llm, CodexCliLLMClient):
         return investigator_llm.with_overrides(sandbox_mode="workspace-write"), "codex-agent-tools"
@@ -392,7 +402,44 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
         )
 
         investigation_doc = fallback_doc
-        if investigator_llm.is_enabled():
+        if investigation_mode == "claude-executor-tools" and isinstance(investigator_llm, ClaudeCodeExecutorClient):
+            try:
+                system_prompt = build_executor_system_prompt(
+                    working_directory=str(context.host_root),
+                    scope_constraints=[
+                        "Investigate only — do not modify files, do not write patches.",
+                        "Use Read, Grep, Glob, and Bash (read-only commands) to gather evidence.",
+                        "Write a markdown investigation brief with these sections: Task Framing, Project Root Findings, "
+                        "Candidate Ownership, Root Cause Hypothesis, Architecture Notes, Clean Code Notes, "
+                        "Optimization Notes, Verification Plan, Open Questions.",
+                    ],
+                )
+                task_prompt = build_executor_task_prompt(
+                    description=(
+                        f"Investigate the host project like a senior engineer converging on root cause and owner.\n\n"
+                        f"Host project root: {context.host_root}\n"
+                        f"Investigation round: {investigation_round}/{MAX_REVIEW_ROUNDS}\n\n"
+                        f"Task: {state['task_prompt']}\n\n"
+                        f"Round goal: {_investigation_round_goal(investigation_round=investigation_round, review_feedback=str(state.get('review_feedback', '')), previous_investigation=str(state.get('investigation_doc', '')))}\n\n"
+                        f"Verification mandate: {_investigation_pass_mandate(investigation_round)}\n\n"
+                        f"Suggested docs: {_format_bullets(project_context['docs'], empty_message='None.')}\n"
+                        f"Suggested source: {_format_bullets(project_context['source'], empty_message='None.')}\n"
+                        f"Suggested tests: {_format_bullets(project_context['tests'], empty_message='None.')}\n\n"
+                        f"Previous investigation:\n{state.get('investigation_doc', '') or 'None. First round.'}\n"
+                    ),
+                    prior_feedback=str(state.get("review_feedback", "")) or None,
+                    context=project_context["snapshot"],
+                )
+                result = investigator_llm.execute_task(
+                    task_prompt=task_prompt,
+                    system_prompt=system_prompt,
+                    working_directory=str(context.host_root),
+                )
+                if result.success and result.result_text.strip():
+                    investigation_doc = result.result_text
+            except Exception:
+                investigation_doc = fallback_doc
+        elif investigator_llm.is_enabled():
             try:
                 investigation_method = (
                     "Use the Codex agent tools available in this environment to inspect the project directly, read the most relevant "

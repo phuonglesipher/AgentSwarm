@@ -123,5 +123,63 @@ class QualityLoopTests(unittest.TestCase):
         self.assertTrue(second_round.completed)
 
 
+    def test_loop_does_not_stagnate_when_score_meets_threshold(self) -> None:
+        spec = QualityLoopSpec(
+            loop_id="plan-review",
+            threshold=90,
+            max_rounds=4,
+            min_score_delta=1,
+            stagnation_limit=2,
+        )
+
+        second_round = evaluate_quality_loop(
+            spec,
+            round_index=2,
+            score=90,
+            approved=True,
+            previous_score=90,
+            prior_stagnated_rounds=0,
+            blocking_issues=[],
+        )
+
+        self.assertEqual(second_round.stagnated_rounds, 0)
+        self.assertEqual(second_round.status, "passed")
+        self.assertTrue(second_round.approved)
+
+    def test_loop_still_stagnates_when_score_is_below_threshold(self) -> None:
+        spec = QualityLoopSpec(
+            loop_id="plan-review",
+            threshold=90,
+            max_rounds=4,
+            min_score_delta=1,
+            stagnation_limit=2,
+        )
+
+        second_round = evaluate_quality_loop(
+            spec,
+            round_index=2,
+            score=70,
+            approved=False,
+            previous_score=70,
+            prior_stagnated_rounds=0,
+            blocking_issues=["Still needs work."],
+        )
+        third_round = evaluate_quality_loop(
+            spec,
+            round_index=3,
+            score=70,
+            approved=False,
+            previous_score=70,
+            prior_stagnated_rounds=second_round.stagnated_rounds,
+            blocking_issues=["Still needs work."],
+        )
+
+        self.assertEqual(second_round.stagnated_rounds, 1)
+        self.assertEqual(second_round.status, "retry")
+        self.assertEqual(third_round.stagnated_rounds, 2)
+        self.assertEqual(third_round.status, "stagnated")
+        self.assertTrue(third_round.completed)
+
+
 if __name__ == "__main__":
     unittest.main()

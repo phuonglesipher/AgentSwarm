@@ -35,6 +35,7 @@ class MainState(TypedDict):
     run_dir: str
     tasks: list[MainTask]
     results: list[dict[str, Any]]
+    execution_results: list[dict[str, Any]]
     final_response: str
     routing_notes: list[str]
     active_task_index: int | None
@@ -61,7 +62,14 @@ def _split_prompt(prompt: str) -> list[str]:
 
 
 def _fallback_plan_tasks(prompt: str) -> list[str]:
-    return _split_prompt(prompt)
+    candidates = _split_prompt(prompt)
+    if len(candidates) > 1:
+        return candidates
+    numbered = re.split(r'(?:^|\n)\s*\d+[\.\)]\s+', prompt)
+    numbered = [s.strip() for s in numbered if s.strip()]
+    if len(numbered) > 1:
+        return numbered
+    return candidates
 
 
 def _prefer_single_task(prompt: str) -> bool:
@@ -83,6 +91,13 @@ def _prefer_single_task(prompt: str) -> bool:
         " step 2",
         " first,",
         " second,",
+        " additionally ",
+        " also ",
+        " as well as ",
+        " followed by ",
+        " next ",
+        " then ",
+        " finally ",
     )
     return not any(marker in lowered for marker in multi_markers)
 
@@ -328,6 +343,7 @@ def build_initial_state(
         "run_dir": run_dir,
         "tasks": [],
         "results": [],
+        "execution_results": [],
         "final_response": "",
         "routing_notes": [],
         **_reset_active_task_fields(),

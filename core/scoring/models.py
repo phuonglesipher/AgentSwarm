@@ -24,6 +24,7 @@ class ScorePolicy:
     confidence_threshold: float = 1.0
     strong_confidence_threshold: float = 2.0
     require_confidence_when_available: bool = True
+    confidence_override_score: int = 95
     history_filename: str = "score_history.jsonl"
 
 

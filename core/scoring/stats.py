@@ -34,8 +34,10 @@ def mad_confidence(
         return None
 
     mad = median_absolute_deviation(observations)
-    if mad is None or mad == 0:
+    if mad is None:
         return None
+    if mad == 0:
+        return float('inf')
 
     baseline_value = float(observations[0] if baseline is None else baseline)
     current_value = float(observations[-1] if current is None else current)

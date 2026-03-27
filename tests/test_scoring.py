@@ -89,5 +89,82 @@ class ScoringEngineTests(unittest.TestCase):
         self.assertEqual(len(final_decision.history), 4)
 
 
+    def test_engine_waives_confidence_gate_for_very_high_scores(self) -> None:
+        policy = ScorePolicy(
+            system_id="review-score",
+            threshold=90,
+            require_blocker_free=True,
+            require_missing_section_free=False,
+            require_explicit_approval=True,
+            confidence_override_score=95,
+        )
+
+        with tempfile.TemporaryDirectory(prefix="agentswarm-score-override-") as temp_dir:
+            artifact_dir = Path(temp_dir)
+            final_decision = None
+            for round_index, score in enumerate((90, 100, 80, 96), start=1):
+                final_decision = evaluate_score_decision(
+                    policy,
+                    round_index=round_index,
+                    assessments=[
+                        ScoreAssessment(
+                            label="Overall",
+                            score=score,
+                            max_score=100,
+                            status="pass",
+                            rationale="Round-level aggregate score.",
+                        )
+                    ],
+                    explicit_approval=True,
+                    artifact_dir=artifact_dir,
+                )
+
+        self.assertIsNotNone(final_decision)
+        assert final_decision is not None
+        self.assertTrue(final_decision.approved)
+        self.assertEqual(final_decision.score, 96)
+        self.assertFalse(
+            any(item.startswith("Scoring Confidence:") for item in final_decision.blocking_issues),
+        )
+
+    def test_identical_scores_produce_stable_confidence(self) -> None:
+        confidence = mad_confidence([90, 90, 90], baseline=90, current=90, min_samples=3)
+        self.assertEqual(confidence, float('inf'))
+
+    def test_engine_treats_stable_scores_as_high_confidence(self) -> None:
+        policy = ScorePolicy(
+            system_id="review-score",
+            threshold=90,
+            require_blocker_free=True,
+            require_missing_section_free=False,
+            require_explicit_approval=True,
+        )
+
+        with tempfile.TemporaryDirectory(prefix="agentswarm-score-stable-") as temp_dir:
+            artifact_dir = Path(temp_dir)
+            final_decision = None
+            for round_index in range(1, 4):
+                final_decision = evaluate_score_decision(
+                    policy,
+                    round_index=round_index,
+                    assessments=[
+                        ScoreAssessment(
+                            label="Overall",
+                            score=92,
+                            max_score=100,
+                            status="pass",
+                            rationale="Consistent score.",
+                        )
+                    ],
+                    explicit_approval=True,
+                    artifact_dir=artifact_dir,
+                )
+
+        self.assertIsNotNone(final_decision)
+        assert final_decision is not None
+        self.assertTrue(final_decision.approved)
+        self.assertEqual(final_decision.confidence_label, "stable")
+
+
 if __name__ == "__main__":
     unittest.main()

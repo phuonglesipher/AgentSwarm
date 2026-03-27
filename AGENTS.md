@@ -19,6 +19,7 @@
 - `python3 -m unittest discover -s tests -v` runs the full test suite.
 - `python3 -m compileall main.py core Workflows tests` performs a fast recursive syntax check.
 - `codex login` is required before Codex CLI-backed LLM flows can run successfully.
+- Set `LLM_PROVIDER=claude_code` to use Claude Code as the LLM backend (requires `claude` CLI).
 
 ## Coding Style & Naming Conventions
 - Use Python with 4-space indentation and explicit type hints where practical.
@@ -41,7 +42,7 @@
 ## Testing Guidelines
 - Tests use the standard library `unittest` runner.
 - Name test files `test_*.py` and test functions `test_*`.
-- Cover deterministic fallback behavior first; LLM-backed flows should degrade safely when Codex or API auth is unavailable.
+- Cover deterministic fallback behavior first; LLM-backed flows should degrade safely when Codex, Claude Code, or API auth is unavailable.
 - When fixing workflow runtime behavior, add or update a regression test in `tests/test_runtime.py`.
 
 ## Commit & Pull Request Guidelines

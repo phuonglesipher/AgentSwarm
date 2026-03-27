@@ -15,6 +15,11 @@ from typing_extensions import NotRequired, TypedDict
 
 from core.graph_logging import trace_graph_node, trace_route_decision
 from core.llm import LLMError
+from core.executor import (
+    ClaudeCodeExecutorClient,
+    build_executor_system_prompt,
+    build_executor_task_prompt,
+)
 from core.models import WorkflowContext, WorkflowMetadata
 from core.natural_language_prompts import build_prompt_brief
 from core.quality_loop import QualityLoopSpec, evaluate_quality_loop
@@ -2415,8 +2420,55 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
             }
 
         code_bundle = _fallback_code_bundle(state, scope_root)
+
+        # Try executor first — it can use real tools (Edit, Read, Bash) to implement changes.
+        executor = context.get_llm("executor")
+        executor_succeeded = False
+        if isinstance(executor, ClaudeCodeExecutorClient) and executor.is_enabled():
+            try:
+                system_prompt = build_executor_system_prompt(
+                    working_directory=str(scope_root),
+                    scope_constraints=[
+                        f"Modify only these files: {state['workspace_source_file']}, {state['workspace_test_file']}",
+                        "Keep changes scoped to the grounded owner path.",
+                        "Preserve unrelated behavior in adjacent code.",
+                        "Run any available tests after making changes.",
+                    ],
+                )
+                task_prompt = build_executor_task_prompt(
+                    description=(
+                        f"Implement the following gameplay task:\n\n{state['task_prompt']}\n\n"
+                        f"Source file: {state['workspace_source_file']}\n"
+                        f"Test file: {state['workspace_test_file']}\n"
+                        f"Task type: {state['task_type']}\n"
+                        f"Implementation medium: {state['implementation_medium']}\n"
+                    ),
+                    prior_feedback=state.get("review_feedback", "").strip() or None,
+                    context=(
+                        f"Investigation summary:\n{state.get('investigation_doc', '').strip() or 'None.'}\n\n"
+                        f"Plan:\n{state.get('plan_doc', '').strip() or 'None.'}\n\n"
+                        f"Previous self-test output:\n{state.get('self_test_output', '').strip() or 'None. First attempt.'}"
+                    ),
+                )
+                result = executor.execute_task(
+                    task_prompt=task_prompt,
+                    system_prompt=system_prompt,
+                    working_directory=str(scope_root),
+                )
+                if result.success:
+                    executor_succeeded = True
+                    source_path = scope_root / state["workspace_source_file"]
+                    test_path = scope_root / state["workspace_test_file"]
+                    code_bundle = {
+                        "source_code": _safe_read_text(source_path, limit=50000) or code_bundle["source_code"],
+                        "test_code": _safe_read_text(test_path, limit=50000) or code_bundle["test_code"],
+                        "implementation_notes": result.result_text[:2000],
+                    }
+            except Exception:
+                pass
+
         codegen_llm = context.get_llm("codegen")
-        if codegen_llm.is_enabled():
+        if not executor_succeeded and codegen_llm.is_enabled():
             schema = {
                 "type": "object",
                 "properties": {

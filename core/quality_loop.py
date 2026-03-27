@@ -84,7 +84,7 @@ def evaluate_quality_loop(
     else:
         score_delta = clamped_score - max(0, min(int(previous_score), 100))
         stagnated_rounds = max(0, int(prior_stagnated_rounds))
-        if score_delta < spec.min_score_delta:
+        if score_delta < spec.min_score_delta and clamped_score < spec.threshold:
             stagnated_rounds += 1
         else:
             stagnated_rounds = 0

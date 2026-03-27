@@ -7,7 +7,7 @@ import unittest
 from unittest import mock
 
 from core.graph_logging import GRAPH_TIMELINE_FILE, LLM_PROMPT_TRACE_FILE, bind_active_trace_context
-from core.llm import CodexCLIConfig, CodexCliLLMClient, ensure_traced_llm_client
+from core.llm import ClaudeCodeConfig, ClaudeCodeLLMClient, CodexCLIConfig, CodexCliLLMClient, ensure_traced_llm_client
 
 
 class CodexCliLLMClientTests(unittest.TestCase):
@@ -263,6 +263,157 @@ class CodexCliLLMClientTests(unittest.TestCase):
         self.assertIn("`workflow_graph.review`", timeline_trace)
         self.assertIn("`PROMPT`", timeline_trace)
         self.assertIn("`RESPONSE`", timeline_trace)
+
+
+class ClaudeCodeLLMClientTests(unittest.TestCase):
+    def test_generate_text_extracts_result_from_json_envelope(self) -> None:
+        client = ClaudeCodeLLMClient(
+            ClaudeCodeConfig(
+                command="claude",
+                model="claude-sonnet-4-6",
+                timeout_seconds=30,
+            )
+        )
+        resolved_command = r"C:\Users\phuong.le\.claude\local\claude.cmd"
+        captured: list[dict[str, object]] = []
+
+        def fake_run(command: list[str], **kwargs) -> subprocess.CompletedProcess[str]:
+            captured.append({"command": command, "input": kwargs.get("input")})
+            import json
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                stdout=json.dumps({
+                    "type": "result",
+                    "subtype": "success",
+                    "is_error": False,
+                    "result": "The movement bug is caused by a missing state reset.",
+                    "session_id": "test-session",
+                    "cost_usd": 0.001,
+                    "duration_ms": 500,
+                }),
+                stderr="",
+            )
+
+        with mock.patch("core.llm.shutil.which", return_value=resolved_command):
+            with mock.patch("core.llm.subprocess.run", side_effect=fake_run):
+                result = client.generate_text(instructions="Analyze the bug", input_text="Player cannot move")
+
+        self.assertEqual(result, "The movement bug is caused by a missing state reset.")
+        command = captured[0]["command"]
+        assert isinstance(command, list)
+        self.assertEqual(command[0], resolved_command)
+        self.assertIn("-p", command)
+        self.assertIn("--output-format", command)
+        self.assertEqual(command[command.index("--output-format") + 1], "json")
+        self.assertIn("--model", command)
+        self.assertEqual(command[command.index("--model") + 1], "claude-sonnet-4-6")
+        self.assertIn("Player cannot move", str(captured[0]["input"]))
+
+    def test_generate_json_parses_structured_output(self) -> None:
+        client = ClaudeCodeLLMClient(
+            ClaudeCodeConfig(
+                command="claude",
+                model="claude-sonnet-4-6",
+                timeout_seconds=30,
+            )
+        )
+        resolved_command = r"C:\Users\phuong.le\.claude\local\claude.cmd"
+        captured: list[dict[str, object]] = []
+
+        def fake_run(command: list[str], **kwargs) -> subprocess.CompletedProcess[str]:
+            captured.append({"command": command, "input": kwargs.get("input")})
+            import json
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                stdout=json.dumps({
+                    "type": "result",
+                    "subtype": "success",
+                    "is_error": False,
+                    "result": '{"task_type": "bugfix", "priority": "high"}',
+                    "session_id": "test-session",
+                }),
+                stderr="",
+            )
+
+        with mock.patch("core.llm.shutil.which", return_value=resolved_command):
+            with mock.patch("core.llm.subprocess.run", side_effect=fake_run):
+                result = client.generate_json(
+                    instructions="Classify the task",
+                    input_text="Fix the dodge cancel",
+                    schema_name="task_classification",
+                    schema={
+                        "type": "object",
+                        "properties": {"task_type": {"type": "string"}, "priority": {"type": "string"}},
+                        "required": ["task_type", "priority"],
+                        "additionalProperties": False,
+                    },
+                )
+
+        self.assertEqual(result, {"task_type": "bugfix", "priority": "high"})
+        prompt = str(captured[0]["input"])
+        self.assertIn("matching this schema", prompt)
+        self.assertIn("task_type", prompt)
+
+    def test_generate_text_raises_on_claude_error_response(self) -> None:
+        client = ClaudeCodeLLMClient(
+            ClaudeCodeConfig(
+                command="claude",
+                model="claude-sonnet-4-6",
+                timeout_seconds=30,
+            )
+        )
+        resolved_command = r"C:\Users\phuong.le\.claude\local\claude.cmd"
+
+        def fake_run(command: list[str], **kwargs) -> subprocess.CompletedProcess[str]:
+            import json
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                stdout=json.dumps({
+                    "type": "result",
+                    "subtype": "error",
+                    "is_error": True,
+                    "result": "Rate limited",
+                }),
+                stderr="",
+            )
+
+        with mock.patch("core.llm.shutil.which", return_value=resolved_command):
+            with mock.patch("core.llm.subprocess.run", side_effect=fake_run):
+                with self.assertRaises(Exception) as ctx:
+                    client.generate_text(instructions="Test", input_text="Hello")
+                self.assertIn("Rate limited", str(ctx.exception))
+
+    def test_with_overrides_changes_max_turns(self) -> None:
+        client = ClaudeCodeLLMClient(
+            ClaudeCodeConfig(
+                command="claude",
+                model="claude-sonnet-4-6",
+                timeout_seconds=30,
+                max_turns=1,
+            )
+        )
+        resolved_command = r"C:\Users\phuong.le\.claude\local\claude.cmd"
+        captured: list[list[str]] = []
+
+        def fake_run(command: list[str], **kwargs) -> subprocess.CompletedProcess[str]:
+            captured.append(command)
+            import json
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                stdout=json.dumps({"type": "result", "subtype": "success", "is_error": False, "result": "ok"}),
+                stderr="",
+            )
+
+        with mock.patch("core.llm.shutil.which", return_value=resolved_command):
+            with mock.patch("core.llm.subprocess.run", side_effect=fake_run):
+                client.with_overrides(max_turns=5).generate_text(instructions="Test", input_text="Hello")
+
+        command = captured[0]
+        self.assertEqual(command[command.index("--max-turns") + 1], "5")
 
 
 if __name__ == "__main__":

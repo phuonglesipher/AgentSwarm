@@ -74,6 +74,12 @@ def _confidence_verdict(
             "unmeasured",
             "MAD confidence is unavailable because the observed score noise floor collapsed to zero.",
         )
+    if confidence == float('inf'):
+        return (
+            confidence,
+            "stable",
+            "All scored observations are identical, so the score is perfectly stable.",
+        )
     if confidence >= policy.strong_confidence_threshold:
         return (
             confidence,
@@ -136,7 +142,7 @@ def evaluate_score_decision(
     normalized_improvement_actions = list(_dedupe_preserve_order(improvement_actions))
     approval_reasons: list[str] = []
 
-    if policy.require_confidence_when_available and confidence is not None and confidence < policy.confidence_threshold:
+    if policy.require_confidence_when_available and confidence is not None and confidence < policy.confidence_threshold and score < policy.confidence_override_score:
         normalized_blocking_issues.append(
             (
                 f"Scoring Confidence: MAD confidence is {confidence:.1f}x noise floor; "
