@@ -4,6 +4,13 @@ import argparse
 from datetime import datetime
 from pathlib import Path
 
+from dotenv import load_dotenv
+
+# Load .env from AgentSwarm root so LLM_PROVIDER and model configs are picked up
+_env_path = Path(__file__).resolve().parent / ".env"
+if _env_path.exists():
+    load_dotenv(_env_path, override=True)
+
 from langgraph.checkpoint.memory import InMemorySaver
 
 from core.config_loader import load_agentswarm_config, load_project_manifest

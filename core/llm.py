@@ -5,9 +5,11 @@ from dataclasses import dataclass, replace
 import json
 import os
 from pathlib import Path
+import random
 import shutil
 import subprocess
 import tempfile
+import time
 from time import perf_counter
 from typing import Any
 from urllib import error, request
@@ -18,6 +20,35 @@ from core.natural_language_prompts import build_llm_request
 
 class LLMError(RuntimeError):
     """Raised when an LLM backend fails or returns unusable output."""
+
+
+_MAX_RETRIES = int(os.getenv("LLM_MAX_RETRIES", "3"))
+_RETRY_BASE_DELAY = float(os.getenv("LLM_RETRY_BASE_DELAY", "1.0"))
+_RETRY_MAX_DELAY = 30.0
+
+
+def _is_retryable_llm_error(exc: Exception) -> bool:
+    if not isinstance(exc, LLMError):
+        return False
+    msg = str(exc).lower()
+    retryable_signals = ("429", "500", "502", "503", "504", "timeout", "timed out", "connection")
+    return any(signal in msg for signal in retryable_signals)
+
+
+def _retry_with_backoff(fn, *, max_retries: int = _MAX_RETRIES, retryable_check=_is_retryable_llm_error):
+    last_exc: Exception | None = None
+    for attempt in range(max_retries + 1):
+        try:
+            return fn()
+        except Exception as exc:
+            last_exc = exc
+            if attempt >= max_retries:
+                raise
+            if retryable_check and not retryable_check(exc):
+                raise
+            delay = min(_RETRY_BASE_DELAY * (2 ** attempt) + random.uniform(0, 0.5), _RETRY_MAX_DELAY)
+            time.sleep(delay)
+    raise last_exc  # unreachable
 
 
 class LLMClient(ABC):
@@ -197,14 +228,18 @@ class ResponsesLLMClient(LLMClient):
             },
             method="POST",
         )
-        try:
-            with request.urlopen(api_request, timeout=self.config.timeout_seconds) as response:
-                return json.loads(response.read().decode("utf-8"))
-        except error.HTTPError as exc:
-            body = exc.read().decode("utf-8", errors="replace")
-            raise LLMError(f"OpenAI API returned {exc.code}: {body}") from exc
-        except error.URLError as exc:
-            raise LLMError(f"OpenAI API request failed: {exc}") from exc
+
+        def _do_request():
+            try:
+                with request.urlopen(api_request, timeout=self.config.timeout_seconds) as response:
+                    return json.loads(response.read().decode("utf-8"))
+            except error.HTTPError as exc:
+                body = exc.read().decode("utf-8", errors="replace")
+                raise LLMError(f"OpenAI API returned {exc.code}: {body}") from exc
+            except error.URLError as exc:
+                raise LLMError(f"OpenAI API request failed: {exc}") from exc
+
+        return _retry_with_backoff(_do_request)
 
     def _extract_output_text(self, response: dict[str, Any]) -> str:
         top_level = response.get("output_text")
@@ -395,6 +430,197 @@ class CodexCliLLMClient(LLMClient):
 
             command.append("-")
 
+            def _do_codex_run():
+                try:
+                    completed = subprocess.run(
+                        command,
+                        check=False,
+                        cwd=effective_cwd,
+                        capture_output=True,
+                        input=prompt,
+                        text=True,
+                        encoding="utf-8",
+                        errors="replace",
+                        timeout=self.config.timeout_seconds,
+                    )
+                except subprocess.TimeoutExpired as exc:
+                    raise LLMError(f"Codex CLI timed out after {self.config.timeout_seconds} seconds") from exc
+
+                if completed.returncode != 0:
+                    combined = "\n".join(
+                        part.strip() for part in [completed.stdout, completed.stderr] if part and part.strip()
+                    )
+                    if _looks_like_auth_error(combined):
+                        self._disabled_reason = "codex login required"
+                    raise LLMError(f"Codex CLI failed with exit code {completed.returncode}: {combined}")
+                return completed
+
+            completed = _retry_with_backoff(_do_codex_run)
+
+            output = output_path.read_text(encoding="utf-8").strip()
+            if not output:
+                raise LLMError("Codex CLI returned an empty final message")
+            return output
+
+
+@dataclass(frozen=True)
+class ClaudeCodeConfig:
+    command: str
+    model: str
+    timeout_seconds: int
+    working_directory: str | None = None
+    max_turns: int = 1
+
+
+class ClaudeCodeLLMClient(LLMClient):
+    def __init__(self, config: ClaudeCodeConfig) -> None:
+        self.config = config
+        self._disabled_reason: str | None = None
+
+    def _resolve_command_path(self) -> str | None:
+        resolved = shutil.which(self.config.command)
+        if resolved:
+            return resolved
+        candidate = Path(self.config.command)
+        if candidate.exists():
+            return str(candidate)
+        return None
+
+    def is_enabled(self) -> bool:
+        return self._disabled_reason is None and self._resolve_command_path() is not None
+
+    def describe(self) -> str:
+        if self._disabled_reason:
+            return f"claude_code/{self.config.model}: disabled ({self._disabled_reason})"
+        if self._resolve_command_path() is None:
+            return f"claude_code/{self.config.model}: disabled (claude command not found)"
+        return f"claude_code/{self.config.model}: available"
+
+    def with_overrides(
+        self,
+        *,
+        working_directory: str | None = None,
+        timeout_seconds: int | None = None,
+        max_turns: int | None = None,
+    ) -> "ClaudeCodeLLMClient":
+        return ClaudeCodeLLMClient(
+            replace(
+                self.config,
+                working_directory=working_directory or self.config.working_directory,
+                timeout_seconds=timeout_seconds or self.config.timeout_seconds,
+                max_turns=max_turns if max_turns is not None else self.config.max_turns,
+            )
+        )
+
+    def generate_text(self, *, instructions: str, input_text: str, effort: str | None = None) -> str:
+        del effort
+        prompt = _merge_prompt(instructions=instructions, input_text=input_text, require_json=False)
+        request_event_id = log_llm_prompt_event(
+            client_label=f"claude_code/{self.config.model}",
+            transport="claude_code_subprocess",
+            instructions=instructions,
+            input_text=input_text,
+            final_prompt=prompt,
+            require_structured_output=False,
+        )
+        start_time = perf_counter()
+        output_text = ""
+        try:
+            output_text = self._run_claude(prompt=prompt, json_schema=None)
+        except Exception as exc:
+            log_llm_response_event(
+                client_label=f"claude_code/{self.config.model}",
+                transport="claude_code_subprocess",
+                require_structured_output=False,
+                response_text=output_text,
+                elapsed_ms=round((perf_counter() - start_time) * 1000, 2),
+                request_event_id=request_event_id,
+                error=str(exc),
+            )
+            raise
+        log_llm_response_event(
+            client_label=f"claude_code/{self.config.model}",
+            transport="claude_code_subprocess",
+            require_structured_output=False,
+            response_text=output_text,
+            elapsed_ms=round((perf_counter() - start_time) * 1000, 2),
+            request_event_id=request_event_id,
+        )
+        return output_text
+
+    def generate_json(
+        self,
+        *,
+        instructions: str,
+        input_text: str,
+        schema_name: str,
+        schema: dict[str, Any],
+        effort: str | None = None,
+    ) -> dict[str, Any]:
+        del effort
+        prompt = _merge_prompt(instructions=instructions, input_text=input_text, require_json=True)
+        request_event_id = log_llm_prompt_event(
+            client_label=f"claude_code/{self.config.model}",
+            transport="claude_code_subprocess",
+            instructions=instructions,
+            input_text=input_text,
+            final_prompt=prompt,
+            require_structured_output=True,
+            schema_name=schema_name,
+        )
+        start_time = perf_counter()
+        output = ""
+        try:
+            output = self._run_claude(prompt=prompt, json_schema=schema)
+            parsed = _parse_json_object(output)
+        except Exception as exc:
+            log_llm_response_event(
+                client_label=f"claude_code/{self.config.model}",
+                transport="claude_code_subprocess",
+                require_structured_output=True,
+                response_text=output,
+                elapsed_ms=round((perf_counter() - start_time) * 1000, 2),
+                schema_name=schema_name,
+                request_event_id=request_event_id,
+                error=str(exc),
+            )
+            raise
+        log_llm_response_event(
+            client_label=f"claude_code/{self.config.model}",
+            transport="claude_code_subprocess",
+            require_structured_output=True,
+            response_text=output,
+            elapsed_ms=round((perf_counter() - start_time) * 1000, 2),
+            schema_name=schema_name,
+            request_event_id=request_event_id,
+        )
+        return parsed
+
+    def _run_claude(self, *, prompt: str, json_schema: dict[str, Any] | None) -> str:
+        resolved_command = self._resolve_command_path()
+        if not resolved_command or not self.is_enabled():
+            raise LLMError(self.describe())
+
+        command = [
+            resolved_command,
+            "-p", "-",
+            "--output-format", "json",
+            "--model", self.config.model,
+            "--max-turns", str(self.config.max_turns),
+            "--verbose",
+        ]
+        if json_schema is not None:
+            schema_hint = (
+                "\n\nYou MUST respond with ONLY a valid JSON object matching this schema "
+                f"(no markdown fences, no explanation):\n{json.dumps(json_schema, indent=2)}"
+            )
+            prompt = prompt + schema_hint
+
+        effective_cwd = (
+            str(Path(self.config.working_directory).resolve()) if self.config.working_directory else os.getcwd()
+        )
+
+        def _do_claude_run():
             try:
                 completed = subprocess.run(
                     command,
@@ -408,20 +634,95 @@ class CodexCliLLMClient(LLMClient):
                     timeout=self.config.timeout_seconds,
                 )
             except subprocess.TimeoutExpired as exc:
-                raise LLMError(f"Codex CLI timed out after {self.config.timeout_seconds} seconds") from exc
+                raise LLMError(f"Claude Code timed out after {self.config.timeout_seconds} seconds") from exc
 
             if completed.returncode != 0:
                 combined = "\n".join(
                     part.strip() for part in [completed.stdout, completed.stderr] if part and part.strip()
                 )
-                if _looks_like_auth_error(combined):
-                    self._disabled_reason = "codex login required"
-                raise LLMError(f"Codex CLI failed with exit code {completed.returncode}: {combined}")
+                if _looks_like_claude_auth_error(combined):
+                    self._disabled_reason = "claude auth required"
+                raise LLMError(f"Claude Code failed with exit code {completed.returncode}: {combined}")
+            return completed
 
-            output = output_path.read_text(encoding="utf-8").strip()
-            if not output:
-                raise LLMError("Codex CLI returned an empty final message")
-            return output
+        completed = _retry_with_backoff(_do_claude_run)
+
+        raw_output = completed.stdout.strip()
+        if not raw_output:
+            raise LLMError("Claude Code returned empty output")
+
+        return _extract_claude_result(raw_output)
+
+
+def _looks_like_claude_auth_error(output: str) -> bool:
+    normalized = output.lower()
+    return "unauthorized" in normalized or "not authenticated" in normalized or "api key" in normalized
+
+
+def _extract_claude_result(raw_output: str) -> str:
+    # Try parsing as JSON first
+    try:
+        data = json.loads(raw_output)
+    except json.JSONDecodeError:
+        data = None
+
+    # Single JSON object (non-verbose output: {"result":"...", "is_error":false})
+    if isinstance(data, dict):
+        if data.get("is_error"):
+            raise LLMError(f"Claude Code returned error: {data.get('result', 'unknown error')}")
+        result = data.get("result")
+        if isinstance(result, str) and result.strip():
+            return result.strip()
+        return raw_output
+
+    # JSON array of events (--output-format json --verbose produces
+    # [{"type":"system",...}, {"type":"assistant","message":{...}}, ...])
+    events = data if isinstance(data, list) else None
+
+    # Also try JSONL (one JSON object per line)
+    if events is None:
+        events = []
+        for line in raw_output.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                events.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+
+    if not events:
+        return raw_output
+
+    # Extract the last assistant text and any result events
+    last_assistant_text = ""
+    for event in events:
+        if not isinstance(event, dict):
+            continue
+
+        # Claude Code emits: {"type":"assistant","message":{"content":[{"type":"text","text":"..."}]}}
+        if event.get("type") == "assistant":
+            message = event.get("message", {})
+            content_blocks = message.get("content", [])
+            text_parts = []
+            for block in content_blocks:
+                if isinstance(block, dict) and block.get("type") == "text":
+                    text = block.get("text", "").strip()
+                    if text:
+                        text_parts.append(text)
+            if text_parts:
+                last_assistant_text = "\n\n".join(text_parts)
+
+        # {"type":"result","result":"..."} format
+        if event.get("type") == "result":
+            result = event.get("result")
+            if isinstance(result, str) and result.strip():
+                return result.strip()
+
+    if last_assistant_text:
+        return last_assistant_text
+
+    return raw_output
 
 
 def _merge_prompt(*, instructions: str, input_text: str, require_json: bool) -> str:
@@ -465,7 +766,12 @@ class LLMManager:
     def from_env(cls, *, working_directory: str | None = None) -> "LLMManager":
         provider = os.getenv("LLM_PROVIDER")
         if not provider:
-            provider = "codex_cli" if shutil.which(os.getenv("CODEX_COMMAND", "codex")) else "responses_api"
+            if shutil.which(os.getenv("CODEX_COMMAND", "codex")):
+                provider = "codex_cli"
+            elif shutil.which(os.getenv("CLAUDE_COMMAND", "claude")):
+                provider = "claude_code"
+            else:
+                provider = "responses_api"
         provider = provider.lower()
 
         profiles: dict[str, LLMClient] = {}
@@ -616,7 +922,10 @@ class TracedLLMClient(LLMClient):
 
 
 def ensure_traced_llm_client(client: Any) -> Any:
-    if isinstance(client, (ResponsesLLMClient, CodexCliLLMClient, TracedLLMClient)):
+    if isinstance(client, (ResponsesLLMClient, CodexCliLLMClient, ClaudeCodeLLMClient, TracedLLMClient)):
+        return client
+    # Pass through executor clients — they have their own tracing and a different interface.
+    if hasattr(client, "execute_task"):
         return client
     if not hasattr(client, "generate_text") or not hasattr(client, "generate_json"):
         return client
@@ -624,7 +933,9 @@ def ensure_traced_llm_client(client: Any) -> Any:
 
 
 def _discover_profiles(provider: str) -> list[str]:
-    if provider == "codex_cli":
+    if provider == "claude_code":
+        prefix = "CLAUDE_MODEL_"
+    elif provider == "codex_cli":
         prefix = "CODEX_MODEL_"
     else:
         prefix = "OPENAI_MODEL_"
@@ -635,6 +946,8 @@ def _discover_profiles(provider: str) -> list[str]:
         suffix = env_key.removeprefix(prefix).lower()
         if suffix:
             profiles.add(suffix)
+    if provider == "claude_code":
+        profiles.add("executor")
     return sorted(profiles)
 
 
@@ -644,6 +957,39 @@ def _build_client_for_profile(
     *,
     working_directory: str | None = None,
 ) -> LLMClient:
+    if provider == "claude_code" and profile == "executor":
+        from core.executor import ClaudeCodeExecutorClient, ClaudeCodeExecutorConfig
+
+        return ClaudeCodeExecutorClient(
+            ClaudeCodeExecutorConfig(
+                command=os.getenv("CLAUDE_COMMAND", "claude"),
+                model=os.getenv(
+                    "CLAUDE_EXECUTOR_MODEL",
+                    os.getenv("CLAUDE_MODEL", "claude-opus-4-6"),
+                ),
+                timeout_seconds=int(os.getenv("CLAUDE_EXECUTOR_TIMEOUT_SECONDS", "600")),
+                working_directory=working_directory,
+                permission_mode=os.getenv("CLAUDE_EXECUTOR_PERMISSION_MODE", "auto"),
+                max_turns=int(os.getenv("CLAUDE_EXECUTOR_MAX_TURNS", "25")),
+            )
+        )
+
+    if provider == "claude_code":
+        return ClaudeCodeLLMClient(
+            ClaudeCodeConfig(
+                command=os.getenv("CLAUDE_COMMAND", "claude"),
+                model=_get_profile_model(
+                    profile=profile,
+                    default_env="CLAUDE_MODEL",
+                    profile_prefix="CLAUDE_MODEL_",
+                    fallback_default="claude-opus-4-6",
+                ),
+                timeout_seconds=int(os.getenv("CLAUDE_TIMEOUT_SECONDS", "300")),
+                working_directory=working_directory,
+                max_turns=int(os.getenv("CLAUDE_MAX_TURNS", "1")),
+            )
+        )
+
     if provider == "codex_cli":
         return CodexCliLLMClient(
             CodexCLIConfig(
