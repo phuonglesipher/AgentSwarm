@@ -60,11 +60,7 @@ TEXT_SUFFIXES = {
     ".yaml",
     ".yml",
 }
-PRIORITY_SOURCE_ROOTS = (
-    "Source/S2",
-    "Plugins/SipherWorldPartition",
-    "Config",
-)
+_MAX_SUBDIRS_TO_SCAN = 10
 
 
 class CriterionAssessment(TypedDict):
@@ -225,13 +221,63 @@ def _safe_read_text(path: Path, *, limit: int = 700) -> str:
         return ""
 
 
-def _resolve_roots(scope_root: Path, relative_roots: tuple[str, ...]) -> list[Path]:
-    candidates = [scope_root / relative_root for relative_root in relative_roots]
-    existing = [path for path in candidates if path.exists()]
-    return existing or [scope_root]
+def _narrow_roots(
+    scope_root: Path,
+    relative_roots: tuple[str, ...],
+    exclude_roots: tuple[str, ...],
+    query_tokens: set[str],
+) -> list[Path]:
+    """Score subdirectories by keyword overlap with the query and return only
+    the top ``_MAX_SUBDIRS_TO_SCAN`` matches.  Avoids scanning thousands of
+    files inside broad roots like ``Plugins/`` on large UE projects.
+    """
+    narrow: list[tuple[int, Path]] = []
 
+    for rel_root in relative_roots:
+        root = scope_root / rel_root
+        if not root.exists():
+            continue
 
-_MAX_FILES_SCANNED = 2000
+        children: list[Path] = []
+        try:
+            children = [c for c in root.iterdir() if c.is_dir()]
+        except OSError:
+            pass
+
+        if len(children) <= _MAX_SUBDIRS_TO_SCAN:
+            narrow.append((0, root))
+            continue
+
+        scored_children: list[tuple[int, Path]] = []
+        for child in children:
+            if _should_skip(child, scope_root, exclude_roots):
+                continue
+            dir_tokens = tokenize(child.name)
+            overlap = len(query_tokens & dir_tokens)
+            scored_children.append((overlap, child))
+
+            try:
+                for grandchild in child.iterdir():
+                    if not grandchild.is_dir():
+                        continue
+                    if _should_skip(grandchild, scope_root, exclude_roots):
+                        continue
+                    gc_tokens = tokenize(grandchild.name)
+                    gc_overlap = len(query_tokens & gc_tokens)
+                    if gc_overlap > overlap:
+                        scored_children.append((gc_overlap, grandchild))
+            except OSError:
+                pass
+
+        scored_children.sort(key=lambda item: -item[0])
+        for score, child_path in scored_children[:_MAX_SUBDIRS_TO_SCAN]:
+            narrow.append((score, child_path))
+
+    if not narrow:
+        return [scope_root]
+
+    narrow.sort(key=lambda item: -item[0])
+    return [path for _, path in narrow]
 
 
 def _find_relevant_files(
@@ -243,10 +289,10 @@ def _find_relevant_files(
     max_hits: int = 5,
 ) -> list[str]:
     query_tokens = keyword_tokens(query_text) or tokenize(query_text)
+    roots = _narrow_roots(scope_root, relative_roots, exclude_roots, query_tokens)
     scored: list[tuple[int, str]] = []
-    files_visited = 0
 
-    for root in _resolve_roots(scope_root, relative_roots):
+    for root in roots:
         if not root.exists():
             continue
         for path in root.rglob("*"):
@@ -254,15 +300,10 @@ def _find_relevant_files(
                 continue
             if _should_skip(path, scope_root, exclude_roots):
                 continue
-            files_visited += 1
             relative_path = path.relative_to(scope_root).as_posix()
             score = len(query_tokens & tokenize(f"{relative_path}\n{_safe_read_text(path)}"))
             if score > 0:
                 scored.append((score, relative_path))
-            if files_visited >= _MAX_FILES_SCANNED:
-                break
-        if files_visited >= _MAX_FILES_SCANNED:
-            break
 
     scored.sort(key=lambda item: (-item[0], item[1].lower()))
     hits: list[str] = []
@@ -272,21 +313,7 @@ def _find_relevant_files(
         hits.append(relative_path)
         if len(hits) >= max_hits:
             break
-
-    if hits:
-        return hits
-
-    fallback_hits: list[str] = []
-    for root in _resolve_roots(scope_root, relative_roots):
-        for path in root.rglob("*"):
-            if not path.is_file() or path.suffix.lower() not in TEXT_SUFFIXES:
-                continue
-            if _should_skip(path, scope_root, exclude_roots):
-                continue
-            fallback_hits.append(path.relative_to(scope_root).as_posix())
-            if len(fallback_hits) >= max_hits:
-                return fallback_hits
-    return fallback_hits
+    return hits
 
 
 def _collect_project_context(
@@ -296,7 +323,7 @@ def _collect_project_context(
 ) -> dict[str, Any]:
     scope_root = context.resolve_scope_root("host_project")
     query_text = f"{task_prompt}\n{review_feedback}\nstreaming world partition level streaming texture async loading hitch memory".strip()
-    source_roots = PRIORITY_SOURCE_ROOTS or context.config.source_roots
+    source_roots = context.config.source_roots
     docs = _find_relevant_files(
         scope_root=scope_root,
         relative_roots=context.config.doc_roots,
