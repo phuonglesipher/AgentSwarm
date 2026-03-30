@@ -65,8 +65,9 @@ TEXT_SUFFIXES = {
 PRIORITY_SOURCE_ROOTS = (
     "Source/S2",
     "Plugins/Frameworks/SipherAIScalableFramework",
-    "Plugins/SipherHitbox",
-    "Plugins/Frameworks/SipherComboGraph",
+    "Plugins/Frameworks/SipherHitbox",
+    "Plugins/Frameworks/SipherDestructionRuntime",
+    "Plugins/SipherComboGraph",
 )
 
 
@@ -299,7 +300,9 @@ def _collect_project_context(
 ) -> dict[str, Any]:
     scope_root = context.resolve_scope_root("host_project")
     query_text = f"{task_prompt}\n{review_feedback}\ntick function game thread GAS ability AI physics query optimization".strip()
-    source_roots = (*context.config.source_roots, *PRIORITY_SOURCE_ROOTS)
+    # Use only priority roots for source — config.source_roots includes broad
+    # dirs like "Plugins/" (12K+ files) which makes scanning too slow.
+    source_roots = PRIORITY_SOURCE_ROOTS or context.config.source_roots
     docs = _find_relevant_files(
         scope_root=scope_root,
         relative_roots=context.config.doc_roots,

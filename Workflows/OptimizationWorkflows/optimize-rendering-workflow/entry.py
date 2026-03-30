@@ -298,7 +298,7 @@ def _collect_project_context(
 ) -> dict[str, Any]:
     scope_root = context.resolve_scope_root("host_project")
     query_text = f"{task_prompt}\n{review_feedback}\nrendering GPU draw call material shader Nanite Lumen LOD shadow lighting".strip()
-    source_roots = (*context.config.source_roots, *PRIORITY_SOURCE_ROOTS)
+    source_roots = PRIORITY_SOURCE_ROOTS or context.config.source_roots
     docs = _find_relevant_files(
         scope_root=scope_root,
         relative_roots=context.config.doc_roots,
