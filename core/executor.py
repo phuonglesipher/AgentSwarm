@@ -19,7 +19,7 @@ from time import perf_counter
 from typing import Any
 
 from core.graph_logging import log_llm_prompt_event, log_llm_response_event
-from core.llm import LLMError, _retry_with_backoff
+from core.llm import LLMError, _extract_claude_result, _retry_with_backoff
 
 
 @dataclass(frozen=True)
@@ -283,17 +283,10 @@ def _kill_process_tree(proc: subprocess.Popen) -> None:
 
 
 def _extract_executor_result(raw_output: str) -> str:
-    """Parse Claude Code JSON output to extract result text."""
-    try:
-        data = json.loads(raw_output)
-    except json.JSONDecodeError:
-        return raw_output
+    """Parse Claude Code JSON/JSONL output to extract the final result text.
 
-    if isinstance(data, dict):
-        if data.get("is_error"):
-            raise LLMError(f"Claude Code executor returned error: {data.get('result', 'unknown error')}")
-        result = data.get("result")
-        if isinstance(result, str) and result.strip():
-            return result.strip()
-
-    return raw_output
+    Delegates to ``_extract_claude_result`` which handles single JSON objects,
+    JSON arrays, and JSONL streams (one JSON event per line).  The executor
+    uses ``--output-format json --verbose`` which produces JSONL.
+    """
+    return _extract_claude_result(raw_output)

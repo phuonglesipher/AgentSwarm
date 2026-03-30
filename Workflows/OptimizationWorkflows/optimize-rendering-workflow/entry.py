@@ -109,6 +109,17 @@ class RenderingInvestigationState(TypedDict):
     optimization_domain: NotRequired[str]
 
 
+_MAX_PRIOR_CONTEXT_CHARS = 6000
+
+
+def _truncate_prior_context(text: str, *, max_chars: int = _MAX_PRIOR_CONTEXT_CHARS) -> str:
+    """Truncate long prior-round artifacts to keep the executor prompt manageable."""
+    text = str(text).strip()
+    if not text or len(text) <= max_chars:
+        return text
+    return text[:max_chars] + "\n\n[... truncated — full document available in artifacts ...]"
+
+
 def _format_bullets(items: list[str], *, empty_message: str = "None.") -> str:
     cleaned = [str(item).strip() for item in items if str(item).strip()]
     if not cleaned:
@@ -484,9 +495,9 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
                         f"Suggested docs: {_format_bullets(project_context['docs'], empty_message='None.')}\n"
                         f"Suggested source: {_format_bullets(project_context['source'], empty_message='None.')}\n"
                         f"Suggested tests: {_format_bullets(project_context['tests'], empty_message='None.')}\n\n"
-                        f"Previous investigation:\n{state.get('investigation_doc', '') or 'None. First round.'}\n"
+                        f"Previous investigation:\n{_truncate_prior_context(state.get('investigation_doc', '') or 'None. First round.')}\n"
                     ),
-                    prior_feedback=str(state.get("review_feedback", "")) or None,
+                    prior_feedback=_truncate_prior_context(state.get("review_feedback", "")) or None,
                     context=project_context["snapshot"],
                 )
                 result = investigator_llm.execute_task(
@@ -528,8 +539,8 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
                         f"Suggested starting source files:\n{_format_bullets(project_context['source'], empty_message='No strong source hits yet.')}\n\n"
                         f"Suggested starting tests:\n{_format_bullets(project_context['tests'], empty_message='No strong test hits yet.')}\n\n"
                         f"Current project snapshot:\n{project_context['snapshot']}\n\n"
-                        f"Previous investigation document:\n{state.get('investigation_doc', '') or 'None. This is the first round.'}\n\n"
-                        f"Previous reviewer feedback:\n{state.get('review_feedback', '') or 'None. This is the first round.'}\n\n"
+                        f"Previous investigation document:\n{_truncate_prior_context(state.get('investigation_doc', '') or 'None. This is the first round.')}\n\n"
+                        f"Previous reviewer feedback:\n{_truncate_prior_context(state.get('review_feedback', '') or 'None. This is the first round.')}\n\n"
                         f"Previous reviewer checklist:\n{_format_bullets(list(state.get('review_improvement_actions', [])), empty_message='None.')}\n\n"
                         "Return only the next investigation document. The next document must add real evidence, not just rephrase the prior round."
                     ),
