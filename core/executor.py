@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import json
 import os
+import signal
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 import shutil
@@ -163,22 +165,42 @@ class ClaudeCodeExecutorClient:
         result_text = ""
 
         def _do_execute():
+            # On Windows, create a new process group so we can kill the entire
+            # child tree on timeout instead of leaving orphaned claude.exe processes.
+            popen_kwargs: dict[str, Any] = {}
+            if sys.platform == "win32":
+                popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+
+            proc = subprocess.Popen(
+                command,
+                cwd=effective_cwd,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                **popen_kwargs,
+            )
             try:
-                completed = subprocess.run(
-                    command,
-                    check=False,
-                    cwd=effective_cwd,
-                    capture_output=True,
+                stdout, stderr = proc.communicate(
                     input=full_prompt,
-                    text=True,
-                    encoding="utf-8",
-                    errors="replace",
                     timeout=self.config.timeout_seconds,
                 )
-            except subprocess.TimeoutExpired as exc:
+            except subprocess.TimeoutExpired:
+                # Kill the entire process tree, not just the parent.
+                _kill_process_tree(proc)
+                proc.wait(timeout=10)
                 raise LLMError(
                     f"Claude Code executor timed out after {self.config.timeout_seconds} seconds"
-                ) from exc
+                )
+
+            completed = subprocess.CompletedProcess(
+                args=command,
+                returncode=proc.returncode,
+                stdout=stdout,
+                stderr=stderr,
+            )
 
             if completed.returncode != 0:
                 combined = "\n".join(
@@ -194,8 +216,19 @@ class ClaudeCodeExecutorClient:
                 )
             return completed
 
+        def _is_retryable_executor_error(exc: Exception) -> bool:
+            """Executor timeouts must NOT be retried — they mean the task is too
+            complex for the time budget, not a transient network failure."""
+            if not isinstance(exc, LLMError):
+                return False
+            msg = str(exc).lower()
+            if "timed out" in msg or "timeout" in msg:
+                return False
+            retryable_signals = ("429", "500", "502", "503", "504", "connection")
+            return any(s in msg for s in retryable_signals)
+
         try:
-            completed = _retry_with_backoff(_do_execute)
+            completed = _retry_with_backoff(_do_execute, retryable_check=_is_retryable_executor_error)
             raw_output = completed.stdout.strip()
             if not raw_output:
                 raise LLMError("Claude Code executor returned empty output")
@@ -224,6 +257,29 @@ class ClaudeCodeExecutorClient:
                 error=str(exc),
             )
             return ExecutionResult(success=False, result_text=result_text, error=str(exc))
+
+
+def _kill_process_tree(proc: subprocess.Popen) -> None:
+    """Kill a subprocess and all its children.
+
+    On Windows, ``taskkill /T /F`` kills the entire process tree.
+    On POSIX, send SIGTERM to the process group.
+    """
+    try:
+        if sys.platform == "win32":
+            subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                capture_output=True,
+                timeout=15,
+            )
+        else:
+            os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+    except (OSError, subprocess.SubprocessError):
+        # Fallback: kill just the parent.
+        try:
+            proc.kill()
+        except OSError:
+            pass
 
 
 def _extract_executor_result(raw_output: str) -> str:

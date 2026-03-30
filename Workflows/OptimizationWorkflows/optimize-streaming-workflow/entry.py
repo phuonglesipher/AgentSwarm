@@ -220,6 +220,9 @@ def _resolve_roots(scope_root: Path, relative_roots: tuple[str, ...]) -> list[Pa
     return existing or [scope_root]
 
 
+_MAX_FILES_SCANNED = 2000
+
+
 def _find_relevant_files(
     *,
     scope_root: Path,
@@ -230,6 +233,7 @@ def _find_relevant_files(
 ) -> list[str]:
     query_tokens = keyword_tokens(query_text) or tokenize(query_text)
     scored: list[tuple[int, str]] = []
+    files_visited = 0
 
     for root in _resolve_roots(scope_root, relative_roots):
         if not root.exists():
@@ -239,10 +243,15 @@ def _find_relevant_files(
                 continue
             if _should_skip(path, scope_root, exclude_roots):
                 continue
+            files_visited += 1
             relative_path = path.relative_to(scope_root).as_posix()
             score = len(query_tokens & tokenize(f"{relative_path}\n{_safe_read_text(path)}"))
             if score > 0:
                 scored.append((score, relative_path))
+            if files_visited >= _MAX_FILES_SCANNED:
+                break
+        if files_visited >= _MAX_FILES_SCANNED:
+            break
 
     scored.sort(key=lambda item: (-item[0], item[1].lower()))
     hits: list[str] = []
@@ -445,6 +454,9 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
                         f"Write a markdown investigation brief with these sections: {sections_str}.",
                         "Focus on world partition config, streaming volumes, async loading, texture streaming, and hitch sources.",
                         "Provide concrete numbers (cell sizes, pool sizes, load times, memory usage) wherever possible.",
+                        "CRITICAL: Your final output must be a CONCISE markdown brief under 4000 words. "
+                        "Do NOT dump raw file contents or tool output. Summarize findings, cite file:line references, "
+                        "and focus on actionable analysis. The brief will be reviewed by a separate LLM with limited context.",
                     ],
                 )
                 task_prompt = build_executor_task_prompt(
