@@ -20,7 +20,7 @@ from core.text_utils import keyword_tokens, normalize_text, slugify, tokenize
 
 APPROVAL_SCORE = 90
 MIN_REVIEW_ROUNDS = 2
-MAX_REVIEW_ROUNDS = 3
+MAX_REVIEW_ROUNDS = 5
 TEXT_SUFFIXES = {
     ".c",
     ".cc",
@@ -128,11 +128,12 @@ def _investigation_pass_mandate(investigation_round: int) -> str:
     if investigation_round < MIN_REVIEW_ROUNDS:
         return (
             f"This workflow requires at least {MIN_REVIEW_ROUNDS} review rounds, so this pass must leave a clear path "
-            "for an independent verification round instead of treating the first hypothesis as final."
+            "for an independent verification round instead of treating the first hypothesis as final. "
+            "Include a broad search for external consumers/callers of any identified APIs."
         )
     return (
         "This pass must independently re-verify or falsify the previous hypothesis with at least one new piece of evidence, "
-        "clearer sequencing proof, or a read-only command/test observation."
+        "clearer sequencing proof, a read-only command/test observation, or proof of caller presence/absence for the identified APIs."
     )
 
 
@@ -347,6 +348,11 @@ def _fallback_investigation_doc(
         "## Candidate Ownership",
         *_format_bullets(owners).splitlines(),
         "",
+        "## Consumer & Caller Analysis",
+        "- Search broadly for external callers of the APIs/functions identified above.",
+        "- Prove whether callers exist outside the owning module (grep for function names across the codebase).",
+        "- If no external callers found, state that explicitly — absence of callers is high-value evidence.",
+        "",
         "## Root Cause Hypothesis",
         "- The most credible next step is to inspect the candidate owner first and validate the runtime handoff.",
         "- Treat the current findings as an evidence-backed hypothesis, not a final diagnosis.",
@@ -410,8 +416,8 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
                         "Investigate only — do not modify files, do not write patches.",
                         "Use Read, Grep, Glob, and Bash (read-only commands) to gather evidence.",
                         "Write a markdown investigation brief with these sections: Task Framing, Project Root Findings, "
-                        "Candidate Ownership, Root Cause Hypothesis, Architecture Notes, Clean Code Notes, "
-                        "Optimization Notes, Verification Plan, Open Questions.",
+                        "Candidate Ownership, Consumer & Caller Analysis, Root Cause Hypothesis, Architecture Notes, "
+                        "Clean Code Notes, Optimization Notes, Verification Plan, Open Questions.",
                     ],
                 )
                 task_prompt = build_executor_task_prompt(
@@ -422,6 +428,9 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
                         f"Task: {state['task_prompt']}\n\n"
                         f"Round goal: {_investigation_round_goal(investigation_round=investigation_round, review_feedback=str(state.get('review_feedback', '')), previous_investigation=str(state.get('investigation_doc', '')))}\n\n"
                         f"Verification mandate: {_investigation_pass_mandate(investigation_round)}\n\n"
+                        f"Consumer analysis mandate: Search broadly (Grep, Glob) for external callers of any APIs or "
+                        f"functions identified as candidates. Prove presence or absence of callers outside the owning "
+                        f"module. If no external callers exist, state that explicitly — it changes optimization priority.\n\n"
                         f"Suggested docs: {_format_bullets(project_context['docs'], empty_message='None.')}\n"
                         f"Suggested source: {_format_bullets(project_context['source'], empty_message='None.')}\n"
                         f"Suggested tests: {_format_bullets(project_context['tests'], empty_message='None.')}\n\n"
@@ -452,8 +461,8 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
                     instructions=(
                         "You are template-investigation-workflow. Investigate the host project root like a senior engineer "
                         "trying to converge on the most credible root cause and owner. Write a markdown investigation brief using "
-                        "this exact section order: Task Framing, Project Root Findings, Candidate Ownership, Root Cause Hypothesis, "
-                        "Architecture Notes, Clean Code Notes, Optimization Notes, Verification Plan, Open Questions. "
+                        "this exact section order: Task Framing, Project Root Findings, Candidate Ownership, Consumer & Caller Analysis, "
+                        "Root Cause Hypothesis, Architecture Notes, Clean Code Notes, Optimization Notes, Verification Plan, Open Questions. "
                         f"Stay concrete, evidence-driven, and strict about scope. {investigation_method}"
                         "If previous review feedback exists, address it explicitly. Do not use JSON."
                     ),
@@ -464,6 +473,9 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
                         f"Task prompt:\n{state['task_prompt']}\n\n"
                         f"Round goal:\n{_investigation_round_goal(investigation_round=investigation_round, review_feedback=str(state.get('review_feedback', '')), previous_investigation=str(state.get('investigation_doc', '')))}\n\n"
                         f"Verification mandate:\n{_investigation_pass_mandate(investigation_round)}\n\n"
+                        f"Consumer analysis mandate: Search broadly (Grep, Glob) for external callers of any APIs or "
+                        f"functions identified as candidates. Prove presence or absence of callers outside the owning "
+                        f"module. If no external callers exist, state that explicitly — it changes optimization priority.\n\n"
                         f"Minimum review rounds before final approval can stick: {MIN_REVIEW_ROUNDS}\n\n"
                         f"Suggested starting docs:\n{_format_bullets(project_context['docs'], empty_message='No strong doc hits yet.')}\n\n"
                         f"Suggested starting source files:\n{_format_bullets(project_context['source'], empty_message='No strong source hits yet.')}\n\n"

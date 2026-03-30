@@ -18,7 +18,7 @@ from core.text_utils import normalize_text, slugify
 
 APPROVAL_SCORE = 90
 MIN_REVIEW_ROUNDS = 2
-MAX_REVIEW_ROUNDS = 3
+MAX_REVIEW_ROUNDS = 5
 LOOP_SPEC = QualityLoopSpec(
     loop_id="template-investigation-review",
     threshold=APPROVAL_SCORE,
@@ -43,7 +43,7 @@ MANDATORY_VERIFICATION_ACTION = (
 )
 REVIEW_CRITERIA = (
     ("Focus", 25, "Task Framing", "Root Cause Hypothesis"),
-    ("Evidence & Ownership", 20, "Project Root Findings", "Candidate Ownership"),
+    ("Evidence & Ownership", 20, "Project Root Findings", "Candidate Ownership", "Consumer & Caller Analysis"),
     ("Architecture", 20, "Architecture Notes"),
     ("Clean Code", 15, "Clean Code Notes"),
     ("Optimization", 10, "Optimization Notes"),
@@ -468,6 +468,10 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
             "You are a strict senior engineer reviewing an investigation brief. Score it hard against focus, evidence and ownership, "
             "architecture, clean code thinking, optimization awareness, and verification quality. "
             f"The criteria are: {', '.join(f'{name} ({weight} pts)' for name, weight, *_ in REVIEW_CRITERIA)}. "
+            "Under Evidence & Ownership, explicitly check whether the investigator searched for and documented "
+            "external consumers/callers of the APIs under investigation. If the brief lacks a 'Consumer & Caller "
+            "Analysis' section or does not prove presence/absence of callers outside the owning module, deduct "
+            "from Evidence & Ownership and flag it as an improvement action. "
             f"Minimum final-approval depth is {MIN_REVIEW_ROUNDS} review rounds. If the current round is below that floor, require one more "
             "pass that independently re-validates the causal chain with fresh evidence, clearer ordering proof, or a read-only reproduction. "
             "Do not approve early just because the first brief sounds plausible. "
