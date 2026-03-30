@@ -123,10 +123,16 @@ class ClaudeCodeExecutorClient:
         task_prompt: str,
         system_prompt: str | None = None,
         working_directory: str | None = None,
+        max_turns: int | None = None,
     ) -> ExecutionResult:
         """Execute a task using Claude Code with full tool access.
 
         Unlike generate_text(), this allows multi-turn tool use (Edit, Read, Bash, etc.).
+
+        Args:
+            max_turns: Override config.max_turns for this call. Useful for reducing
+                       turn budget on later investigation rounds where context is
+                       already established.
         """
         resolved_command = self._resolve_command_path()
         if not resolved_command or not self.is_enabled():
@@ -143,12 +149,14 @@ class ClaudeCodeExecutorClient:
         if system_prompt:
             full_prompt = f"{system_prompt}\n\n---\n\n{full_prompt}"
 
+        effective_max_turns = max_turns if max_turns is not None else self.config.max_turns
+
         command = [
             resolved_command,
             "-p", "-",
             "--output-format", "json",
             "--model", self.config.model,
-            "--max-turns", str(self.config.max_turns),
+            "--max-turns", str(effective_max_turns),
             "--verbose",
         ]
 
