@@ -72,7 +72,7 @@ def _fallback_plan_tasks(prompt: str) -> list[str]:
     return candidates
 
 
-def _prefer_single_task(prompt: str) -> bool:
+def _prefer_single_task(prompt: str, registry: WorkflowRegistry | None = None) -> bool:
     normalized = " ".join(prompt.split())
     if not normalized:
         return True
@@ -99,7 +99,13 @@ def _prefer_single_task(prompt: str) -> bool:
         " then ",
         " finally ",
     )
-    return not any(marker in lowered for marker in multi_markers)
+    if any(marker in lowered for marker in multi_markers):
+        return False
+
+    if registry is not None and registry.matches_multiple_workflows(prompt):
+        return False
+
+    return True
 
 
 def _compact_task_id(index: int, description: str) -> str:
@@ -110,12 +116,37 @@ def _compact_task_id(index: int, description: str) -> str:
     return f"task-{index}-{slug}-{digest}"
 
 
+_MAX_PRIOR_SUMMARY_CHARS = 500
+
+
+def _build_chained_prompt(description: str, prior_results: list[dict[str, Any]]) -> str:
+    """Append truncated prior task summaries to the task description."""
+    if not prior_results:
+        return description
+
+    lines = [description, "", "---", "", "## Prior task results (from earlier steps in this request)", ""]
+    for result in prior_results:
+        task_id = result.get("task_id", "unknown")
+        workflow = str(result.get("workflow_name", "unknown")).split("::")[-1]
+        output = result.get("result") or {}
+        summary = str(output.get("summary", "")).strip()
+        if not summary:
+            continue
+        if len(summary) > _MAX_PRIOR_SUMMARY_CHARS:
+            summary = summary[:_MAX_PRIOR_SUMMARY_CHARS] + "..."
+        lines.append(f"### {task_id} (via {workflow})")
+        lines.append(summary)
+        lines.append("")
+
+    return "\n".join(lines)
+
+
 def _fallback_route_task(registry: WorkflowRegistry, description: str) -> str | None:
     match = registry.route(description)
     return match.qualified_name if match else None
 
 
-def _llm_plan_tasks(llm, prompt: str, workspace_context: str = "") -> list[str]:
+def _llm_plan_tasks(llm, prompt: str, workspace_context: str = "", registry: WorkflowRegistry | None = None) -> list[str]:
     schema = {
         "type": "object",
         "properties": {
@@ -135,22 +166,36 @@ def _llm_plan_tasks(llm, prompt: str, workspace_context: str = "") -> list[str]:
         "required": ["tasks"],
         "additionalProperties": False,
     }
+
+    sections = [
+        (
+            "Workspace context",
+            workspace_context.strip() or "The runtime did not provide explicit host or engine paths.",
+        ),
+        ("User request", prompt.strip()),
+    ]
+
+    if registry is not None:
+        candidates = registry.list_metadata(exposed_only=True, include_shadowed=False)
+        if candidates:
+            workflow_catalog = "\n".join(
+                f"- {m.name}: {', '.join(m.capabilities[:3])}"
+                for m in candidates
+            )
+            sections.insert(1, ("Available workflows (split tasks along these boundaries)", workflow_catalog))
+
     result = llm.generate_json(
         instructions=(
             "You are the planning step of a workflow-driven software agent called AgentSwarm. "
             "Break the user's request into 1 to 5 implementation tasks. "
             "Return concise task descriptions that can each be routed to one workflow. "
+            "If the request clearly targets multiple workflows, split into separate tasks. "
+            "If the request targets a single workflow, keep it as one task. "
             "Operate on the host project, not on the AgentSwarm engine internals, unless the user explicitly asks to modify AgentSwarm."
         ),
         input_text=build_prompt_brief(
             opening="Break the user's request into a small set of workflow-owned implementation tasks.",
-            sections=[
-                (
-                    "Workspace context",
-                    workspace_context.strip() or "The runtime did not provide explicit host or engine paths.",
-                ),
-                ("User request", prompt.strip()),
-            ],
+            sections=sections,
             closing="Keep each task scoped so one workflow can own it cleanly from investigation through delivery.",
         ),
         schema_name="main_graph_task_plan",
@@ -285,13 +330,15 @@ def _reset_active_task_fields() -> dict[str, Any]:
     }
 
 
-def _prepare_active_task(task: MainTask, index: int) -> dict[str, Any]:
+def _prepare_active_task(task: MainTask, index: int, prior_results: list[dict[str, Any]] | None = None) -> dict[str, Any]:
     task_input = task["input"]
+    original_prompt = str(task_input.get("task_prompt") or task["description"])
+    chained_prompt = _build_chained_prompt(original_prompt, prior_results or [])
     return {
         "active_task_index": index,
         "active_task": task,
         "active_task_error": "",
-        "task_prompt": str(task_input.get("task_prompt") or task["description"]),
+        "task_prompt": chained_prompt,
         "task_id": str(task_input.get("task_id") or task["id"]),
         "plan_doc": str(task_input.get("plan_doc") or ""),
         "review_round": int(task_input.get("review_round") or 0),
@@ -405,14 +452,14 @@ def build_main_graph(
         planner_llm = ensure_traced_llm_client(llm_manager.resolve("planner"))
         if planner_llm.is_enabled():
             try:
-                descriptions = _llm_plan_tasks(planner_llm, state["prompt"], workspace_context)
+                descriptions = _llm_plan_tasks(planner_llm, state["prompt"], workspace_context, registry=registry)
                 planning_notes.append(f"Task planning used {llm_manager.describe('planner')}.")
             except LLMError as exc:
                 planning_notes.append(f"Planner fallback: {exc}")
         else:
             planning_notes.append("Task planning used deterministic fallback.")
 
-        if len(descriptions) > 1 and _prefer_single_task(state["prompt"]):
+        if len(descriptions) > 1 and _prefer_single_task(state["prompt"], registry=registry):
             descriptions = [state["prompt"].strip()]
             planning_notes.append("Collapsed planner output to one task because the prompt describes a single request.")
 
@@ -478,7 +525,7 @@ def build_main_graph(
     def select_next_task(state: MainState) -> dict[str, Any]:
         for index, task in enumerate(state["tasks"]):
             if task["status"] == "routed":
-                return _prepare_active_task(task, index)
+                return _prepare_active_task(task, index, prior_results=state["results"])
         return _reset_active_task_fields()
 
     def dispatch_active_task(state: MainState) -> str:

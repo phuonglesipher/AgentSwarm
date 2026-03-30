@@ -314,3 +314,20 @@ class WorkflowRegistry:
         if best_match is None or best_score <= 0 or not best_action_fit:
             return None
         return best_match
+
+    def matches_multiple_workflows(self, text: str, min_matches: int = 2) -> bool:
+        """Return True if *text* has significant token overlap with 2+ exposed workflows."""
+        metadata_items = self.list_metadata(exposed_only=True, include_shadowed=False)
+        text_tokens = _routing_tokens(text)
+        if not text_tokens:
+            return False
+
+        matched_count = 0
+        for metadata in metadata_items:
+            wf_tokens = _workflow_routing_tokens(metadata)
+            overlap = text_tokens & wf_tokens
+            if len(overlap) >= 2:
+                matched_count += 1
+            if matched_count >= min_matches:
+                return True
+        return False
