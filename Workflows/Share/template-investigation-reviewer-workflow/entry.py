@@ -25,7 +25,7 @@ LOOP_SPEC = QualityLoopSpec(
     max_rounds=MAX_REVIEW_ROUNDS,
     min_rounds=MIN_REVIEW_ROUNDS,
     require_blocker_free=True,
-    require_missing_section_free=False,
+    require_missing_section_free=True,
     require_explicit_approval=True,
     min_score_delta=1,
     stagnation_limit=2,
@@ -34,20 +34,26 @@ REVIEW_SCORE_POLICY = ScorePolicy(
     system_id="template-investigation-review",
     threshold=APPROVAL_SCORE,
     require_blocker_free=True,
-    require_missing_section_free=False,
+    require_missing_section_free=True,
     require_explicit_approval=True,
 )
-MANDATORY_VERIFICATION_ACTION = (
-    "Run one more investigation pass that independently re-validates the causal chain with fresh evidence, "
-    "a concrete call-order proof, or a read-only reproduction result before final handoff."
-)
+def _build_mandatory_action(improvement_actions: list[str], blocking_issues: list[str]) -> str:
+    base = "Run one more investigation pass that independently re-validates"
+    keywords = " ".join(improvement_actions + blocking_issues).lower()
+    if "caller" in keywords or "consumer" in keywords:
+        return f"{base} the API consumers with grep/glob evidence (prove caller presence/absence)."
+    if "test" in keywords or "reproduction" in keywords or "regression" in keywords:
+        return f"{base} the root cause with a focused read-only test or reproduction."
+    if "proof" in keywords or "call-order" in keywords or "sequencing" in keywords:
+        return f"{base} the call-order proof with execution traces or profiling data."
+    return f"{base} the causal chain with at least one new piece of concrete evidence."
 REVIEW_CRITERIA = (
-    ("Focus", 25, "Task Framing", "Root Cause Hypothesis"),
-    ("Evidence & Ownership", 20, "Project Root Findings", "Candidate Ownership", "Consumer & Caller Analysis"),
-    ("Architecture", 20, "Architecture Notes"),
-    ("Clean Code", 15, "Clean Code Notes"),
+    ("Focus", 20, "Task Framing", "Root Cause Hypothesis"),
+    ("Evidence & Ownership", 25, "Project Root Findings", "Candidate Ownership", "Consumer & Caller Analysis"),
+    ("Architecture", 15, "Architecture Notes"),
+    ("Clean Code", 10, "Clean Code Notes"),
     ("Optimization", 10, "Optimization Notes"),
-    ("Verification", 10, "Verification Plan"),
+    ("Verification", 20, "Verification Plan"),
 )
 PROCESS_ONLY_FEEDBACK_KEYWORDS = (
     "dri",
@@ -89,6 +95,30 @@ _PROCESS_PATTERNS = (
     re.compile(r"who\s+(is|will be)\s+(responsible|accountable)", re.IGNORECASE),
     re.compile(r"\borganizational\b", re.IGNORECASE),
 )
+
+
+EXPECTED_SECTIONS = tuple(
+    section
+    for _name, _weight, *sections in REVIEW_CRITERIA
+    for section in sections
+)
+
+
+def _detect_missing_sections(investigation_doc: str) -> list[str]:
+    """Check investigation doc for sections referenced by REVIEW_CRITERIA."""
+    doc_lower = investigation_doc.lower()
+    missing: list[str] = []
+    for section in EXPECTED_SECTIONS:
+        # Check for ## Section Name heading
+        if f"## {section.lower()}" not in doc_lower:
+            missing.append(section)
+            continue
+        # Section exists as heading — check it has non-trivial content (>50 chars)
+        block = _extract_heading_block(investigation_doc, section)
+        content = "\n".join(block).strip()
+        if len(content) < 50:
+            missing.append(section)
+    return missing
 
 
 REVIEWER_OUTPUT_SCHEMA = {
@@ -147,6 +177,7 @@ class ReviewerState(TypedDict):
     loop_should_continue: bool
     loop_completed: bool
     loop_stagnated_rounds: int
+    review_missing_sections: list[str]
     review_score_confidence: NotRequired[float | None]
     review_score_confidence_label: NotRequired[str]
     review_score_confidence_reason: NotRequired[str]
@@ -434,6 +465,7 @@ def _blocked_review_response(
         "review_feedback": review_doc,
         "review_blocking_issues": [reason],
         "review_improvement_actions": [improvement_action],
+        "review_missing_sections": [],
         "review_criterion_scores": [],
         "review_approved": False,
         "loop_status": loop_status,
@@ -476,8 +508,30 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
             "pass that independently re-validates the causal chain with fresh evidence, clearer ordering proof, or a read-only reproduction. "
             "Do not approve early just because the first brief sounds plausible. "
             "Only gate on technical investigation quality. Do not require organizational ownership assignment, DRI naming, commit/PR provenance, "
-            "or other process artifacts unless they are explicitly present in the provided evidence."
+            "or other process artifacts unless they are explicitly present in the provided evidence.\n\n"
+            "Scoring calibration:\n"
+            "- Evidence & Ownership 25/25: Hypothesis grounded in specific file references AND grep/glob results "
+            "proving caller presence/absence AND clear ownership attribution.\n"
+            "- Evidence & Ownership 15/25: Hypothesis stated but lacks grep evidence or caller analysis is superficial.\n"
+            "- Evidence & Ownership <10/25: No hypothesis, or hypothesis is speculation without file references.\n"
+            "- Verification 20/20: Concrete reproduction steps or test commands that could validate the hypothesis.\n"
+            "- Verification 12/20: Plan exists but vague ('write a test' without specifics).\n"
+            "- Verification <8/20: No verification plan or plan is generic boilerplate.\n"
+            "- Focus 20/20: Every section directly serves the task prompt. No tangents.\n"
+            "- Focus <12/20: Significant scope creep or sections that don't serve the investigation."
         )
+
+        # Round-aware guidance
+        if review_round == 1:
+            review_instructions += (
+                "\nThis is round 1. Score on discovery quality and pathway clarity. "
+                "Don't penalize for incomplete verification — that's what round 2 is for."
+            )
+        elif review_round >= MIN_REVIEW_ROUNDS:
+            review_instructions += (
+                f"\nThis is round {review_round} (>= min rounds). Score on convergence. "
+                "If the hypothesis hasn't narrowed or new evidence wasn't added, score Focus and Evidence harshly."
+            )
         review_input = (
             f"Task prompt:\n{state['task_prompt']}\n\n"
             f"Review round: {review_round}/{MAX_REVIEW_ROUNDS}\n\n"
@@ -517,7 +571,10 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
             )
 
         if review_round < MIN_REVIEW_ROUNDS:
-            enforced_actions = _dedupe([*review_result["improvement_actions"], MANDATORY_VERIFICATION_ACTION])
+            mandatory_action = _build_mandatory_action(
+                review_result["improvement_actions"], review_result["blocking_issues"]
+            )
+            enforced_actions = _dedupe([*review_result["improvement_actions"], mandatory_action])
             enforced_notes = "\n".join(
                 item
                 for item in [
@@ -540,6 +597,8 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
                 ),
             }
 
+        missing_sections = _detect_missing_sections(state["investigation_doc"])
+
         previous_score = int(state.get("review_score", 0)) if review_round > 1 else None
         prior_stagnated_rounds = int(state.get("loop_stagnated_rounds", 0)) if review_round > 1 else 0
         score_decision = evaluate_score_decision(
@@ -549,6 +608,7 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
             explicit_approval=bool(review_result["approved"]),
             blocking_issues=review_result["blocking_issues"],
             improvement_actions=review_result["improvement_actions"],
+            missing_sections=missing_sections,
             artifact_dir=artifact_path,
         )
         progress = evaluate_quality_loop(
@@ -557,6 +617,7 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
             score=score_decision.score,
             approved=score_decision.approved,
             blocking_issues=score_decision.blocking_issues,
+            missing_sections=score_decision.missing_sections,
             previous_score=previous_score,
             prior_stagnated_rounds=prior_stagnated_rounds,
             improvement_actions=score_decision.improvement_actions,
@@ -592,6 +653,7 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
             "review_feedback": final_review_doc,
             "review_blocking_issues": list(score_decision.blocking_issues),
             "review_improvement_actions": list(score_decision.improvement_actions),
+            "review_missing_sections": list(progress.missing_sections),
             "review_criterion_scores": list(review_result["criterion_scores"]),
             "review_approved": progress.approved,
             "loop_status": progress.status,

@@ -77,7 +77,9 @@ class InvestigationLoopState(TypedDict):
     review_feedback: str
     review_blocking_issues: list[str]
     review_improvement_actions: list[str]
+    review_missing_sections: list[str]
     review_criterion_scores: list[CriterionAssessment]
+    review_actionable_feedback: str
     review_approved: bool
     loop_status: str
     loop_reason: str
@@ -124,17 +126,38 @@ def _investigation_round_goal(
     return "Verification pass. Re-validate the current hypothesis before final handoff."
 
 
-def _investigation_pass_mandate(investigation_round: int) -> str:
+def _investigation_pass_mandate(
+    investigation_round: int,
+    weak_criteria: list[str] | None = None,
+) -> str:
     if investigation_round < MIN_REVIEW_ROUNDS:
-        return (
+        base = (
             f"This workflow requires at least {MIN_REVIEW_ROUNDS} review rounds, so this pass must leave a clear path "
             "for an independent verification round instead of treating the first hypothesis as final. "
             "Include a broad search for external consumers/callers of any identified APIs."
         )
-    return (
-        "This pass must independently re-verify or falsify the previous hypothesis with at least one new piece of evidence, "
-        "clearer sequencing proof, a read-only command/test observation, or proof of caller presence/absence for the identified APIs."
-    )
+    else:
+        base = (
+            "This pass must independently re-verify or falsify the previous hypothesis with at least one new piece of evidence, "
+            "clearer sequencing proof, a read-only command/test observation, or proof of caller presence/absence for the identified APIs."
+        )
+
+    if not weak_criteria:
+        return base
+
+    emphasis: list[str] = []
+    for criterion in weak_criteria:
+        if "evidence" in criterion.lower() or "ownership" in criterion.lower():
+            emphasis.append("Priority: search for external consumers/callers with grep evidence.")
+        elif "verification" in criterion.lower():
+            emphasis.append("Priority: propose concrete reproduction steps or test commands.")
+        elif "focus" in criterion.lower():
+            emphasis.append("Priority: tighten scope — remove tangential sections, sharpen hypothesis.")
+        elif "architecture" in criterion.lower():
+            emphasis.append("Priority: clarify the system boundary and ownership handoff.")
+    if emphasis:
+        return f"{base}\n\n" + " ".join(emphasis)
+    return base
 
 
 def _select_investigator_llm(context: WorkflowContext) -> tuple[Any, str]:
@@ -159,14 +182,38 @@ def _short_slug(value: str, *, fallback: str, max_length: int = 18) -> str:
 
 
 _MAX_PRIOR_CONTEXT_CHARS = 8000
+_PRIORITY_SECTIONS = ("Root Cause Hypothesis", "Consumer & Caller Analysis", "Verification Plan")
 
 
 def _truncate_prior_context(text: str, *, max_chars: int = _MAX_PRIOR_CONTEXT_CHARS) -> str:
-    """Truncate long prior-round artifacts to keep the executor prompt manageable."""
+    """Truncate long prior-round artifacts, preserving high-value sections.
+
+    Priority sections (hypothesis, caller evidence, verification plan) are
+    kept in full before filling the remaining budget with other content.
+    """
     text = str(text).strip()
     if not text or len(text) <= max_chars:
         return text
-    return text[:max_chars] + "\n\n[... truncated — full document available in artifacts ...]"
+
+    # Extract high-value sections first
+    kept_sections: list[str] = []
+    priority_budget = 0
+    for section in _PRIORITY_SECTIONS:
+        block = "\n".join(_extract_heading_block(text, section)).strip()
+        if block:
+            section_text = f"## {section}\n{block}"
+            kept_sections.append(section_text)
+            priority_budget += len(section_text) + 2  # +2 for separator newlines
+
+    remaining_budget = max_chars - priority_budget
+    if remaining_budget > 500:
+        # Fill rest of budget with beginning of document (contains Task Framing, etc.)
+        prefix = text[:remaining_budget].rstrip()
+        parts = [prefix, *kept_sections]
+    else:
+        parts = kept_sections
+
+    return "\n\n".join(parts) + "\n\n[... truncated — full document in artifacts ...]"
 
 
 def _artifact_dir(context: WorkflowContext, metadata: WorkflowMetadata, state: InvestigationLoopState) -> Path:
@@ -266,9 +313,12 @@ def _collect_project_context(
     context: WorkflowContext,
     task_prompt: str,
     review_feedback: str,
+    improvement_actions: list[str] | None = None,
 ) -> dict[str, Any]:
     scope_root = context.resolve_scope_root("host_project")
-    query_text = f"{task_prompt}\n{review_feedback}".strip()
+    # Use improvement action keywords for more focused file discovery
+    action_text = " ".join(improvement_actions or [])
+    query_text = f"{task_prompt}\n{action_text}".strip() if action_text else f"{task_prompt}\n{review_feedback}".strip()
     docs = _find_relevant_files(
         scope_root=scope_root,
         relative_roots=context.config.doc_roots,
@@ -329,11 +379,13 @@ def _fallback_investigation_doc(
     *,
     task_prompt: str,
     investigation_round: int,
+    investigation_mode: str = "claude-executor-tools",
     project_snapshot: str,
     relevant_docs: list[str],
     relevant_source: list[str],
     relevant_tests: list[str],
     previous_investigation: str,
+    weak_criteria: list[str] | None = None,
     review_feedback: str,
     improvement_actions: list[str],
 ) -> str:
@@ -351,7 +403,7 @@ def _fallback_investigation_doc(
         f"- Round: {investigation_round}",
         f"- Request: {task_prompt}",
         f"- Revision goal: {revision_goal}",
-        f"- Verification mandate: {_investigation_pass_mandate(investigation_round)}",
+        f"- Verification mandate: {_investigation_pass_mandate(investigation_round, weak_criteria=weak_criteria)}",
         "",
         "## Project Root Findings",
         project_snapshot,
@@ -360,9 +412,19 @@ def _fallback_investigation_doc(
         *_format_bullets(owners).splitlines(),
         "",
         "## Consumer & Caller Analysis",
-        "- Search broadly for external callers of the APIs/functions identified above.",
-        "- Prove whether callers exist outside the owning module (grep for function names across the codebase).",
-        "- If no external callers found, state that explicitly — absence of callers is high-value evidence.",
+        *(
+            [
+                "- Search broadly for external callers of the APIs/functions identified above.",
+                "- Prove whether callers exist outside the owning module (grep for function names across the codebase).",
+                "- If no external callers found, state that explicitly — absence of callers is high-value evidence.",
+            ]
+            if investigation_mode != "templated-llm"
+            else [
+                "- Based on the provided project context, identify likely callers of the candidate APIs.",
+                "- State whether external callers are expected based on the module's public API surface.",
+                "- If the context suggests no external callers, state that explicitly — it constrains the fix scope.",
+            ]
+        ),
         "",
         "## Root Cause Hypothesis",
         "- The most credible next step is to inspect the candidate owner first and validate the runtime handoff.",
@@ -397,6 +459,60 @@ def _fallback_investigation_doc(
     return "\n".join(lines).strip()
 
 
+def _extract_heading_block(document: str, heading: str) -> list[str]:
+    lines = document.splitlines()
+    active = False
+    collected: list[str] = []
+    for line in lines:
+        if line.strip() == f"## {heading}":
+            active = True
+            continue
+        if active and line.startswith("## "):
+            break
+        if active and line.strip():
+            collected.append(line.rstrip())
+    return collected
+
+
+def _build_actionable_feedback(state: dict[str, Any]) -> str:
+    """Build a concise, actionable feedback string from structured review state.
+
+    Strips out scoring metadata (confidence, loop status) and keeps only
+    information the investigator needs to improve the next round.
+    """
+    parts: list[str] = []
+
+    blocking_issues = list(state.get("review_blocking_issues", []))
+    if blocking_issues:
+        parts.append("## Blocking Issues")
+        parts.extend(f"- {item}" for item in blocking_issues)
+
+    improvement_actions = list(state.get("review_improvement_actions", []))
+    if improvement_actions:
+        parts.append("\n## Required Improvements")
+        parts.extend(f"- {item}" for item in improvement_actions)
+
+    missing_sections = list(state.get("review_missing_sections", []))
+    if missing_sections:
+        parts.append("\n## Missing Sections (must add)")
+        parts.extend(f"- {section}" for section in missing_sections)
+
+    criterion_scores: list[CriterionAssessment] = list(state.get("review_criterion_scores", []))
+    weak = [c for c in criterion_scores if c["score"] < c["max_score"] * 0.7]
+    if weak:
+        parts.append("\n## Weak Criteria (focus here)")
+        for c in weak:
+            parts.append(f"- {c['criterion']}: {c['score']}/{c['max_score']} — {c['rationale']}")
+
+    senior_notes = "\n".join(_extract_heading_block(
+        state.get("review_doc", ""), "Senior Engineer Notes"
+    )).strip()
+    if senior_notes:
+        parts.append(f"\n## Senior Engineer Notes\n{senior_notes}")
+
+    return "\n".join(parts).strip() or "No actionable feedback."
+
+
 def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
     graph_name = metadata.name
     reviewer_graph = context.get_workflow_graph("template-investigation-reviewer-workflow")
@@ -404,7 +520,21 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
     def investigate(state: InvestigationLoopState) -> dict[str, Any]:
         investigation_round = int(state.get("investigation_round", 0)) + 1
         artifact_path = _artifact_dir(context, metadata, state)
-        if investigation_round > 1 and str(state.get("project_snapshot", "")).strip():
+
+        # Extract weak criteria names for mandate emphasis
+        criterion_scores: list[CriterionAssessment] = list(state.get("review_criterion_scores", []))
+        weak_criteria = [c["criterion"] for c in criterion_scores if c["score"] < c["max_score"] * 0.7]
+
+        improvement_actions = list(state.get("review_improvement_actions", []))
+
+        # Force context refresh when reviewer flagged specific areas to search
+        should_refresh = investigation_round == 1
+        if investigation_round > 1 and improvement_actions:
+            actions_text = " ".join(improvement_actions).lower()
+            if any(kw in actions_text for kw in ("search", "grep", "caller", "consumer", "module", "file")):
+                should_refresh = True
+
+        if not should_refresh and str(state.get("project_snapshot", "")).strip():
             project_context = {
                 "snapshot": state["project_snapshot"],
                 "docs": list(state.get("relevant_docs", [])),
@@ -412,18 +542,24 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
                 "tests": list(state.get("relevant_tests", [])),
             }
         else:
-            project_context = _collect_project_context(context, state["task_prompt"], str(state.get("review_feedback", "")))
+            project_context = _collect_project_context(
+                context, state["task_prompt"],
+                str(state.get("review_feedback", "")),
+                improvement_actions=improvement_actions,
+            )
         investigator_llm, investigation_mode = _select_investigator_llm(context)
         fallback_doc = _fallback_investigation_doc(
             task_prompt=state["task_prompt"],
             investigation_round=investigation_round,
+            investigation_mode=investigation_mode,
             project_snapshot=project_context["snapshot"],
             relevant_docs=project_context["docs"],
             relevant_source=project_context["source"],
             relevant_tests=project_context["tests"],
             previous_investigation=str(state.get("investigation_doc", "")),
-            review_feedback=str(state.get("review_feedback", "")),
+            review_feedback=str(state.get("review_actionable_feedback", "") or state.get("review_feedback", "")),
             improvement_actions=list(state.get("review_improvement_actions", [])),
+            weak_criteria=weak_criteria,
         )
 
         investigation_doc = fallback_doc
@@ -446,7 +582,7 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
                         f"Investigation round: {investigation_round}/{MAX_REVIEW_ROUNDS}\n\n"
                         f"Task: {state['task_prompt']}\n\n"
                         f"Round goal: {_investigation_round_goal(investigation_round=investigation_round, review_feedback=str(state.get('review_feedback', '')), previous_investigation=str(state.get('investigation_doc', '')))}\n\n"
-                        f"Verification mandate: {_investigation_pass_mandate(investigation_round)}\n\n"
+                        f"Verification mandate: {_investigation_pass_mandate(investigation_round, weak_criteria=weak_criteria)}\n\n"
                         f"Consumer analysis mandate: Search broadly (Grep, Glob) for external callers of any APIs or "
                         f"functions identified as candidates. Prove presence or absence of callers outside the owning "
                         f"module. If no external callers exist, state that explicitly — it changes optimization priority.\n\n"
@@ -455,7 +591,7 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
                         f"Suggested tests: {_format_bullets(project_context['tests'], empty_message='None.')}\n\n"
                         f"Previous investigation:\n{_truncate_prior_context(state.get('investigation_doc', '') or 'None. First round.')}\n"
                     ),
-                    prior_feedback=_truncate_prior_context(state.get("review_feedback", "")) or None,
+                    prior_feedback=_truncate_prior_context(state.get("review_actionable_feedback", "") or state.get("review_feedback", "")) or None,
                     context=project_context["snapshot"],
                 )
                 effective_max_turns = 15 if investigation_round > 1 else None
@@ -471,13 +607,27 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
                 investigation_doc = fallback_doc
         elif investigator_llm.is_enabled():
             try:
-                investigation_method = (
-                    "Use the Codex agent tools available in this environment to inspect the project directly, read the most relevant "
-                    "source/docs/tests, and when it increases confidence, run targeted read-only commands or tests that help prove "
-                    "the causal chain. Do not modify files, do not write patches, and do not invent command output. "
-                    if investigation_mode == "codex-agent-tools"
-                    else "Work only from the provided host-project context and previous review artifacts. Do not invent tool usage or command output. "
-                )
+                if investigation_mode == "codex-agent-tools":
+                    investigation_method = (
+                        "Use the Codex agent tools available in this environment to inspect the project directly, read the most relevant "
+                        "source/docs/tests, and when it increases confidence, run targeted read-only commands or tests that help prove "
+                        "the causal chain. Do not modify files, do not write patches, and do not invent command output. "
+                    )
+                    consumer_mandate = (
+                        "Consumer analysis mandate: Search broadly (Grep, Glob) for external callers of any APIs or "
+                        "functions identified as candidates. Prove presence or absence of callers outside the owning "
+                        "module. If no external callers exist, state that explicitly — it changes optimization priority."
+                    )
+                else:
+                    investigation_method = (
+                        "Work only from the provided host-project context and previous review artifacts. "
+                        "Do not invent tool usage or command output. "
+                    )
+                    consumer_mandate = (
+                        "Consumer analysis mandate: Based on the provided project context, identify likely callers of the candidate APIs. "
+                        "State whether external callers are expected based on the module's public API surface. "
+                        "If the context suggests no external callers, state that explicitly — it constrains the fix scope."
+                    )
                 investigation_doc = investigator_llm.generate_text(
                     instructions=(
                         "You are template-investigation-workflow. Investigate the host project root like a senior engineer "
@@ -493,18 +643,15 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
                         f"Investigation round: {investigation_round}/{MAX_REVIEW_ROUNDS}\n\n"
                         f"Task prompt:\n{state['task_prompt']}\n\n"
                         f"Round goal:\n{_investigation_round_goal(investigation_round=investigation_round, review_feedback=str(state.get('review_feedback', '')), previous_investigation=str(state.get('investigation_doc', '')))}\n\n"
-                        f"Verification mandate:\n{_investigation_pass_mandate(investigation_round)}\n\n"
-                        f"Consumer analysis mandate: Search broadly (Grep, Glob) for external callers of any APIs or "
-                        f"functions identified as candidates. Prove presence or absence of callers outside the owning "
-                        f"module. If no external callers exist, state that explicitly — it changes optimization priority.\n\n"
+                        f"Verification mandate:\n{_investigation_pass_mandate(investigation_round, weak_criteria=weak_criteria)}\n\n"
+                        f"{consumer_mandate}\n\n"
                         f"Minimum review rounds before final approval can stick: {MIN_REVIEW_ROUNDS}\n\n"
                         f"Suggested starting docs:\n{_format_bullets(project_context['docs'], empty_message='No strong doc hits yet.')}\n\n"
                         f"Suggested starting source files:\n{_format_bullets(project_context['source'], empty_message='No strong source hits yet.')}\n\n"
                         f"Suggested starting tests:\n{_format_bullets(project_context['tests'], empty_message='No strong test hits yet.')}\n\n"
                         f"Current project snapshot:\n{project_context['snapshot']}\n\n"
                         f"Previous investigation document:\n{_truncate_prior_context(state.get('investigation_doc', '') or 'None. This is the first round.')}\n\n"
-                        f"Previous reviewer feedback:\n{_truncate_prior_context(state.get('review_feedback', '') or 'None. This is the first round.')}\n\n"
-                        f"Previous reviewer checklist:\n{_format_bullets(list(state.get('review_improvement_actions', [])), empty_message='None.')}\n\n"
+                        f"Previous reviewer feedback (actionable only):\n{_truncate_prior_context(state.get('review_actionable_feedback', '') or 'None. This is the first round.')}\n\n"
                         "Return only the next investigation document. The next document must add real evidence, not just rephrase the prior round."
                     ),
                 )
@@ -555,6 +702,7 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
             "relevant_source": list(state.get("relevant_source", [])),
             "relevant_tests": list(state.get("relevant_tests", [])),
             "blocking_issues": list(state.get("review_blocking_issues", [])),
+            "missing_sections": list(state.get("review_missing_sections", [])),
             "improvement_actions": list(state.get("review_improvement_actions", [])),
         }
 
@@ -590,8 +738,10 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
             ),
             encoding="utf-8",
         )
+        actionable_feedback = _build_actionable_feedback(state)
         return {
             "artifact_dir": str(artifact_path),
+            "review_actionable_feedback": actionable_feedback,
             "final_report": final_report,
             "summary": summary,
         }
