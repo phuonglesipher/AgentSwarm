@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import json
+import logging
 import re
 import subprocess
 import sys
@@ -25,6 +26,8 @@ from core.natural_language_prompts import build_prompt_brief
 from core.quality_loop import QualityLoopSpec, evaluate_quality_loop
 from core.scoring import ScoreAssessment, ScorePolicy, evaluate_score_decision
 from core.text_utils import keyword_tokens, normalize_text, slugify, tokenize
+
+_log = logging.getLogger(__name__)
 
 
 APPROVAL_SCORE = 90
@@ -72,6 +75,13 @@ INVESTIGATION_BLOCKING_SECTIONS = {
     "Root Cause Hypothesis",
     "Validation Plan",
 }
+_MAX_PRIOR_CONTEXT_CHARS = 8000
+_PRIORITY_SECTIONS = (
+    "Root Cause Direction",
+    "Ownership Summary",
+    "Validation Plan",
+    "Current Runtime Paths",
+)
 SOURCE_EXTENSIONS = {
     ".c",
     ".cc",
@@ -415,185 +425,7 @@ def _safe_read_text(path: Path, *, limit: int = 700) -> str:
         return ""
 
 
-def _resolve_roots(scope_root: Path, relative_roots: tuple[str, ...]) -> list[Path]:
-    candidates = [scope_root / relative_root for relative_root in relative_roots]
-    existing = [path for path in candidates if path.exists()]
-    return existing or [scope_root]
 
-
-def _find_ranked_files(
-    *,
-    scope_root: Path,
-    relative_roots: tuple[str, ...],
-    exclude_roots: tuple[str, ...],
-    query_text: str,
-    allowed_suffixes: set[str],
-    max_hits: int = 5,
-) -> list[str]:
-    query_tokens = keyword_tokens(query_text) or tokenize(query_text)
-    scored: list[tuple[int, str]] = []
-    for root in _resolve_roots(scope_root, relative_roots):
-        if not root.exists():
-            continue
-        for path in root.rglob("*"):
-            if not path.is_file() or path.suffix.lower() not in allowed_suffixes:
-                continue
-            if _should_skip(path, scope_root, exclude_roots):
-                continue
-            relative_path = path.relative_to(scope_root).as_posix()
-            haystack = f"{relative_path.replace('_', ' ')}\n{_safe_read_text(path).replace('_', ' ')}"
-            normalized_haystack = normalize_text(haystack)
-            score = sum(1 for token in query_tokens if token in normalized_haystack)
-            if score > 0:
-                scored.append((score, relative_path))
-    scored.sort(key=lambda item: (-item[0], item[1].lower()))
-    hits: list[str] = []
-    for _, relative_path in scored:
-        if relative_path in hits:
-            continue
-        hits.append(relative_path)
-        if len(hits) >= max_hits:
-            break
-    return hits
-
-
-def _find_local_doc_hits(
-    *,
-    task_prompt: str,
-    scope_root: Path,
-    doc_roots: tuple[str, ...],
-    exclude_roots: tuple[str, ...],
-) -> list[str]:
-    return _find_ranked_files(
-        scope_root=scope_root,
-        relative_roots=doc_roots,
-        exclude_roots=exclude_roots,
-        query_text=task_prompt,
-        allowed_suffixes=DOC_EXTENSIONS,
-    )
-
-
-def _find_local_code_hits(
-    *,
-    task_prompt: str,
-    scope_root: Path,
-    source_roots: tuple[str, ...],
-    test_roots: tuple[str, ...],
-    exclude_roots: tuple[str, ...],
-) -> tuple[list[str], list[str]]:
-    source_candidates = _find_ranked_files(
-        scope_root=scope_root,
-        relative_roots=source_roots,
-        exclude_roots=exclude_roots,
-        query_text=task_prompt,
-        allowed_suffixes=SOURCE_EXTENSIONS,
-        max_hits=12,
-    )
-    test_candidates = _find_ranked_files(
-        scope_root=scope_root,
-        relative_roots=test_roots,
-        exclude_roots=exclude_roots,
-        query_text=task_prompt,
-        allowed_suffixes=SOURCE_EXTENSIONS,
-        max_hits=12,
-    )
-
-    def is_test_path(relative_path: str) -> bool:
-        lowered = relative_path.replace("\\", "/").lower()
-        filename = Path(lowered).name
-        return (
-            "/tests/" in lowered
-            or lowered.endswith("/tests")
-            or filename.startswith("test_")
-            or filename.endswith("tests.py")
-            or filename.endswith("tests.cpp")
-            or filename.endswith("tests.cs")
-        )
-
-    source_hits = [item for item in source_candidates if not is_test_path(item)]
-    test_hits = _dedupe([*filter(is_test_path, test_candidates), *[item for item in source_candidates if is_test_path(item)]])
-    return source_hits[:5], test_hits[:5]
-
-
-def _find_local_blueprint_hits(
-    *,
-    task_prompt: str,
-    scope_root: Path,
-    exclude_roots: tuple[str, ...],
-) -> tuple[list[str], list[str]]:
-    blueprint_asset_roots: tuple[str, ...] = ("Content",)
-    blueprint_text_roots: tuple[str, ...] = ("Content", ".blueprints")
-    blueprint_hits = _find_ranked_files(
-        scope_root=scope_root,
-        relative_roots=blueprint_asset_roots,
-        exclude_roots=exclude_roots,
-        query_text=task_prompt,
-        allowed_suffixes={BLUEPRINT_ASSET_EXTENSION},
-    )
-    blueprint_text_hits = _find_ranked_files(
-        scope_root=scope_root,
-        relative_roots=blueprint_text_roots,
-        exclude_roots=exclude_roots,
-        query_text=task_prompt,
-        allowed_suffixes=BLUEPRINT_TEXT_EXTENSIONS,
-    )
-    return (
-        _filter_hits_to_roots(blueprint_hits, blueprint_asset_roots),
-        _filter_hits_to_roots(blueprint_text_hits, blueprint_text_roots),
-    )
-
-
-def _extract_existing_relative_path(
-    raw_value: str,
-    *,
-    scope_root: Path,
-    exclude_roots: tuple[str, ...],
-    allowed_suffixes: set[str],
-) -> str | None:
-    text = str(raw_value).strip().replace("\\", "/")
-    if not text:
-        return None
-    candidates = [text]
-    for index, char in enumerate(text):
-        if char in {" ", "-", ":"}:
-            candidates.append(text[:index].strip())
-    seen: set[str] = set()
-    for candidate in candidates:
-        normalized = candidate.strip(" `\"'")
-        if normalized.startswith("./"):
-            normalized = normalized[2:]
-        if not normalized or normalized in seen:
-            continue
-        seen.add(normalized)
-        path = scope_root / normalized
-        if not path.exists() or not path.is_file():
-            continue
-        if path.suffix.lower() not in allowed_suffixes:
-            continue
-        if _should_skip(path, scope_root, exclude_roots):
-            continue
-        return path.relative_to(scope_root).as_posix()
-    return None
-
-
-def _normalize_relative_hits(
-    scope_root: Path,
-    raw_hits: list[str],
-    exclude_roots: tuple[str, ...],
-    *,
-    allowed_suffixes: set[str],
-) -> list[str]:
-    normalized: list[str] = []
-    for raw_hit in raw_hits:
-        candidate = _extract_existing_relative_path(
-            str(raw_hit),
-            scope_root=scope_root,
-            exclude_roots=exclude_roots,
-            allowed_suffixes=allowed_suffixes,
-        )
-        if candidate and candidate not in normalized:
-            normalized.append(candidate)
-    return normalized
 
 
 def _filter_hits_to_roots(relative_hits: list[str], allowed_roots: tuple[str, ...]) -> list[str]:
@@ -1091,8 +923,8 @@ def _prepare_investigation_strategy_payload(
                 "investigation_root_cause": str(result.get("investigation_root_cause", "")).strip(),
                 "investigation_validation_plan": str(result.get("investigation_validation_plan", "")).strip(),
             }
-        except Exception:
-            pass
+        except Exception as exc:
+            _log.warning("_prepare_investigation_strategy_payload: LLM strategy generation failed: %s", exc)
     return {
         "focus_terms": focus_terms,
         "avoid_terms": avoid_terms,
@@ -1104,208 +936,239 @@ def _prepare_investigation_strategy_payload(
     }
 
 
-def _collect_engineering_context(context: WorkflowContext, state: EngineerState) -> dict[str, Any]:
-    scope_root = context.resolve_scope_root("host_project")
-    task_prompt = "\n".join([state["task_prompt"], *state.get("investigation_focus_terms", [])])
-    local_doc_hits = _find_local_doc_hits(
-        task_prompt=task_prompt,
-        scope_root=scope_root,
-        doc_roots=context.config.doc_roots,
-        exclude_roots=context.config.exclude_roots,
-    )
-    local_source_hits, local_test_hits = _find_local_code_hits(
-        task_prompt=task_prompt,
-        scope_root=scope_root,
-        source_roots=context.config.source_roots,
-        test_roots=context.config.test_roots,
-        exclude_roots=context.config.exclude_roots,
-    )
-    local_blueprint_hits, local_blueprint_text_hits = _find_local_blueprint_hits(
-        task_prompt=task_prompt,
-        scope_root=scope_root,
-        exclude_roots=context.config.exclude_roots,
-    )
-    payload = {
-        "doc_hits": list(local_doc_hits),
-        "doc_context": "",
-        "source_hits": list(local_source_hits),
-        "test_hits": list(local_test_hits),
-        "blueprint_hits": list(local_blueprint_hits),
-        "blueprint_text_hits": list(local_blueprint_text_hits),
-        "current_runtime_paths": list(local_source_hits[:1]),
-        "legacy_runtime_paths": [],
-        "runtime_path_hypotheses": [],
-        "ownership_summary": "",
-        "investigation_summary": "",
-        "code_context": "",
-        "blueprint_context": "",
-        "implementation_medium": "",
-        "implementation_medium_reason": str(state.get("implementation_medium_reason", "")),
-    }
-    llm_source_hits_raw: list[str] = []
-    llm_current_runtime_paths_raw: list[str] = []
-    llm_legacy_runtime_paths_raw: list[str] = []
-    if context.llm.is_enabled():
-        schema = {
-            "type": "object",
-            "properties": {
-                "doc_hits": {"type": "array", "items": {"type": "string"}},
-                "doc_context": {"type": "string"},
-                "source_hits": {"type": "array", "items": {"type": "string"}},
-                "test_hits": {"type": "array", "items": {"type": "string"}},
-                "blueprint_hits": {"type": "array", "items": {"type": "string"}},
-                "blueprint_text_hits": {"type": "array", "items": {"type": "string"}},
-                "current_runtime_paths": {"type": "array", "items": {"type": "string"}},
-                "legacy_runtime_paths": {"type": "array", "items": {"type": "string"}},
-                "runtime_path_hypotheses": {"type": "array", "items": {"type": "string"}},
-                "ownership_summary": {"type": "string"},
-                "investigation_summary": {"type": "string"},
-                "code_context": {"type": "string"},
-                "blueprint_context": {"type": "string"},
-                "implementation_medium": {"type": "string"},
-                "implementation_medium_reason": {"type": "string"},
-            },
-            "required": [
-                "doc_hits",
-                "doc_context",
-                "source_hits",
-                "test_hits",
-                "blueprint_hits",
-                "blueprint_text_hits",
-                "current_runtime_paths",
-                "legacy_runtime_paths",
-                "runtime_path_hypotheses",
-                "ownership_summary",
-                "investigation_summary",
-                "code_context",
-                "blueprint_context",
-                "implementation_medium",
-                "implementation_medium_reason",
-            ],
-            "additionalProperties": False,
-        }
-        try:
-            generated = context.llm.generate_json(
-                instructions=(
-                    "Inspect the grounded gameplay context and return the best current ownership summary, runtime paths, test paths, and "
-                    "implementation-medium hypothesis as JSON. Prefer current runtime ownership over legacy notes."
-                ),
-                input_text=build_prompt_brief(
-                    opening="Review the grounded gameplay evidence and identify the live owner of the work.",
-                    sections=[
-                        ("Task request", state["task_prompt"].strip()),
-                        (
-                            "Current investigation focus",
-                            _format_bullets(list(state.get("investigation_focus_terms", []))),
-                        ),
-                        (
-                            "Evidence to ignore or de-prioritize",
-                            _format_bullets(list(state.get("investigation_avoid_terms", []))),
-                        ),
-                        ("Suggested design references", _format_bullets(local_doc_hits)),
-                        ("Suggested runtime code paths", _format_bullets(local_source_hits)),
-                        ("Suggested validation paths", _format_bullets(local_test_hits)),
-                        ("Suggested Blueprint assets", _format_bullets(local_blueprint_hits)),
-                        (
-                            "Suggested Blueprint text mirrors",
-                            _format_bullets(local_blueprint_text_hits),
-                        ),
-                    ],
-                    closing=(
-                        "Prefer the current runtime owner over archival or speculative references, "
-                        "and keep the ownership story tight enough for implementation."
-                    ),
-                ),
-                schema_name="gameplay_engineering_context",
-                schema=schema,
-            )
-            llm_source_hits_raw = [str(item) for item in generated.get("source_hits", []) if str(item).strip()]
-            llm_current_runtime_paths_raw = [
-                str(item) for item in generated.get("current_runtime_paths", []) if str(item).strip()
-            ]
-            llm_legacy_runtime_paths_raw = [str(item) for item in generated.get("legacy_runtime_paths", []) if str(item).strip()]
-            payload.update(generated)
-        except Exception:
-            pass
+def _extract_heading_block(document: str, heading: str) -> list[str]:
+    lines = document.splitlines()
+    active = False
+    collected: list[str] = []
+    for line in lines:
+        if line.strip() == f"## {heading}":
+            active = True
+            continue
+        if active and line.startswith("## "):
+            break
+        if active and line.strip():
+            collected.append(line.rstrip())
+    return collected
 
-    payload["doc_hits"] = _normalize_relative_hits(
-        scope_root,
-        list(payload.get("doc_hits", [])),
-        context.config.exclude_roots,
-        allowed_suffixes=DOC_EXTENSIONS,
-    ) or local_doc_hits
-    payload["source_hits"] = _normalize_relative_hits(
-        scope_root,
-        list(payload.get("source_hits", [])),
-        context.config.exclude_roots,
-        allowed_suffixes=SOURCE_EXTENSIONS,
-    ) or local_source_hits
-    payload["test_hits"] = _normalize_relative_hits(
-        scope_root,
-        list(payload.get("test_hits", [])),
-        context.config.exclude_roots,
-        allowed_suffixes=SOURCE_EXTENSIONS,
-    ) or local_test_hits
-    payload["blueprint_hits"] = _filter_hits_to_roots(
-        _normalize_relative_hits(
-            scope_root,
-            list(payload.get("blueprint_hits", [])),
-            context.config.exclude_roots,
-            allowed_suffixes={BLUEPRINT_ASSET_EXTENSION},
-        ),
-        ("Content",),
-    ) or local_blueprint_hits
-    payload["blueprint_text_hits"] = _filter_hits_to_roots(
-        _normalize_relative_hits(
-            scope_root,
-            list(payload.get("blueprint_text_hits", [])),
-            context.config.exclude_roots,
-            allowed_suffixes=BLUEPRINT_TEXT_EXTENSIONS,
-        ),
-        ("Content", ".blueprints"),
-    ) or local_blueprint_text_hits
-    current_runtime_paths = _normalize_relative_hits(
-        scope_root,
-        list(payload.get("current_runtime_paths", [])),
-        context.config.exclude_roots,
-        allowed_suffixes=SOURCE_EXTENSIONS | {BLUEPRINT_ASSET_EXTENSION} | BLUEPRINT_TEXT_EXTENSIONS | DOC_EXTENSIONS,
-    )
-    if current_runtime_paths:
-        payload["current_runtime_paths"] = current_runtime_paths
-    elif llm_source_hits_raw:
-        payload["current_runtime_paths"] = payload["source_hits"][:1]
-    elif llm_current_runtime_paths_raw:
-        payload["current_runtime_paths"] = []
-    elif llm_legacy_runtime_paths_raw:
-        payload["current_runtime_paths"] = []
+
+def _truncate_prior_context(text: str, *, max_chars: int = _MAX_PRIOR_CONTEXT_CHARS) -> str:
+    text = str(text).strip()
+    if not text or len(text) <= max_chars:
+        return text
+    kept_sections: list[str] = []
+    priority_budget = 0
+    for section in _PRIORITY_SECTIONS:
+        block = "\n".join(_extract_heading_block(text, section)).strip()
+        if block:
+            section_text = f"## {section}\n{block}"
+            kept_sections.append(section_text)
+            priority_budget += len(section_text) + 2
+    remaining_budget = max_chars - priority_budget
+    if remaining_budget > 500:
+        prefix = text[:remaining_budget].rstrip()
+        parts = [prefix, *kept_sections]
     else:
-        payload["current_runtime_paths"] = payload["source_hits"][:1] or payload["blueprint_hits"][:1] or payload["blueprint_text_hits"][:1]
-    payload["legacy_runtime_paths"] = _normalize_relative_hits(
-        scope_root,
-        list(payload.get("legacy_runtime_paths", [])),
-        context.config.exclude_roots,
-        allowed_suffixes=SOURCE_EXTENSIONS | DOC_EXTENSIONS | BLUEPRINT_TEXT_EXTENSIONS,
+        parts = kept_sections
+    return "\n\n".join(parts) + "\n\n[... truncated — full document in artifacts ...]"
+
+
+def _select_investigator_llm(context: WorkflowContext) -> tuple[Any, str]:
+    executor = context.get_llm("executor")
+    if isinstance(executor, ClaudeCodeExecutorClient) and executor.is_enabled():
+        return executor, "claude-executor-tools"
+    return context.llm, "templated-llm"
+
+
+def _collect_project_snapshot(
+    context: WorkflowContext,
+    state: EngineerState,
+) -> dict[str, Any]:
+    scope_root = context.resolve_scope_root("host_project")
+    top_level: list[str] = []
+    try:
+        for child in sorted(scope_root.iterdir(), key=lambda item: item.name.lower()):
+            if _should_skip(child, scope_root, context.config.exclude_roots):
+                continue
+            top_level.append(f"{child.name}{'/' if child.is_dir() else ''}")
+            if len(top_level) >= 15:
+                break
+    except OSError:
+        pass
+    focus_terms = list(state.get("investigation_focus_terms", []))
+    avoid_terms = list(state.get("investigation_avoid_terms", []))
+    search_notes = list(state.get("investigation_search_notes", []))
+    snapshot = "\n".join(
+        [
+            "### Host Root Layout",
+            _format_bullets(top_level, empty_message="No readable top-level entries found."),
+            "",
+            "### Focus Terms",
+            _format_bullets(focus_terms, empty_message="No focus terms set."),
+            "",
+            "### Avoid Terms",
+            _format_bullets(avoid_terms, empty_message="No avoid terms set."),
+            "",
+            "### Search Notes",
+            _format_bullets(search_notes, empty_message="No search notes."),
+        ]
+    ).strip()
+    return {"snapshot": snapshot, "top_level": top_level}
+
+
+_GAMEPLAY_INVESTIGATION_SECTIONS = (
+    "Task Type, Planning Mode, Investigation Round, Implementation Medium",
+    "Focus Terms",
+    "Search Notes",
+    "Doc Hits — relevant design docs, READMEs, or architecture notes",
+    "Source Hits — C++/Python source files that own the runtime behavior",
+    "Test Hits — test files that validate the behavior",
+    "Blueprint Hits — Blueprint .uasset files if relevant",
+    "Blueprint Text Hits — exported Blueprint text mirrors",
+    "Current Runtime Paths — files that own the live runtime path today",
+    "Legacy Runtime Paths — files that used to own it but no longer do",
+    "Runtime Path Hypotheses — educated guesses about ownership if uncertain",
+    "Ownership Summary — who owns the runtime behavior and why",
+    "Investigation Summary — what was learned this round",
+    "Root Cause Direction — the most credible hypothesis so far",
+    "Validation Plan — concrete steps to prove or disprove the hypothesis",
+    "Code Context — relevant code snippets or API signatures",
+    "Blueprint Context — relevant Blueprint logic if applicable",
+)
+
+
+def _build_executor_investigation_description(
+    state: EngineerState,
+    project_snapshot: dict[str, Any],
+    investigation_round: int,
+) -> str:
+    previous_investigation = _truncate_prior_context(
+        state.get("investigation_doc", "") or "None. First round.",
     )
-    payload["runtime_path_hypotheses"] = _dedupe(
-        [str(item) for item in payload.get("runtime_path_hypotheses", []) if str(item).strip()]
+    previous_feedback = _truncate_prior_context(
+        state.get("investigation_feedback", ""),
     )
-    if not str(payload.get("ownership_summary", "")).strip():
-        owner = (
-            payload["current_runtime_paths"][:1]
-            or payload["source_hits"][:1]
-            or payload["blueprint_hits"][:1]
-            or payload["blueprint_text_hits"][:1]
-        )
-        validation = payload["test_hits"][:1] or payload["blueprint_text_hits"][:1] or payload["doc_hits"][:1]
-        if owner:
-            owner_note = f"Current gameplay ownership is anchored on {owner[0]}."
-            validation_note = (
-                f"Supporting validation or reference context is grounded in {validation[0]}."
-                if validation
-                else "Supporting validation still needs a stronger explicit anchor."
-            )
-            payload["ownership_summary"] = f"{owner_note} {validation_note}".strip()
-    return payload
+    section_list = "\n".join(f"- {s}" for s in _GAMEPLAY_INVESTIGATION_SECTIONS)
+    return (
+        f"Investigate the host project like a senior gameplay engineer converging on root cause and owner.\n\n"
+        f"Investigation round: {investigation_round}\n"
+        f"Task type: {state.get('task_type', 'bugfix')}\n"
+        f"Planning mode: {state.get('planning_mode', 'bugfix')}\n"
+        f"Implementation medium hint: {state.get('implementation_medium_reason', 'unknown')}\n\n"
+        f"Task: {state['task_prompt']}\n\n"
+        f"Use Grep, Glob, and Read to search the codebase. Do not modify files.\n"
+        f"Write a markdown investigation document with these exact sections:\n{section_list}\n\n"
+        f"For each section, list concrete file paths you found (relative to project root).\n"
+        f"For Source Hits and Current Runtime Paths, quote relevant code snippets.\n"
+        f"For Ownership Summary, name the specific class/function that owns the behavior.\n"
+        f"For Root Cause Direction, state a falsifiable hypothesis.\n"
+        f"For Validation Plan, give concrete grep commands or test steps.\n\n"
+        f"Previous investigation:\n{previous_investigation}\n\n"
+        f"Previous feedback:\n{previous_feedback or 'None. First round.'}\n"
+    )
+
+
+def _compose_fallback_investigation_doc(
+    state: EngineerState,
+    project_snapshot: dict[str, Any],
+    *,
+    round_index: int,
+) -> str:
+    return "\n".join(
+        [
+            "# Gameplay Engineer Investigation",
+            "",
+            f"- Task Type: {state.get('task_type', 'bugfix')}",
+            f"- Planning Mode: {state.get('planning_mode', 'bugfix')}",
+            f"- Investigation Round: {round_index}",
+            f"- Implementation Medium: {state.get('implementation_medium', 'cpp')}",
+            f"- Implementation Medium Reason: {state.get('implementation_medium_reason', '') or 'None.'}",
+            "",
+            "## Focus Terms",
+            _format_bullets(list(state.get("investigation_focus_terms", []))),
+            "",
+            "## Search Notes",
+            _format_bullets(list(state.get("investigation_search_notes", []))),
+            "",
+            "## Doc Hits",
+            "- None. (Executor unavailable — manual investigation required.)",
+            "",
+            "## Source Hits",
+            "- None. (Executor unavailable — manual investigation required.)",
+            "",
+            "## Test Hits",
+            "- None. (Executor unavailable — manual investigation required.)",
+            "",
+            "## Blueprint Hits",
+            "- None.",
+            "",
+            "## Blueprint Text Hits",
+            "- None.",
+            "",
+            "## Current Runtime Paths",
+            "- None. (Executor unavailable — investigate manually.)",
+            "",
+            "## Legacy Runtime Paths",
+            "- None.",
+            "",
+            "## Runtime Path Hypotheses",
+            "- None.",
+            "",
+            "## Ownership Summary",
+            "Ownership is still being established. Executor was unavailable for file scanning.",
+            "",
+            "## Investigation Summary",
+            "Investigation could not proceed without executor access. Provide executor LLM to enable tool-driven investigation.",
+            "",
+            "## Root Cause Direction",
+            str(state.get("investigation_root_cause", "")).strip() or "No concrete root-cause statement yet.",
+            "",
+            "## Validation Plan",
+            str(state.get("investigation_validation_plan", "")).strip() or "No explicit validation plan yet.",
+            "",
+            "## Code Context",
+            "No code context yet.",
+            "",
+            "## Blueprint Context",
+            "No Blueprint context yet.",
+        ]
+    )
+
+
+def _parse_investigation_results(
+    investigation_doc: str,
+    project_snapshot: dict[str, Any],
+) -> dict[str, Any]:
+    def _extract_bullet_items(heading: str) -> list[str]:
+        lines = _extract_heading_block(investigation_doc, heading)
+        items: list[str] = []
+        for line in lines:
+            stripped = line.lstrip("- ").strip()
+            if stripped and stripped.lower() not in {"none.", "none", "n/a"}:
+                items.append(stripped)
+        return items
+
+    def _extract_text(heading: str) -> str:
+        return "\n".join(_extract_heading_block(investigation_doc, heading)).strip()
+
+    return {
+        "doc_hits": _extract_bullet_items("Doc Hits"),
+        "doc_context": "",
+        "source_hits": _extract_bullet_items("Source Hits"),
+        "test_hits": _extract_bullet_items("Test Hits"),
+        "blueprint_hits": _extract_bullet_items("Blueprint Hits"),
+        "blueprint_text_hits": _extract_bullet_items("Blueprint Text Hits"),
+        "current_runtime_paths": _extract_bullet_items("Current Runtime Paths"),
+        "legacy_runtime_paths": _extract_bullet_items("Legacy Runtime Paths"),
+        "runtime_path_hypotheses": _extract_bullet_items("Runtime Path Hypotheses"),
+        "ownership_summary": _extract_text("Ownership Summary"),
+        "investigation_summary": _extract_text("Investigation Summary"),
+        "code_context": _extract_text("Code Context"),
+        "blueprint_context": _extract_text("Blueprint Context"),
+        "implementation_medium": "",
+        "implementation_medium_reason": "",
+    }
+
+
 
 
 def _choose_implementation_medium(state: EngineerState, payload: dict[str, Any]) -> tuple[str, str]:
@@ -1364,67 +1227,6 @@ def _build_investigation_learning(state: EngineerState, payload: dict[str, Any])
     )
     return summary, focus, learning_doc
 
-
-def _compose_investigation_doc(state: EngineerState, payload: dict[str, Any], *, round_index: int) -> str:
-    return "\n".join(
-        [
-            "# Gameplay Engineer Investigation",
-            "",
-            f"- Task Type: {state['task_type']}",
-            f"- Planning Mode: {state.get('planning_mode', _default_planning_mode(state['task_type']))}",
-            f"- Investigation Round: {round_index}",
-            f"- Implementation Medium: {state['implementation_medium']}",
-            f"- Implementation Medium Reason: {state['implementation_medium_reason'] or 'None.'}",
-            "",
-            "## Focus Terms",
-            _format_bullets(list(state.get("investigation_focus_terms", []))),
-            "",
-            "## Search Notes",
-            _format_bullets(list(state.get("investigation_search_notes", []))),
-            "",
-            "## Doc Hits",
-            _format_bullets(list(payload.get("doc_hits", []))),
-            "",
-            "## Source Hits",
-            _format_bullets(list(payload.get("source_hits", []))),
-            "",
-            "## Test Hits",
-            _format_bullets(list(payload.get("test_hits", []))),
-            "",
-            "## Blueprint Hits",
-            _format_bullets(list(payload.get("blueprint_hits", []))),
-            "",
-            "## Blueprint Text Hits",
-            _format_bullets(list(payload.get("blueprint_text_hits", []))),
-            "",
-            "## Current Runtime Paths",
-            _format_bullets(list(payload.get("current_runtime_paths", []))),
-            "",
-            "## Legacy Runtime Paths",
-            _format_bullets(list(payload.get("legacy_runtime_paths", []))),
-            "",
-            "## Runtime Path Hypotheses",
-            _format_bullets(list(payload.get("runtime_path_hypotheses", []))),
-            "",
-            "## Ownership Summary",
-            str(payload.get("ownership_summary", "")).strip() or "Ownership is still being established.",
-            "",
-            "## Investigation Summary",
-            str(payload.get("investigation_summary", "")).strip() or "Investigation is still narrowing the likely owner.",
-            "",
-            "## Root Cause Direction",
-            str(state.get("investigation_root_cause", "")).strip() or "No concrete root-cause statement yet.",
-            "",
-            "## Validation Plan",
-            str(state.get("investigation_validation_plan", "")).strip() or "No explicit validation plan yet.",
-            "",
-            "## Code Context",
-            str(payload.get("code_context", "")).strip() or "No code context yet.",
-            "",
-            "## Blueprint Context",
-            str(payload.get("blueprint_context", "")).strip() or "No Blueprint context yet.",
-        ]
-    )
 
 
 def _compose_bug_context_doc(context: WorkflowContext, state: EngineerState) -> str:
@@ -2165,19 +1967,85 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
 
     def simulate_engineer_investigation(state: EngineerState) -> dict[str, Any]:
         artifact_dir = _artifact_dir(context, metadata, state)
-        payload = _collect_engineering_context(context, state)
+        scope_root = context.resolve_scope_root("host_project")
+        round_index = int(state["investigation_round"])
+
+        # Lightweight project snapshot (no rglob — just top-level layout)
+        project_snapshot = _collect_project_snapshot(context, state)
+
+        # Build fallback doc in case executor/LLM is unavailable
+        fallback_doc = _compose_fallback_investigation_doc(state, project_snapshot, round_index=round_index)
+
+        # Try executor-driven investigation (LLM decides what to scan)
+        investigator_llm, investigation_mode = _select_investigator_llm(context)
+        investigation_doc = fallback_doc
+
+        if investigation_mode == "claude-executor-tools" and isinstance(investigator_llm, ClaudeCodeExecutorClient):
+            try:
+                system_prompt = build_executor_system_prompt(
+                    working_directory=str(scope_root),
+                    scope_constraints=[
+                        "Investigate only — do not modify files, do not write patches.",
+                        "Use Read, Grep, Glob, and Bash (read-only commands) to gather evidence.",
+                        "Write a markdown investigation document with these exact sections: "
+                        + ", ".join(s.split(" — ")[0] for s in _GAMEPLAY_INVESTIGATION_SECTIONS)
+                        + ".",
+                    ],
+                )
+                task_prompt = build_executor_task_prompt(
+                    description=_build_executor_investigation_description(state, project_snapshot, round_index),
+                    prior_feedback=_truncate_prior_context(state.get("investigation_feedback", "")) or None,
+                    context=project_snapshot["snapshot"],
+                )
+                effective_max_turns = 15 if round_index > 1 else None
+                result = investigator_llm.execute_task(
+                    task_prompt=task_prompt,
+                    system_prompt=system_prompt,
+                    working_directory=str(scope_root),
+                    max_turns=effective_max_turns,
+                )
+                if result.success and result.result_text.strip():
+                    investigation_doc = result.result_text
+            except Exception as exc:
+                _log.warning("Executor investigation failed, using fallback: %s", exc)
+        elif investigator_llm.is_enabled():
+            try:
+                investigation_doc = investigator_llm.generate_text(
+                    instructions=(
+                        "You are gameplay-engineer-workflow's investigation agent. "
+                        "Investigate the gameplay task and write a markdown investigation document with these exact sections: "
+                        + ", ".join(s.split(" — ")[0] for s in _GAMEPLAY_INVESTIGATION_SECTIONS)
+                        + ". Stay concrete, evidence-driven, and strict about scope. "
+                        "Do not invent file paths or command output."
+                    ),
+                    input_text=build_prompt_brief(
+                        opening="Investigate the gameplay task and identify the live runtime owner.",
+                        sections=[
+                            ("Task request", state["task_prompt"].strip()),
+                            ("Investigation round", str(round_index)),
+                            ("Task type", state.get("task_type", "bugfix")),
+                            ("Project snapshot", project_snapshot["snapshot"]),
+                            (
+                                "Previous investigation",
+                                _truncate_prior_context(state.get("investigation_doc", "") or "None. First round."),
+                            ),
+                            (
+                                "Previous feedback",
+                                _truncate_prior_context(state.get("investigation_feedback", "") or "None."),
+                            ),
+                        ],
+                        closing="Identify the live runtime owner, root cause hypothesis, and a concrete validation plan.",
+                    ),
+                )
+            except Exception as exc:
+                _log.warning("LLM investigation failed, using fallback: %s", exc)
+
+        # Extract structured fields from the investigation markdown
+        payload = _parse_investigation_results(investigation_doc, project_snapshot)
         implementation_medium, implementation_reason = _choose_implementation_medium(state, payload)
         learning_summary, learning_focus, learning_doc = _build_investigation_learning(state, payload)
-        investigation_doc = _compose_investigation_doc(
-            {
-                **state,
-                "implementation_medium": implementation_medium,
-                "implementation_medium_reason": implementation_reason,
-            },
-            payload,
-            round_index=int(state["investigation_round"]),
-        )
-        round_index = int(state["investigation_round"])
+
+        # Write artifacts
         (artifact_dir / f"engineer_investigation_round_{round_index}.md").write_text(investigation_doc, encoding="utf-8")
         (artifact_dir / "engineer_investigation.md").write_text(investigation_doc, encoding="utf-8")
         (artifact_dir / f"investigation_learning_round_{round_index}.md").write_text(learning_doc, encoding="utf-8")
@@ -2464,8 +2332,8 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
                         "test_code": _safe_read_text(test_path, limit=50000) or code_bundle["test_code"],
                         "implementation_notes": result.result_text[:2000],
                     }
-            except Exception:
-                pass
+            except Exception as exc:
+                _log.warning("implement_code: executor implementation failed: %s", exc)
 
         codegen_llm = context.get_llm("codegen")
         if not executor_succeeded and codegen_llm.is_enabled():
@@ -2541,7 +2409,8 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
                     "test_code": str(generated.get("test_code", code_bundle["test_code"])),
                     "implementation_notes": str(generated.get("implementation_notes", code_bundle["implementation_notes"])),
                 }
-            except Exception:
+            except Exception as exc:
+                _log.warning("implement_code: LLM codegen failed, using fallback: %s", exc)
                 code_bundle = _fallback_code_bundle(state, scope_root)
 
         source_path = scope_root / state["workspace_source_file"]
