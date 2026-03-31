@@ -473,7 +473,15 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
     def investigate(state: GameThreadInvestigationState) -> dict[str, Any]:
         investigation_round = int(state.get("investigation_round", 0)) + 1
         artifact_path = _artifact_dir(context, metadata, state)
-        project_context = _collect_project_context(context, state["task_prompt"], str(state.get("review_feedback", "")))
+        if investigation_round > 1 and str(state.get("project_snapshot", "")).strip():
+            project_context = {
+                "snapshot": state["project_snapshot"],
+                "docs": list(state.get("relevant_docs", [])),
+                "source": list(state.get("relevant_source", [])),
+                "tests": list(state.get("relevant_tests", [])),
+            }
+        else:
+            project_context = _collect_project_context(context, state["task_prompt"], str(state.get("review_feedback", "")))
         investigator_llm, investigation_mode = _select_investigator_llm(context)
         fallback_doc = _fallback_investigation_doc(
             task_prompt=state["task_prompt"],

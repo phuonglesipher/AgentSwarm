@@ -158,6 +158,17 @@ def _short_slug(value: str, *, fallback: str, max_length: int = 18) -> str:
     return f"{slug[:keep].rstrip('-') or fallback}-{digest}"
 
 
+_MAX_PRIOR_CONTEXT_CHARS = 8000
+
+
+def _truncate_prior_context(text: str, *, max_chars: int = _MAX_PRIOR_CONTEXT_CHARS) -> str:
+    """Truncate long prior-round artifacts to keep the executor prompt manageable."""
+    text = str(text).strip()
+    if not text or len(text) <= max_chars:
+        return text
+    return text[:max_chars] + "\n\n[... truncated — full document available in artifacts ...]"
+
+
 def _artifact_dir(context: WorkflowContext, metadata: WorkflowMetadata, state: InvestigationLoopState) -> Path:
     existing = str(state.get("artifact_dir", "")).strip()
     if existing:
@@ -393,7 +404,15 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
     def investigate(state: InvestigationLoopState) -> dict[str, Any]:
         investigation_round = int(state.get("investigation_round", 0)) + 1
         artifact_path = _artifact_dir(context, metadata, state)
-        project_context = _collect_project_context(context, state["task_prompt"], str(state.get("review_feedback", "")))
+        if investigation_round > 1 and str(state.get("project_snapshot", "")).strip():
+            project_context = {
+                "snapshot": state["project_snapshot"],
+                "docs": list(state.get("relevant_docs", [])),
+                "source": list(state.get("relevant_source", [])),
+                "tests": list(state.get("relevant_tests", [])),
+            }
+        else:
+            project_context = _collect_project_context(context, state["task_prompt"], str(state.get("review_feedback", "")))
         investigator_llm, investigation_mode = _select_investigator_llm(context)
         fallback_doc = _fallback_investigation_doc(
             task_prompt=state["task_prompt"],
@@ -434,15 +453,17 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
                         f"Suggested docs: {_format_bullets(project_context['docs'], empty_message='None.')}\n"
                         f"Suggested source: {_format_bullets(project_context['source'], empty_message='None.')}\n"
                         f"Suggested tests: {_format_bullets(project_context['tests'], empty_message='None.')}\n\n"
-                        f"Previous investigation:\n{state.get('investigation_doc', '') or 'None. First round.'}\n"
+                        f"Previous investigation:\n{_truncate_prior_context(state.get('investigation_doc', '') or 'None. First round.')}\n"
                     ),
-                    prior_feedback=str(state.get("review_feedback", "")) or None,
+                    prior_feedback=_truncate_prior_context(state.get("review_feedback", "")) or None,
                     context=project_context["snapshot"],
                 )
+                effective_max_turns = 15 if investigation_round > 1 else None
                 result = investigator_llm.execute_task(
                     task_prompt=task_prompt,
                     system_prompt=system_prompt,
                     working_directory=str(context.host_root),
+                    max_turns=effective_max_turns,
                 )
                 if result.success and result.result_text.strip():
                     investigation_doc = result.result_text
@@ -481,8 +502,8 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
                         f"Suggested starting source files:\n{_format_bullets(project_context['source'], empty_message='No strong source hits yet.')}\n\n"
                         f"Suggested starting tests:\n{_format_bullets(project_context['tests'], empty_message='No strong test hits yet.')}\n\n"
                         f"Current project snapshot:\n{project_context['snapshot']}\n\n"
-                        f"Previous investigation document:\n{state.get('investigation_doc', '') or 'None. This is the first round.'}\n\n"
-                        f"Previous reviewer feedback:\n{state.get('review_feedback', '') or 'None. This is the first round.'}\n\n"
+                        f"Previous investigation document:\n{_truncate_prior_context(state.get('investigation_doc', '') or 'None. This is the first round.')}\n\n"
+                        f"Previous reviewer feedback:\n{_truncate_prior_context(state.get('review_feedback', '') or 'None. This is the first round.')}\n\n"
                         f"Previous reviewer checklist:\n{_format_bullets(list(state.get('review_improvement_actions', [])), empty_message='None.')}\n\n"
                         "Return only the next investigation document. The next document must add real evidence, not just rephrase the prior round."
                     ),
