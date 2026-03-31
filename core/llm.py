@@ -7,7 +7,9 @@ import os
 from pathlib import Path
 import random
 import shutil
+import signal
 import subprocess
+import sys
 import tempfile
 import time
 from time import perf_counter
@@ -621,20 +623,40 @@ class ClaudeCodeLLMClient(LLMClient):
         )
 
         def _do_claude_run():
+            # Use Popen + communicate() instead of subprocess.run(capture_output=True)
+            # to avoid pipe deadlock when --verbose produces large output.
+            # communicate() reads stdout and stderr concurrently via threads.
+            popen_kwargs: dict[str, Any] = {}
+            if sys.platform == "win32":
+                popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+
+            proc = subprocess.Popen(
+                command,
+                cwd=effective_cwd,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                **popen_kwargs,
+            )
             try:
-                completed = subprocess.run(
-                    command,
-                    check=False,
-                    cwd=effective_cwd,
-                    capture_output=True,
+                stdout, stderr = proc.communicate(
                     input=prompt,
-                    text=True,
-                    encoding="utf-8",
-                    errors="replace",
                     timeout=self.config.timeout_seconds,
                 )
-            except subprocess.TimeoutExpired as exc:
-                raise LLMError(f"Claude Code timed out after {self.config.timeout_seconds} seconds") from exc
+            except subprocess.TimeoutExpired:
+                _kill_llm_process_tree(proc)
+                proc.wait(timeout=10)
+                raise LLMError(f"Claude Code timed out after {self.config.timeout_seconds} seconds")
+
+            completed = subprocess.CompletedProcess(
+                args=command,
+                returncode=proc.returncode,
+                stdout=stdout,
+                stderr=stderr,
+            )
 
             if completed.returncode != 0:
                 combined = "\n".join(
@@ -652,6 +674,28 @@ class ClaudeCodeLLMClient(LLMClient):
             raise LLMError("Claude Code returned empty output")
 
         return _extract_claude_result(raw_output)
+
+
+def _kill_llm_process_tree(proc: subprocess.Popen) -> None:
+    """Kill a subprocess and all its children.
+
+    On Windows, ``taskkill /T /F`` kills the entire process tree.
+    On POSIX, send SIGTERM to the process group.
+    """
+    try:
+        if sys.platform == "win32":
+            subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                capture_output=True,
+                timeout=15,
+            )
+        else:
+            os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+    except (OSError, subprocess.SubprocessError):
+        try:
+            proc.kill()
+        except OSError:
+            pass
 
 
 def _looks_like_claude_auth_error(output: str) -> bool:
