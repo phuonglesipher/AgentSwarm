@@ -342,6 +342,7 @@ class EngineerState(TypedDict):
     active_loop_should_continue: bool
     active_loop_completed: bool
     active_loop_status: str
+    executor_failed: bool
 
 
 def _dedupe(items: list[str]) -> list[str]:
@@ -1698,6 +1699,48 @@ def _evaluate_investigation_quality(
             [],
         )
 
+    # If the executor failed on a retry round, stop looping — the same
+    # infrastructure error will repeat and produce the same fallback doc.
+    if state.get("executor_failed") and review_round >= MIN_INVESTIGATION_ROUNDS:
+        reason = (
+            f"Executor infrastructure failure on round {review_round}; "
+            "retrying would repeat the same error."
+        )
+        feedback = _compose_loop_feedback(
+            title="Investigation Confidence Review",
+            round_index=review_round,
+            score=0,
+            threshold=INVESTIGATION_SCORE,
+            approved=False,
+            confidence_label="unmeasured",
+            confidence_reason="Executor failed — no LLM-generated investigation was produced.",
+            confidence=None,
+            blocking_issues=[reason],
+            improvement_actions=["Fix executor infrastructure and rerun."],
+            sections=[],
+            loop_reason=reason,
+        )
+        return (
+            {
+                "investigation_score": 0,
+                "investigation_feedback": feedback,
+                "investigation_missing_sections": [],
+                "investigation_blocking_issues": [reason],
+                "investigation_improvement_actions": ["Fix executor infrastructure and rerun."],
+                "investigation_approved": False,
+                "investigation_loop_status": "executor-failed",
+                "investigation_loop_reason": reason,
+                "investigation_loop_stagnated_rounds": 0,
+                "investigation_score_confidence": None,
+                "investigation_score_confidence_label": "unmeasured",
+                "investigation_score_confidence_reason": "Executor failed — no scored investigation.",
+                "active_loop_should_continue": False,
+                "active_loop_completed": True,
+                "active_loop_status": "executor-failed",
+            },
+            [],
+        )
+
     schema = {
         "type": "object",
         "properties": {
@@ -1979,6 +2022,7 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
         # Try executor-driven investigation (LLM decides what to scan)
         investigator_llm, investigation_mode = _select_investigator_llm(context)
         investigation_doc = fallback_doc
+        executor_failed = False
 
         if investigation_mode == "claude-executor-tools" and isinstance(investigator_llm, ClaudeCodeExecutorClient):
             try:
@@ -1997,7 +2041,7 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
                     prior_feedback=_truncate_prior_context(state.get("investigation_feedback", "")) or None,
                     context=project_snapshot["snapshot"],
                 )
-                effective_max_turns = 15 if round_index > 1 else None
+                effective_max_turns = 15
                 result = investigator_llm.execute_task(
                     task_prompt=task_prompt,
                     system_prompt=system_prompt,
@@ -2006,8 +2050,16 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
                 )
                 if result.success and result.result_text.strip():
                     investigation_doc = result.result_text
+                else:
+                    _log.warning(
+                        "Executor investigation returned success=%s (error: %s), using fallback",
+                        result.success,
+                        (result.error or "")[:200],
+                    )
+                    executor_failed = True
             except Exception as exc:
                 _log.warning("Executor investigation failed, using fallback: %s", exc)
+                executor_failed = True
         elif investigator_llm.is_enabled():
             try:
                 investigation_doc = investigator_llm.generate_text(
@@ -2056,6 +2108,7 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
         log_path.write_text("\n\n".join(item for item in [previous_log, learning_doc] if item).strip(), encoding="utf-8")
         return {
             "artifact_dir": str(artifact_dir),
+            "executor_failed": executor_failed,
             "doc_hits": list(payload["doc_hits"]),
             "source_hits": list(payload["source_hits"]),
             "test_hits": list(payload["test_hits"]),

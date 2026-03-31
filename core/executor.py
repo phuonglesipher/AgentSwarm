@@ -47,6 +47,8 @@ _ANTI_RECURSION_GUARD = (
     "Do NOT trigger any workflow pipeline. Focus solely on the specific task below."
 )
 
+_MAX_ERROR_CHARS = 4000
+
 
 def build_executor_system_prompt(
     *,
@@ -157,7 +159,6 @@ class ClaudeCodeExecutorClient:
             "--output-format", "json",
             "--model", self.config.model,
             "--max-turns", str(effective_max_turns),
-            "--verbose",
         ]
 
         client_label = f"claude_code_executor/{self.config.model}"
@@ -216,6 +217,8 @@ class ClaudeCodeExecutorClient:
                     for part in [completed.stdout, completed.stderr]
                     if part and part.strip()
                 )
+                if len(combined) > _MAX_ERROR_CHARS:
+                    combined = combined[:_MAX_ERROR_CHARS] + f"\n\n... [truncated {len(combined) - _MAX_ERROR_CHARS} chars]"
                 normalized = combined.lower()
                 if "unauthorized" in normalized or "not authenticated" in normalized or "api key" in normalized:
                     self._disabled_reason = "claude auth required"
@@ -291,10 +294,9 @@ def _kill_process_tree(proc: subprocess.Popen) -> None:
 
 
 def _extract_executor_result(raw_output: str) -> str:
-    """Parse Claude Code JSON/JSONL output to extract the final result text.
+    """Parse Claude Code JSON output to extract the final result text.
 
     Delegates to ``_extract_claude_result`` which handles single JSON objects,
-    JSON arrays, and JSONL streams (one JSON event per line).  The executor
-    uses ``--output-format json --verbose`` which produces JSONL.
+    JSON arrays, and JSONL streams (one JSON event per line).
     """
     return _extract_claude_result(raw_output)
