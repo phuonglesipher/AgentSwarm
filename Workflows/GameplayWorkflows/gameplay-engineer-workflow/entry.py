@@ -23,6 +23,7 @@ from core.executor import (
 )
 from core.models import WorkflowContext, WorkflowMetadata
 from core.natural_language_prompts import build_prompt_brief
+from core.plan import PlanCriterion, PlanEngine, PlanProfile, PlanStrategy
 from core.quality_loop import QualityLoopSpec, evaluate_quality_loop
 from core.scoring import ScoreAssessment, ScorePolicy, evaluate_score_decision
 from core.text_utils import keyword_tokens, normalize_text, slugify, tokenize
@@ -249,6 +250,194 @@ NEW_FEATURE_INTENT_MARKERS = (
     "build ",
 )
 
+# ------------------------------------------------------------------ #
+#  Plan Engine strategies and profile
+# ------------------------------------------------------------------ #
+
+BUGFIX_PLAN_STRATEGY = PlanStrategy(
+    mode_id="bugfix",
+    display_name="bugfix",
+    task_focus="Planning focus: reproduce the issue, isolate the likely root cause, apply the narrowest safe fix, and prove the regression stays closed.",
+    plan_overview="- Keep the fix as small as the grounded owner allows and avoid redesigning unrelated gameplay systems.",
+    plan_steps=(
+        "Patch the smallest grounded hook or condition that explains the failure and keep adjacent state transitions unchanged.",
+        "Add or update regression coverage for the failing path and the closest neighboring gameplay path that could drift.",
+    ),
+    validation_focus="Prove the original regression is closed and the closest neighboring path still behaves the same.",
+    default_tests=(
+        "Add a regression test that reproduces the original gameplay failure and proves the fix closes it.",
+        "Add a neighboring-path regression test so the narrow bugfix does not spill into adjacent gameplay states.",
+    ),
+    risks=(
+        "- Risk: the fix may mask the symptom while leaving the root cause or a neighboring regression behind.",
+        "- Mitigation: anchor the fix on the grounded owner, keep the patch narrow, and cover the nearest adjacent path with tests.",
+    ),
+    acceptance=(
+        "- The original gameplay bug no longer reproduces on the grounded owner path.",
+        "- The closest neighboring gameplay path remains stable and automated checks still pass.",
+    ),
+    design_overview="- Treat this as bugfix work: capture the broken behavior, likely failing hook, and the smallest safe fix boundary.",
+    design_behavior="- Describe the broken player-facing behavior, the intended behavior, and the neighboring path that must remain stable after the fix.",
+    design_technical_note="Capture the failing owner, root-cause hypothesis, and validation path before implementation begins.",
+    design_risk="- Risk: a broad fix could hide the symptom while shifting the regression into adjacent gameplay states.",
+    design_focus="Focus the brief on repro, likely root cause, the smallest safe fix boundary, and the regression path that must be retested.",
+)
+
+REFACTOR_PLAN_STRATEGY = PlanStrategy(
+    mode_id="refactor",
+    display_name="refactor",
+    task_focus="Planning focus: preserve player-visible behavior while improving structure, boundaries, and maintainability.",
+    plan_overview="- Preserve the current player-visible behavior unless the request explicitly calls for a visible improvement.",
+    plan_steps=(
+        "Split the refactor into safe slices, keep public contracts stable, and avoid mixing cleanup with unrelated behavior changes.",
+        "Protect invariants, ordering, and data flow explicitly so the new structure stays behaviorally equivalent.",
+    ),
+    validation_focus="Prove the refactor does not change player-visible behavior on the main path or its closest neighboring path.",
+    default_tests=(
+        "Add or update regression coverage that proves the refactor preserved the current gameplay behavior.",
+        "Add a targeted test for the most fragile neighboring path that could drift during the cleanup.",
+    ),
+    risks=(
+        "- Risk: hidden coupling or ordering assumptions may break once code is moved or split.",
+        "- Mitigation: refactor in narrow slices, keep interfaces stable, and cover no-behavior-drift cases with tests.",
+    ),
+    acceptance=(
+        "- The targeted code path is cleaner, easier to own, or easier to extend without changing the intended gameplay outcome.",
+        "- Existing player-visible behavior and adjacent regression checks stay unchanged.",
+    ),
+    design_overview="- Treat this as refactor work: ground the current owner, the cleanup goal, and the invariants that cannot drift.",
+    design_behavior="- Name the player-facing behavior that must remain unchanged and the hidden engineering pain the refactor is meant to remove.",
+    design_technical_note="Capture the current seams, ordering constraints, migration boundaries, and rollback points before implementation.",
+    design_risk="- Risk: behavior drift can slip in while reorganizing ownership, ordering, or shared helpers.",
+    design_focus="Focus the brief on system boundaries, invariants, migration safety, and proof that behavior should stay stable.",
+)
+
+IMPROVE_FEATURE_PLAN_STRATEGY = PlanStrategy(
+    mode_id="improve_feature",
+    display_name="feature improvement",
+    task_focus="Planning focus: evolve an existing gameplay feature, compare current behavior against the target improvement, and preserve compatibility.",
+    plan_overview="- Treat this as an evolution of an existing gameplay feature rather than a net-new system.",
+    plan_steps=(
+        "Document the current behavior and hook the change into the existing feature owner instead of adding a parallel path.",
+        "Preserve supported behavior, neighboring states, and existing caps or gating rules while applying the improvement.",
+    ),
+    validation_focus="Cover both the upgraded behavior and the existing supported behavior that must remain compatible.",
+    default_tests=(
+        "Add or update tests that prove the requested improvement works on the existing feature path.",
+        "Add a compatibility regression test for the old behavior or edge case that must remain intact.",
+    ),
+    risks=(
+        "- Risk: the improvement could regress a previously supported interaction, cap, or edge case.",
+        "- Mitigation: compare current-vs-target behavior explicitly and keep compatibility coverage around the old path.",
+    ),
+    acceptance=(
+        "- Players experience the requested improvement on the existing feature path.",
+        "- Existing supported behavior, neighboring states, and edge-case coverage remain intact.",
+    ),
+    design_overview="- Treat this as a feature improvement: ground the current behavior first, then describe the exact upgrade the player should feel.",
+    design_behavior="- Compare the current player-facing behavior against the target improvement and call out which existing expectations must remain compatible.",
+    design_technical_note="Capture the live extension point, compatibility constraints, and edge cases that the current feature already supports.",
+    design_risk="- Risk: the improvement may help the main path but regress an existing contract, edge case, or balancing expectation.",
+    design_focus="Focus the brief on current-vs-target behavior, compatibility boundaries, and the edge cases that existing players already rely on.",
+)
+
+NEW_FEATURE_PLAN_STRATEGY = PlanStrategy(
+    mode_id="new_feature",
+    display_name="new feature",
+    task_focus="Planning focus: define the new player-facing capability, its owning integration point, and the neighboring systems that must stay stable.",
+    plan_overview="- Introduce the requested gameplay behavior without destabilizing adjacent systems or generic shared hooks.",
+    plan_steps=(
+        "Implement the new capability at the confirmed owner and keep its trigger conditions, caps, and state transitions explicit.",
+        "Guard neighboring systems so the new behavior stays isolated to the intended gameplay path.",
+    ),
+    validation_focus="Cover the new feature path plus the closest non-triggering path that must remain unchanged.",
+    default_tests=(
+        "Add a regression test proving the new feature activates only under the intended gameplay conditions.",
+        "Add a regression test proving the closest neighboring path does not accidentally trigger the new behavior.",
+    ),
+    risks=(
+        "- Risk: the new capability may fire from the wrong state or bleed into nearby systems.",
+        "- Mitigation: keep the hook narrow, gate the trigger conditions explicitly, and cover adjacent paths in tests.",
+    ),
+    acceptance=(
+        "- Players can trigger the new gameplay capability under the intended conditions.",
+        "- Adjacent gameplay paths remain stable and automated coverage proves the new behavior stays gated correctly.",
+    ),
+    design_overview="- Treat this as new feature work: define the player outcome, trigger conditions, and the gameplay boundaries around the new capability.",
+    design_behavior="- Describe the new player-facing behavior, when it triggers, and which nearby states or systems must integrate cleanly.",
+    design_technical_note="Capture the owning runtime hook, required gates or caps, and the integration surfaces the new path will touch.",
+    design_risk="- Risk: the new feature can leak into adjacent systems if hooks, trigger conditions, or caps are left too broad.",
+    design_focus="Focus the brief on player outcome, owning integration points, trigger rules, and the adjacent systems that need regression coverage.",
+)
+
+NON_GAMEPLAY_PLAN_STRATEGY = PlanStrategy(
+    mode_id="non_gameplay",
+    display_name="non-gameplay",
+    task_focus="Planning focus: this request does not belong to gameplay engineering.",
+    plan_overview="- Do not draft a gameplay implementation plan for non-gameplay-owned work.",
+    plan_steps=("Route the task to the correct owner.",),
+    validation_focus="No gameplay validation should be proposed.",
+    default_tests=("No gameplay tests should be proposed for non-gameplay-owned work.",),
+    risks=("- Risk: wrong-owner execution can waste time and create misleading artifacts.",),
+    acceptance=("- The task is routed away from gameplay engineering.",),
+    design_overview="- This request appears outside gameplay ownership.",
+    design_behavior="- Route the work to the owning non-gameplay discipline instead of producing a gameplay plan.",
+    design_technical_note="No gameplay runtime owner should be assumed for this request.",
+    design_risk="- Risk: a gameplay workflow could produce misleading implementation guidance for a task it does not own.",
+    design_focus="Keep the document limited to ownership handoff and do not invent gameplay implementation work.",
+)
+
+GAMEPLAY_PLAN_STRATEGIES: dict[str, PlanStrategy] = {
+    "bugfix": BUGFIX_PLAN_STRATEGY,
+    "refactor": REFACTOR_PLAN_STRATEGY,
+    "improve_feature": IMPROVE_FEATURE_PLAN_STRATEGY,
+    "new_feature": NEW_FEATURE_PLAN_STRATEGY,
+    "non_gameplay": NON_GAMEPLAY_PLAN_STRATEGY,
+}
+
+GAMEPLAY_PLAN_PROFILE = PlanProfile(
+    system_id="gameplay-implementation-plan",
+    display_name="Gameplay Implementation Plan",
+    criteria=(
+        PlanCriterion("Overview", 10, "High-level task summary", ("Overview",)),
+        PlanCriterion("Task Type", 10, "Classification and planning mode", ("Task Type",)),
+        PlanCriterion("Existing Docs", 10, "Grounded reference material", ("Existing Docs",)),
+        PlanCriterion("Implementation Steps", 25, "Concrete execution steps", ("Implementation Steps",)),
+        PlanCriterion("Unit Tests", 20, "Test coverage plan", ("Unit Tests",)),
+        PlanCriterion("Risks", 10, "Risk assessment", ("Risks",)),
+        PlanCriterion("Acceptance Criteria", 15, "Done conditions", ("Acceptance Criteria",)),
+    ),
+    strategies=GAMEPLAY_PLAN_STRATEGIES,
+    default_strategy="bugfix",
+    prompt_persona=(
+        "You are a senior gameplay engineer producing an implementation plan. "
+        "Anchor every section on concrete source evidence, not speculation."
+    ),
+    prompt_domain_instructions=(
+        "Keep the plan technical and do not add review-round bookkeeping, sign-off "
+        "workflow, or artifact naming requirements."
+    ),
+    approval_threshold=APPROVAL_SCORE,
+    min_rounds=1,
+    max_rounds=MAX_REVIEW_ROUNDS,
+    stagnation_limit=2,
+    plan_doc_field="plan_doc",
+    strategy_field="planning_mode",
+    context_fields=(
+        "investigation_doc",
+        "design_doc",
+        "bug_context_doc",
+        "current_runtime_paths",
+        "doc_hits",
+        "source_hits",
+        "test_hits",
+        "ownership_summary",
+        "task_type",
+        "classification_reason",
+    ),
+    round_field="plan_round",
+)
+
 
 class InvestigationCheck(TypedDict):
     section: str
@@ -317,6 +506,7 @@ class EngineerState(TypedDict):
     bug_context_doc: str
     design_doc: str
     plan_doc: str
+    plan_round: int
     review_round: int
     review_score: int
     review_feedback: str
@@ -610,127 +800,24 @@ def _infer_planning_mode(task_prompt: str, *, fallback_task_type: str) -> str:
 
 
 def _planning_mode_profile(planning_mode: str) -> dict[str, Any]:
-    if planning_mode == "refactor":
-        return {
-            "task_focus": "Planning focus: preserve player-visible behavior while improving structure, boundaries, and maintainability.",
-            "design_overview": "- Treat this as refactor work: ground the current owner, the cleanup goal, and the invariants that cannot drift.",
-            "design_behavior": "- Name the player-facing behavior that must remain unchanged and the hidden engineering pain the refactor is meant to remove.",
-            "design_technical_note": "Capture the current seams, ordering constraints, migration boundaries, and rollback points before implementation.",
-            "design_risk": "- Risk: behavior drift can slip in while reorganizing ownership, ordering, or shared helpers.",
-            "design_focus": "Focus the brief on system boundaries, invariants, migration safety, and proof that behavior should stay stable.",
-            "plan_overview": "- Preserve the current player-visible behavior unless the request explicitly calls for a visible improvement.",
-            "plan_steps": [
-                "Split the refactor into safe slices, keep public contracts stable, and avoid mixing cleanup with unrelated behavior changes.",
-                "Protect invariants, ordering, and data flow explicitly so the new structure stays behaviorally equivalent.",
-            ],
-            "validation_focus": "Prove the refactor does not change player-visible behavior on the main path or its closest neighboring path.",
-            "default_tests": [
-                "Add or update regression coverage that proves the refactor preserved the current gameplay behavior.",
-                "Add a targeted test for the most fragile neighboring path that could drift during the cleanup.",
-            ],
-            "risks": [
-                "- Risk: hidden coupling or ordering assumptions may break once code is moved or split.",
-                "- Mitigation: refactor in narrow slices, keep interfaces stable, and cover no-behavior-drift cases with tests.",
-            ],
-            "acceptance": [
-                "- The targeted code path is cleaner, easier to own, or easier to extend without changing the intended gameplay outcome.",
-                "- Existing player-visible behavior and adjacent regression checks stay unchanged.",
-            ],
-        }
-    if planning_mode == "improve_feature":
-        return {
-            "task_focus": "Planning focus: evolve an existing gameplay feature, compare current behavior against the target improvement, and preserve compatibility.",
-            "design_overview": "- Treat this as a feature improvement: ground the current behavior first, then describe the exact upgrade the player should feel.",
-            "design_behavior": "- Compare the current player-facing behavior against the target improvement and call out which existing expectations must remain compatible.",
-            "design_technical_note": "Capture the live extension point, compatibility constraints, and edge cases that the current feature already supports.",
-            "design_risk": "- Risk: the improvement may help the main path but regress an existing contract, edge case, or balancing expectation.",
-            "design_focus": "Focus the brief on current-vs-target behavior, compatibility boundaries, and the edge cases that existing players already rely on.",
-            "plan_overview": "- Treat this as an evolution of an existing gameplay feature rather than a net-new system.",
-            "plan_steps": [
-                "Document the current behavior and hook the change into the existing feature owner instead of adding a parallel path.",
-                "Preserve supported behavior, neighboring states, and existing caps or gating rules while applying the improvement.",
-            ],
-            "validation_focus": "Cover both the upgraded behavior and the existing supported behavior that must remain compatible.",
-            "default_tests": [
-                "Add or update tests that prove the requested improvement works on the existing feature path.",
-                "Add a compatibility regression test for the old behavior or edge case that must remain intact.",
-            ],
-            "risks": [
-                "- Risk: the improvement could regress a previously supported interaction, cap, or edge case.",
-                "- Mitigation: compare current-vs-target behavior explicitly and keep compatibility coverage around the old path.",
-            ],
-            "acceptance": [
-                "- Players experience the requested improvement on the existing feature path.",
-                "- Existing supported behavior, neighboring states, and edge-case coverage remain intact.",
-            ],
-        }
-    if planning_mode == "new_feature":
-        return {
-            "task_focus": "Planning focus: define the new player-facing capability, its owning integration point, and the neighboring systems that must stay stable.",
-            "design_overview": "- Treat this as new feature work: define the player outcome, trigger conditions, and the gameplay boundaries around the new capability.",
-            "design_behavior": "- Describe the new player-facing behavior, when it triggers, and which nearby states or systems must integrate cleanly.",
-            "design_technical_note": "Capture the owning runtime hook, required gates or caps, and the integration surfaces the new path will touch.",
-            "design_risk": "- Risk: the new feature can leak into adjacent systems if hooks, trigger conditions, or caps are left too broad.",
-            "design_focus": "Focus the brief on player outcome, owning integration points, trigger rules, and the adjacent systems that need regression coverage.",
-            "plan_overview": "- Introduce the requested gameplay behavior without destabilizing adjacent systems or generic shared hooks.",
-            "plan_steps": [
-                "Implement the new capability at the confirmed owner and keep its trigger conditions, caps, and state transitions explicit.",
-                "Guard neighboring systems so the new behavior stays isolated to the intended gameplay path.",
-            ],
-            "validation_focus": "Cover the new feature path plus the closest non-triggering path that must remain unchanged.",
-            "default_tests": [
-                "Add a regression test proving the new feature activates only under the intended gameplay conditions.",
-                "Add a regression test proving the closest neighboring path does not accidentally trigger the new behavior.",
-            ],
-            "risks": [
-                "- Risk: the new capability may fire from the wrong state or bleed into nearby systems.",
-                "- Mitigation: keep the hook narrow, gate the trigger conditions explicitly, and cover adjacent paths in tests.",
-            ],
-            "acceptance": [
-                "- Players can trigger the new gameplay capability under the intended conditions.",
-                "- Adjacent gameplay paths remain stable and automated coverage proves the new behavior stays gated correctly.",
-            ],
-        }
-    if planning_mode == "non_gameplay":
-        return {
-            "task_focus": "Planning focus: this request does not belong to gameplay engineering.",
-            "design_overview": "- This request appears outside gameplay ownership.",
-            "design_behavior": "- Route the work to the owning non-gameplay discipline instead of producing a gameplay plan.",
-            "design_technical_note": "No gameplay runtime owner should be assumed for this request.",
-            "design_risk": "- Risk: a gameplay workflow could produce misleading implementation guidance for a task it does not own.",
-            "design_focus": "Keep the document limited to ownership handoff and do not invent gameplay implementation work.",
-            "plan_overview": "- Do not draft a gameplay implementation plan for non-gameplay-owned work.",
-            "plan_steps": ["Route the task to the correct owner."],
-            "validation_focus": "No gameplay validation should be proposed.",
-            "default_tests": ["No gameplay tests should be proposed for non-gameplay-owned work."],
-            "risks": ["- Risk: wrong-owner execution can waste time and create misleading artifacts."],
-            "acceptance": ["- The task is routed away from gameplay engineering."],
-        }
+    """Return strategy fields as a dict for backward-compat callers.
+
+    New code should use ``GAMEPLAY_PLAN_STRATEGIES[mode_id]`` directly.
+    """
+    strategy = GAMEPLAY_PLAN_STRATEGIES.get(planning_mode, BUGFIX_PLAN_STRATEGY)
     return {
-        "task_focus": "Planning focus: reproduce the issue, isolate the likely root cause, apply the narrowest safe fix, and prove the regression stays closed.",
-        "design_overview": "- Treat this as bugfix work: capture the broken behavior, likely failing hook, and the smallest safe fix boundary.",
-        "design_behavior": "- Describe the broken player-facing behavior, the intended behavior, and the neighboring path that must remain stable after the fix.",
-        "design_technical_note": "Capture the failing owner, root-cause hypothesis, and validation path before implementation begins.",
-        "design_risk": "- Risk: a broad fix could hide the symptom while shifting the regression into adjacent gameplay states.",
-        "design_focus": "Focus the brief on repro, likely root cause, the smallest safe fix boundary, and the regression path that must be retested.",
-        "plan_overview": "- Keep the fix as small as the grounded owner allows and avoid redesigning unrelated gameplay systems.",
-        "plan_steps": [
-            "Patch the smallest grounded hook or condition that explains the failure and keep adjacent state transitions unchanged.",
-            "Add or update regression coverage for the failing path and the closest neighboring gameplay path that could drift.",
-        ],
-        "validation_focus": "Prove the original regression is closed and the closest neighboring path still behaves the same.",
-        "default_tests": [
-            "Add a regression test that reproduces the original gameplay failure and proves the fix closes it.",
-            "Add a neighboring-path regression test so the narrow bugfix does not spill into adjacent gameplay states.",
-        ],
-        "risks": [
-            "- Risk: the fix may mask the symptom while leaving the root cause or a neighboring regression behind.",
-            "- Mitigation: anchor the fix on the grounded owner, keep the patch narrow, and cover the nearest adjacent path with tests.",
-        ],
-        "acceptance": [
-            "- The original gameplay bug no longer reproduces on the grounded owner path.",
-            "- The closest neighboring gameplay path remains stable and automated checks still pass.",
-        ],
+        "task_focus": strategy.task_focus,
+        "design_overview": strategy.design_overview,
+        "design_behavior": strategy.design_behavior,
+        "design_technical_note": strategy.design_technical_note,
+        "design_risk": strategy.design_risk,
+        "design_focus": strategy.design_focus,
+        "plan_overview": strategy.plan_overview,
+        "plan_steps": list(strategy.plan_steps),
+        "validation_focus": strategy.validation_focus,
+        "default_tests": list(strategy.default_tests),
+        "risks": list(strategy.risks),
+        "acceptance": list(strategy.acceptance),
     }
 
 
@@ -1948,6 +2035,7 @@ def _evaluate_investigation_quality(
 def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
     graph_name = metadata.name
     reviewer_graph = context.get_workflow_graph("gameplay-reviewer-workflow")
+    _plan_engine = PlanEngine(GAMEPLAY_PLAN_PROFILE, context, metadata)
 
     def classify_request(state: EngineerState) -> dict[str, Any]:
         task_type, planning_mode, reason = _classify_task(context, state["task_prompt"])
@@ -2266,10 +2354,7 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
         }
 
     def plan_work(state: EngineerState) -> dict[str, Any]:
-        artifact_dir = _artifact_dir(context, metadata, state)
-        plan_doc = _compose_plan_doc(context, state, revise=False)
-        (artifact_dir / "plan_doc.md").write_text(plan_doc, encoding="utf-8")
-        return {"plan_doc": plan_doc, "summary": f"{metadata.name} drafted a gameplay implementation plan."}
+        return _plan_engine.generate_plan(state)
 
     def request_review(state: EngineerState) -> dict[str, Any]:
         return {"summary": f"{metadata.name} requested gameplay plan review round {int(state.get('review_round', 0)) + 1}."}
@@ -2299,10 +2384,7 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
         }
 
     def revise_plan(state: EngineerState) -> dict[str, Any]:
-        artifact_dir = _artifact_dir(context, metadata, state)
-        plan_doc = _compose_plan_doc(context, state, revise=True)
-        (artifact_dir / "plan_doc.md").write_text(plan_doc, encoding="utf-8")
-        return {"plan_doc": plan_doc, "summary": f"{metadata.name} revised the gameplay implementation plan."}
+        return _plan_engine.revise_plan(state)
 
     def implement_code(state: EngineerState) -> dict[str, Any]:
         artifact_dir = _artifact_dir(context, metadata, state)
