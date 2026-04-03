@@ -469,6 +469,9 @@ def _fallback_investigation_doc(
     return "\n".join(lines).strip()
 
 
+OPTICK_THREAD_FILTER = "RenderThread,RHIThread"
+OPTICK_SCOPE_FILTER = "Draw,Nanite,Lumen,Shadow,BasePass,Render,Material,Shader,InitViews,LightCompositionTasks,FMeshDrawCommand"
+
 OPTICK_DOMAIN_FOCUS = (
     "Analyze the capture focusing on rendering and GPU performance. "
     "Highlight hottest scopes related to draw calls, Nanite rasterization, Lumen ray tracing, shadow rendering, "
@@ -514,6 +517,9 @@ def _gather_optick_context(
             task=(
                 "Extract any .opt file path from the task prompt below and analyze it using the optick-analyze tool. "
                 "If no .opt file is mentioned, set done=true immediately.\n\n"
+                f"When calling optick-analyze, use these filters to focus on rendering data:\n"
+                f"  thread_names: \"{OPTICK_THREAD_FILTER}\"\n"
+                f"  scope_keywords: \"{OPTICK_SCOPE_FILTER}\"\n\n"
                 f"Task prompt:\n{state['task_prompt']}"
             ),
         )

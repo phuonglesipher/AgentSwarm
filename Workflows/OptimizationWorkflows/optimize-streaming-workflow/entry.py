@@ -463,6 +463,9 @@ def _fallback_investigation_doc(
     return "\n".join(lines).strip()
 
 
+OPTICK_THREAD_FILTER = "AsyncLoadingThread,StreamingThread"
+OPTICK_SCOPE_FILTER = "AsyncLoad,Stream,FlushAsync,LoadObject,WorldPartition,LevelStreaming,StreamableManager,CreateActorsForLevel"
+
 OPTICK_DOMAIN_FOCUS = (
     "Analyze the capture focusing on streaming hitches and loading stalls. "
     "Pay special attention to frame_times_ms for sudden spikes indicating hitches. "
@@ -509,6 +512,10 @@ def _gather_optick_context(
             task=(
                 "Extract any .opt file path from the task prompt below and analyze it using the optick-analyze tool. "
                 "If no .opt file is mentioned, set done=true immediately.\n\n"
+                f"When calling optick-analyze, use these filters to focus on streaming data:\n"
+                f"  thread_names: \"{OPTICK_THREAD_FILTER}\"\n"
+                f"  scope_keywords: \"{OPTICK_SCOPE_FILTER}\"\n"
+                f"  spike_threshold_ms: 16.67\n\n"
                 f"Task prompt:\n{state['task_prompt']}"
             ),
         )

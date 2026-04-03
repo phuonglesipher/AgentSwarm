@@ -470,6 +470,9 @@ def _fallback_investigation_doc(
     return "\n".join(lines).strip()
 
 
+OPTICK_THREAD_FILTER = "GameThread"
+OPTICK_SCOPE_FILTER = "Tick,Ability,BehaviorTree,Sweep,Overlap,LineTrace,Physics,GAS,AIController,EQS,Perception"
+
 OPTICK_DOMAIN_FOCUS = (
     "Analyze the capture focusing on game thread bottlenecks. "
     "Highlight the hottest scopes related to tick functions, GAS ability evaluation, AI system ticks, and physics queries. "
@@ -515,6 +518,9 @@ def _gather_optick_context(
             task=(
                 "Extract any .opt file path from the task prompt below and analyze it using the optick-analyze tool. "
                 "If no .opt file is mentioned, set done=true immediately.\n\n"
+                f"When calling optick-analyze, use these filters to focus on game thread data:\n"
+                f"  thread_names: \"{OPTICK_THREAD_FILTER}\"\n"
+                f"  scope_keywords: \"{OPTICK_SCOPE_FILTER}\"\n\n"
                 f"Task prompt:\n{state['task_prompt']}"
             ),
         )
