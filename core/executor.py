@@ -161,6 +161,9 @@ class ClaudeCodeExecutorClient:
             "--max-turns", str(effective_max_turns),
         ]
 
+        if self.config.permission_mode == "dangerously-skip-permissions":
+            command.append("--dangerously-skip-permissions")
+
         client_label = f"claude_code_executor/{self.config.model}"
         request_event_id = log_llm_prompt_event(
             client_label=client_label,
