@@ -3,6 +3,8 @@ name: optimize-gamethread-workflow
 entry: entry.py
 version: 1.0.0
 exposed: true
+tools:
+  - optick-analyze
 capabilities:
   - game thread optimization
   - tick function profiling
