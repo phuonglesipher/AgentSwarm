@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import logging
 from pathlib import Path
 from typing import Any
@@ -27,9 +26,11 @@ THREAD_DOMAIN_MAP: dict[str, str] = {
     "pakprecachethread": "streaming",
 }
 
-# A thread is considered a bottleneck when its total_ms exceeds this
-# fraction of the heaviest thread's total_ms.
-BOTTLENECK_RATIO = 0.30
+# A domain is a bottleneck when its total_ms >= this fraction of the heaviest.
+BOTTLENECK_RATIO = 0.60
+
+# Ignore domains with trivially small totals (ms).
+BOTTLENECK_MIN_MS = 50.0
 
 CHILD_WORKFLOWS = {
     "gamethread": "optimize-gamethread-workflow",
@@ -49,6 +50,7 @@ class TriageState(TypedDict):
     task_id: NotRequired[str]
     run_dir: NotRequired[str]
     optick_analysis: NotRequired[str]
+    optick_analysis_data: NotRequired[dict[str, Any]]
     classified_domains: NotRequired[list[str]]
     domain_results: NotRequired[list[dict[str, Any]]]
     final_report: NotRequired[dict[str, Any]]
@@ -70,51 +72,32 @@ def _artifact_dir(context: WorkflowContext, metadata: WorkflowMetadata, state: T
     return d
 
 
-def _classify_from_thread_breakdown(raw_analysis: str) -> list[str]:
-    """Parse optick tool output and classify bottleneck domains.
+def _classify_from_thread_breakdown(analysis_data: dict[str, Any]) -> list[str]:
+    """Classify bottleneck domains from structured optick analysis data.
 
-    The optick-analyze tool returns text containing a JSON artifact.
-    We look for per_thread_scopes or thread_breakdown data to decide
+    Accepts the artifact dict returned by the optick-analyze tool.
+    Reads ``thread_breakdown`` or ``per_thread_scopes`` to determine
     which domains are hot.
     """
-    # Try to extract structured data from the tool output.
+    if not analysis_data:
+        return []
+
     thread_totals: dict[str, float] = {}
 
-    # The tool output contains markdown blocks with JSON.  Try to find
-    # the artifact dict that has per_thread_scopes.
-    for line in raw_analysis.splitlines():
-        stripped = line.strip()
-        if not stripped:
-            continue
-        # Try to parse any JSON object we find.
-        if stripped.startswith("{"):
-            try:
-                data = json.loads(stripped)
-                if "per_thread_scopes" in data:
-                    for thread_name, scopes in data["per_thread_scopes"].items():
-                        total = sum(s.get("total_ms", 0) for s in scopes)
-                        thread_totals[thread_name.lower().replace(" ", "")] = total
-                break
-            except (json.JSONDecodeError, TypeError):
-                pass
+    # Prefer thread_breakdown (pre-aggregated by optick_parser).
+    if "thread_breakdown" in analysis_data:
+        for entry in analysis_data["thread_breakdown"]:
+            name = entry.get("name", "").lower().replace(" ", "")
+            total_ms = entry.get("total_ms", 0)
+            if name and total_ms > 0:
+                thread_totals[name] = thread_totals.get(name, 0) + total_ms
 
-    # Also try to find thread_breakdown in the raw text (key: value lines).
-    if not thread_totals:
-        for line in raw_analysis.splitlines():
-            stripped = line.strip().lower()
-            for thread_key in THREAD_DOMAIN_MAP:
-                if thread_key in stripped:
-                    # Try to extract a numeric value from the line.
-                    for token in stripped.split():
-                        token = token.rstrip("ms,")
-                        try:
-                            val = float(token)
-                            if val > 0:
-                                thread_totals[thread_key] = max(
-                                    thread_totals.get(thread_key, 0), val
-                                )
-                        except ValueError:
-                            continue
+    # Fallback: compute from per_thread_scopes.
+    if not thread_totals and "per_thread_scopes" in analysis_data:
+        for thread_name, scopes in analysis_data["per_thread_scopes"].items():
+            total = sum(s.get("total_ms", 0) for s in scopes)
+            if total > 0:
+                thread_totals[thread_name.lower().replace(" ", "")] = total
 
     if not thread_totals:
         return []
@@ -133,12 +116,20 @@ def _classify_from_thread_breakdown(raw_analysis: str) -> list[str]:
     if max_total <= 0:
         return []
 
-    # Any domain exceeding the threshold ratio is a bottleneck.
-    bottlenecks = [
-        domain
-        for domain, total in sorted(domain_totals.items(), key=lambda x: -x[1])
-        if total >= max_total * BOTTLENECK_RATIO
-    ]
+    threshold_ms = max_total * BOTTLENECK_RATIO
+
+    logger.debug(
+        "Domain totals: %s (max=%.1fms, threshold=%.1fms)",
+        domain_totals, max_total, threshold_ms,
+    )
+
+    # Always include the top domain; others must exceed both ratio and min_ms.
+    sorted_domains = sorted(domain_totals.items(), key=lambda x: -x[1])
+    bottlenecks = [sorted_domains[0][0]]
+    for domain, total in sorted_domains[1:]:
+        if total >= threshold_ms and total >= BOTTLENECK_MIN_MS:
+            bottlenecks.append(domain)
+
     return bottlenecks
 
 
@@ -214,21 +205,25 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
                 ),
             )
             if result.success and result.tool_results_text().strip():
-                return {"optick_analysis": result.tool_results_text()}
+                artifact = result.first_artifact("optick-analyze") or {}
+                return {
+                    "optick_analysis": result.tool_results_text(),
+                    "optick_analysis_data": artifact,
+                }
         except Exception:
             logger.exception("[%s] Error during triage analysis", graph_name)
 
-        return {"optick_analysis": ""}
+        return {"optick_analysis": "", "optick_analysis_data": {}}
 
     # -- Node: triage_classify -----------------------------------------
 
     def triage_classify(state: TriageState) -> dict[str, Any]:
         """Classify bottleneck domains from profiling data or prompt text."""
-        raw = str(state.get("optick_analysis", "")).strip()
+        analysis_data = state.get("optick_analysis_data", {})
         domains: list[str] = []
 
-        if raw:
-            domains = _classify_from_thread_breakdown(raw)
+        if analysis_data:
+            domains = _classify_from_thread_breakdown(analysis_data)
 
         # Fallback: keyword classification from prompt text.
         if not domains:

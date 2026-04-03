@@ -23,6 +23,7 @@ class ToolCall:
     result: str
     error: str | None = None
     turn: int = 0
+    artifact: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -58,6 +59,13 @@ class ToolEngineResult:
     @property
     def has_tool_output(self) -> bool:
         return any(tc.error is None for tc in self.tool_calls)
+
+    def first_artifact(self, tool_name: str | None = None) -> dict[str, Any] | None:
+        """Return the first non-None artifact, optionally filtered by tool name."""
+        for tc in self.tool_calls:
+            if tc.artifact is not None and (tool_name is None or tc.tool_name == tool_name):
+                return tc.artifact
+        return None
 
     def tool_results_text(self, *, max_chars: int = 8000) -> str:
         """Format all tool results as markdown for injection into prompts."""
@@ -303,8 +311,11 @@ class ToolEngine:
             )
         try:
             raw_result = tool.invoke(arguments)
+            artifact: dict[str, Any] | None = None
             if isinstance(raw_result, tuple):
                 result_text = str(raw_result[0])
+                if len(raw_result) >= 2 and isinstance(raw_result[1], dict):
+                    artifact = raw_result[1]
             else:
                 result_text = str(raw_result)
             if len(result_text) > cfg.max_result_chars:
@@ -314,6 +325,7 @@ class ToolEngine:
                 arguments=arguments,
                 result=result_text,
                 turn=turn,
+                artifact=artifact,
             )
         except Exception as exc:
             return ToolCall(
