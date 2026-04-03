@@ -3,6 +3,9 @@ name: gameplay-engineer-workflow
 entry: entry.py
 version: 1.0.0
 exposed: true
+tools:
+  - github-issues
+  - github-pr
 capabilities:
   - gameplay bug fixing
   - gameplay feature delivery
