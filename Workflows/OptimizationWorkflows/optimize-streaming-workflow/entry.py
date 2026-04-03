@@ -16,6 +16,7 @@ from core.executor import (
 )
 from core.models import WorkflowContext, WorkflowMetadata
 from core.text_utils import keyword_tokens, normalize_text, slugify, tokenize
+from core.tool_engine import ToolEngine, ToolEngineConfig
 
 
 APPROVAL_SCORE = 85
@@ -99,6 +100,7 @@ class StreamingInvestigationState(TypedDict):
     loop_stagnated_rounds: int
     final_report: dict[str, Any]
     summary: str
+    optick_analysis: NotRequired[str]
     review_criteria: NotRequired[list[tuple]]
     optimization_domain: NotRequired[str]
 
@@ -392,6 +394,7 @@ def _fallback_investigation_doc(
     previous_investigation: str,
     review_feedback: str,
     improvement_actions: list[str],
+    optick_context: str | None = None,
 ) -> str:
     owners = relevant_source or relevant_docs or relevant_tests or ["No strong owner found yet; inspect streaming configuration first."]
     verification = relevant_tests or relevant_source or ["Add a focused streaming regression check once bottlenecks are confirmed."]
@@ -434,6 +437,7 @@ def _fallback_investigation_doc(
         "- Identify memory spikes during level transitions.",
         "",
         "## Hitch & Stall Sources",
+        *([f"\n### Optick Capture Data\n{optick_context}"] if optick_context else []),
         "- Search for FlushAsyncLoading, LoadObject, and other sync load patterns on game thread.",
         "- Identify blocking loads during gameplay (not just level transitions).",
         "- Look for flush points that force synchronous completion.",
@@ -459,6 +463,62 @@ def _fallback_investigation_doc(
     return "\n".join(lines).strip()
 
 
+OPTICK_DOMAIN_FOCUS = (
+    "Analyze the capture focusing on streaming hitches and loading stalls. "
+    "Pay special attention to frame_times_ms for sudden spikes indicating hitches. "
+    "Highlight scopes related to FlushAsyncLoading, LoadObject, streaming manager, and world partition loading. "
+    "Report frames above 16.67ms and 33.33ms thresholds as hitch frequency indicators."
+)
+
+
+def _gather_optick_context(
+    context: WorkflowContext,
+    metadata: WorkflowMetadata,
+    state: StreamingInvestigationState,
+) -> str | None:
+    # Already attempted in a prior round — return cached result (even if empty).
+    if "optick_analysis" in state:
+        cached = str(state["optick_analysis"]).strip()
+        return cached or None
+
+    tools: list[Any] = []
+    for tool_name in metadata.tools:
+        try:
+            tools.append(context.get_tool(tool_name).tool)
+        except KeyError:
+            pass
+    if not tools:
+        return None
+
+    llm = context.get_llm("investigator")
+    if not llm or not llm.is_enabled():
+        return None
+
+    try:
+        engine = ToolEngine(
+            config=ToolEngineConfig(
+                system_id=f"{metadata.name}-optick-gather",
+                persona=f"You are a performance data analyst. {OPTICK_DOMAIN_FOCUS}",
+                max_turns=2,
+                require_tool_use=False,
+            ),
+            tools=tools,
+            llm=llm,
+        )
+        result = engine.gather(
+            task=(
+                "Extract any .opt file path from the task prompt below and analyze it using the optick-analyze tool. "
+                "If no .opt file is mentioned, set done=true immediately.\n\n"
+                f"Task prompt:\n{state['task_prompt']}"
+            ),
+        )
+        if result.success and result.tool_results_text().strip():
+            return result.tool_results_text()
+    except Exception:
+        pass
+    return None
+
+
 def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
     graph_name = metadata.name
     reviewer_graph = context.get_workflow_graph("optimize-investigation-reviewer-workflow")
@@ -476,6 +536,8 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
         else:
             project_context = _collect_project_context(context, state["task_prompt"], str(state.get("review_feedback", "")))
         investigator_llm, investigation_mode = _select_investigator_llm(context)
+        optick_context = _gather_optick_context(context, metadata, state)
+        optick_section = f"Optick capture analysis:\n{optick_context}" if optick_context else "No Optick capture data available."
         fallback_doc = _fallback_investigation_doc(
             task_prompt=state["task_prompt"],
             investigation_round=investigation_round,
@@ -486,6 +548,7 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
             previous_investigation=str(state.get("investigation_doc", "")),
             review_feedback=str(state.get("review_feedback", "")),
             improvement_actions=list(state.get("review_improvement_actions", [])),
+            optick_context=optick_context,
         )
 
         sections_str = ", ".join(INVESTIGATION_SECTIONS)
@@ -522,17 +585,16 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
                         f"Suggested docs: {_format_bullets(project_context['docs'], empty_message='None.')}\n"
                         f"Suggested source: {_format_bullets(project_context['source'], empty_message='None.')}\n"
                         f"Suggested tests: {_format_bullets(project_context['tests'], empty_message='None.')}\n\n"
+                        f"{optick_section}\n\n"
                         f"Previous investigation:\n{_truncate_prior_context(state.get('investigation_doc', '') or 'None. First round.')}\n"
                     ),
                     prior_feedback=_truncate_prior_context(state.get("review_feedback", "")) or None,
                     context=project_context["snapshot"],
                 )
-                effective_max_turns = 15 if investigation_round > 1 else None
                 result = investigator_llm.execute_task(
                     task_prompt=task_prompt,
                     system_prompt=system_prompt,
                     working_directory=str(context.host_root),
-                    max_turns=effective_max_turns,
                 )
                 if result.success and result.result_text.strip():
                     investigation_doc = result.result_text
@@ -571,6 +633,7 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
                         f"Previous investigation document:\n{_truncate_prior_context(state.get('investigation_doc', '') or 'None. This is the first round.')}\n\n"
                         f"Previous reviewer feedback:\n{_truncate_prior_context(state.get('review_feedback', '') or 'None. This is the first round.')}\n\n"
                         f"Previous reviewer checklist:\n{_format_bullets(list(state.get('review_improvement_actions', [])), empty_message='None.')}\n\n"
+                        f"{optick_section}\n\n"
                         "Return only the next investigation document. The next document must add real evidence, not just rephrase the prior round."
                     ),
                 )
@@ -586,6 +649,7 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
             "relevant_source": project_context["source"],
             "relevant_tests": project_context["tests"],
             "investigation_doc": investigation_doc,
+            "optick_analysis": optick_context or "",
             "review_criteria": [list(c) for c in REVIEW_CRITERIA],
             "optimization_domain": OPTIMIZATION_DOMAIN,
             "summary": f"{metadata.name} completed investigation round {investigation_round} and handed the brief to senior review.",

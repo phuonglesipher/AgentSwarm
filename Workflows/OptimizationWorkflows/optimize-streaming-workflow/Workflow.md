@@ -3,6 +3,8 @@ name: optimize-streaming-workflow
 entry: entry.py
 version: 1.0.0
 exposed: true
+tools:
+  - optick-analyze
 capabilities:
   - world partition optimization
   - level streaming investigation
