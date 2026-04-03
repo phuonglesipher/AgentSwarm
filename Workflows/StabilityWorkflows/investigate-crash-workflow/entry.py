@@ -551,12 +551,10 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
                     prior_feedback=_truncate_prior_context(state.get("review_feedback", "")) or None,
                     context=project_context["snapshot"],
                 )
-                effective_max_turns = 15 if investigation_round > 1 else None
                 result = investigator_llm.execute_task(
                     task_prompt=task_prompt,
                     system_prompt=system_prompt,
                     working_directory=str(context.host_root),
-                    max_turns=effective_max_turns,
                 )
                 if result.success and result.result_text.strip():
                     investigation_doc = result.result_text

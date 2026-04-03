@@ -29,7 +29,7 @@ class ClaudeCodeExecutorConfig:
     timeout_seconds: int
     working_directory: str | None = None
     permission_mode: str = "auto"
-    max_turns: int = 25
+    max_turns: int | None = 200
 
 
 @dataclass(frozen=True)
@@ -158,8 +158,10 @@ class ClaudeCodeExecutorClient:
             "-p", "-",
             "--output-format", "json",
             "--model", self.config.model,
-            "--max-turns", str(effective_max_turns),
         ]
+
+        if effective_max_turns is not None:
+            command.extend(["--max-turns", str(effective_max_turns)])
 
         if self.config.permission_mode == "dangerously-skip-permissions":
             command.append("--dangerously-skip-permissions")

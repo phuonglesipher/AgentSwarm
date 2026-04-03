@@ -1014,7 +1014,7 @@ def _build_client_for_profile(
                 timeout_seconds=int(os.getenv("CLAUDE_EXECUTOR_TIMEOUT_SECONDS", "600")),
                 working_directory=working_directory,
                 permission_mode=os.getenv("CLAUDE_EXECUTOR_PERMISSION_MODE", "auto"),
-                max_turns=int(os.getenv("CLAUDE_EXECUTOR_MAX_TURNS", "25")),
+                max_turns=int(os.getenv("CLAUDE_EXECUTOR_MAX_TURNS", "200")),
             )
         )
 
