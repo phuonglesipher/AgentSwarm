@@ -448,17 +448,49 @@ def parse_opt_file(path: str | Path) -> OptickCapture:
 
 # --- Analysis helpers ---
 
-def analyze_capture(capture: OptickCapture, top_n: int = 20) -> dict:
+def _resolve_thread_indices(
+    capture: OptickCapture,
+    thread_names: list[str] | None,
+) -> set[int] | None:
+    """Map thread name filters to thread indices.  Returns ``None`` when no
+    filter is active (i.e. all threads should be included)."""
+    if not thread_names or not capture.threads:
+        return None
+    lowered = {n.lower().replace(" ", "") for n in thread_names if n.strip()}
+    if not lowered:
+        return None
+    indices: set[int] = set()
+    for idx, t in enumerate(capture.threads):
+        if t.name.lower().replace(" ", "") in lowered:
+            indices.add(idx)
+    return indices if indices else None
+
+
+def analyze_capture(
+    capture: OptickCapture,
+    top_n: int = 20,
+    thread_names: list[str] | None = None,
+    scope_keywords: list[str] | None = None,
+    per_thread_top_n: int = 0,
+    spike_threshold_ms: float = 0.0,
+) -> dict:
     """Produce an LLM-friendly analysis dict from parsed capture data.
 
     Args:
         capture: Parsed OptickCapture.
-        top_n: Number of hottest scopes to include.
+        top_n: Number of hottest scopes to include (global mode).
+        thread_names: Only include scopes/threads matching these names (case-insensitive).
+        scope_keywords: Only include scopes whose name contains any of these substrings.
+        per_thread_top_n: When >0, group hottest scopes by thread (top N each)
+            instead of returning a single global list.
+        spike_threshold_ms: When >0, report frames exceeding this duration.
 
     Returns:
         Dict with summary stats, thread breakdown, hottest scopes, and raw frame times.
     """
     result: dict = {}
+    thread_idx_filter = _resolve_thread_indices(capture, thread_names)
+    kw_lower = [kw.lower() for kw in scope_keywords if kw.strip()] if scope_keywords else []
 
     # --- Frame timing summary ---
     if capture.frame_times_ms:
@@ -495,46 +527,77 @@ def analyze_capture(capture: OptickCapture, top_n: int = 20) -> dict:
     # --- Hottest scopes (aggregate events by description) ---
     if capture.scope_blocks and capture.event_descriptions and capture.cpu_frequency > 0:
         freq = capture.cpu_frequency
-        # Accumulate per-description: total ticks, call count
-        accum: dict[int, list] = {}  # desc_idx -> [total_ticks, count]
+        desc_map = {d.index: d for d in capture.event_descriptions}
+
+        # Accumulate per-description, optionally per-thread
+        # Key: (thread_number, desc_idx) when per_thread_top_n > 0, else (None, desc_idx)
+        accum: dict[tuple[int | None, int], list] = {}
         for block in capture.scope_blocks:
+            if thread_idx_filter is not None and block.thread_number not in thread_idx_filter:
+                continue
+            thread_key = block.thread_number if per_thread_top_n > 0 else None
             for ev in block.events:
                 dur = ev.finish - ev.start
                 if dur <= 0 or ev.description_index == 0xFFFFFFFF:
                     continue
-                entry = accum.get(ev.description_index)
+                key = (thread_key, ev.description_index)
+                entry = accum.get(key)
                 if entry is None:
-                    accum[ev.description_index] = [dur, 1]
+                    accum[key] = [dur, 1]
                 else:
                     entry[0] += dur
                     entry[1] += 1
 
-        # Build sorted list
-        desc_map = {d.index: d for d in capture.event_descriptions}
-        hottest = []
-        for desc_idx, (total_ticks, count) in accum.items():
+        def _build_scope_entry(desc_idx: int, total_ticks: int, count: int) -> dict | None:
             desc = desc_map.get(desc_idx)
             if not desc:
-                continue
+                return None
+            if kw_lower and not any(kw in desc.name.lower() for kw in kw_lower):
+                return None
             total_ms = (total_ticks / freq) * 1000.0
             avg_ms = total_ms / count
-            hottest.append({
+            return {
                 "name": desc.name,
                 "file": desc.file,
                 "line": desc.line,
                 "total_ms": round(total_ms, 3),
                 "avg_ms": round(avg_ms, 3),
                 "calls": count,
-            })
+            }
 
-        hottest.sort(key=lambda x: x["total_ms"], reverse=True)
-        result["hottest_scopes"] = hottest[:top_n]
+        if per_thread_top_n > 0:
+            # Group by thread
+            thread_groups: dict[int, list[dict]] = {}
+            for (tidx, desc_idx), (total_ticks, count) in accum.items():
+                entry = _build_scope_entry(desc_idx, total_ticks, count)
+                if entry is None:
+                    continue
+                assert tidx is not None
+                thread_groups.setdefault(tidx, []).append(entry)
+
+            per_thread_scopes: dict[str, list[dict]] = {}
+            for tidx, scopes in thread_groups.items():
+                name = capture.threads[tidx].name if 0 <= tidx < len(capture.threads) else f"Thread#{tidx}"
+                scopes.sort(key=lambda x: x["total_ms"], reverse=True)
+                per_thread_scopes[name] = scopes[:per_thread_top_n]
+            result["per_thread_scopes"] = per_thread_scopes
+        else:
+            # Global hottest scopes
+            hottest = []
+            for (_tidx, desc_idx), (total_ticks, count) in accum.items():
+                entry = _build_scope_entry(desc_idx, total_ticks, count)
+                if entry is not None:
+                    hottest.append(entry)
+            hottest.sort(key=lambda x: x["total_ms"], reverse=True)
+            result["hottest_scopes"] = hottest[:top_n]
 
     # --- Per-thread time breakdown ---
     if capture.scope_blocks and capture.threads and capture.cpu_frequency > 0:
         freq = capture.cpu_frequency
         thread_totals: dict[int, float] = {}
         for block in capture.scope_blocks:
+            if thread_idx_filter is not None and block.thread_number not in thread_idx_filter:
+                continue
             dur_ticks = block.event_finish - block.event_start
             if dur_ticks > 0:
                 dur_ms = (dur_ticks / freq) * 1000.0
@@ -545,6 +608,21 @@ def analyze_capture(capture: OptickCapture, top_n: int = 20) -> dict:
             name = capture.threads[tidx].name if 0 <= tidx < len(capture.threads) else f"Thread#{tidx}"
             thread_breakdown.append({"name": name, "total_ms": round(total_ms, 2)})
         result["thread_breakdown"] = thread_breakdown
+
+    # --- Frame spike detection ---
+    if spike_threshold_ms > 0 and capture.frame_times_ms:
+        max_spikes = 50
+        spikes = []
+        for i, t in enumerate(capture.frame_times_ms):
+            if t > spike_threshold_ms:
+                spikes.append({"frame_index": i, "duration_ms": round(t, 2)})
+                if len(spikes) >= max_spikes:
+                    break
+        total_frames = len(capture.frame_times_ms)
+        spike_total = sum(1 for t in capture.frame_times_ms if t > spike_threshold_ms)
+        result["frame_spikes"] = spikes
+        result["spike_count"] = spike_total
+        result["spike_pct"] = round((spike_total / total_frames) * 100, 1) if total_frames else 0.0
 
     # --- Raw frame times (truncated for large captures) ---
     if capture.frame_times_ms:

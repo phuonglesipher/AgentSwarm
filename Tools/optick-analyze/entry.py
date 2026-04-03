@@ -19,6 +19,10 @@ def build_tool(context: ToolContext, metadata: ToolMetadata):
     def optick_analyze(
         file_path: str,
         top_n: int = 20,
+        thread_names: str = "",
+        scope_keywords: str = "",
+        per_thread_top_n: int = 0,
+        spike_threshold_ms: float = 0.0,
     ) -> tuple[str, dict]:
         """Parse an Optick .opt capture file and return performance analysis.
 
@@ -29,6 +33,15 @@ def build_tool(context: ToolContext, metadata: ToolMetadata):
         Args:
             file_path: Absolute or host-project-relative path to the .opt file.
             top_n: Number of hottest scopes to include (default 20).
+            thread_names: Comma-separated thread names to filter scopes to
+                (e.g. "GameThread" or "RenderThread,RHIThread"). Empty means all threads.
+            scope_keywords: Comma-separated keywords to filter scope names by
+                (e.g. "Tick,Ability,Physics"). Only scopes containing any keyword are returned.
+                Empty means no keyword filter.
+            per_thread_top_n: When >0, return top N scopes grouped by thread instead of
+                a single global list. Useful for triage to see per-thread hotspots.
+            spike_threshold_ms: When >0, report frames exceeding this duration as spikes
+                (e.g. 16.67 for 60fps target). Includes spike count and percentage.
         """
         # Resolve path — try absolute first, then relative to host project
         p = Path(file_path)
@@ -61,10 +74,35 @@ def build_tool(context: ToolContext, metadata: ToolMetadata):
                 {"error": "unexpected_error", "detail": str(e)},
             )
 
-        analysis = analyze_capture(capture, top_n=top_n)
+        # Parse comma-separated filter strings
+        thread_list = [t.strip() for t in thread_names.split(",") if t.strip()] if thread_names else None
+        keyword_list = [k.strip() for k in scope_keywords.split(",") if k.strip()] if scope_keywords else None
+
+        analysis = analyze_capture(
+            capture,
+            top_n=top_n,
+            thread_names=thread_list,
+            scope_keywords=keyword_list,
+            per_thread_top_n=per_thread_top_n,
+            spike_threshold_ms=spike_threshold_ms,
+        )
 
         # Build human-readable summary
         lines = []
+
+        # Show active filters
+        filter_parts = []
+        if thread_list:
+            filter_parts.append(f"threads={','.join(thread_list)}")
+        if keyword_list:
+            filter_parts.append(f"keywords={','.join(keyword_list)}")
+        if per_thread_top_n > 0:
+            filter_parts.append(f"per_thread_top_n={per_thread_top_n}")
+        if spike_threshold_ms > 0:
+            filter_parts.append(f"spike_threshold={spike_threshold_ms}ms")
+        if filter_parts:
+            lines.append(f"Filters: {', '.join(filter_parts)}")
+
         if "frame_summary" in analysis:
             fs = analysis["frame_summary"]
             lines.append(f"Frames: {fs['total_frames']}, "
@@ -79,13 +117,25 @@ def build_tool(context: ToolContext, metadata: ToolMetadata):
             meta_str = ", ".join(f"{k}={v}" for k, v in meta.items())
             lines.append(f"Platform: {meta_str}")
 
-        if "hottest_scopes" in analysis:
+        if "per_thread_scopes" in analysis:
+            for tname, scopes in analysis["per_thread_scopes"].items():
+                lines.append(f"{tname} — top {len(scopes)} scopes:")
+                for i, scope in enumerate(scopes[:5], 1):
+                    lines.append(f"  {i}. {scope['name']} — {scope['total_ms']}ms total, "
+                                 f"{scope['avg_ms']}ms avg, {scope['calls']} calls")
+                if len(scopes) > 5:
+                    lines.append(f"  ... and {len(scopes) - 5} more in artifact")
+        elif "hottest_scopes" in analysis:
             lines.append(f"Top {len(analysis['hottest_scopes'])} hottest scopes by total time:")
             for i, scope in enumerate(analysis["hottest_scopes"][:5], 1):
                 lines.append(f"  {i}. {scope['name']} — {scope['total_ms']}ms total, "
                              f"{scope['avg_ms']}ms avg, {scope['calls']} calls")
             if len(analysis["hottest_scopes"]) > 5:
                 lines.append(f"  ... and {len(analysis['hottest_scopes']) - 5} more in artifact")
+
+        if "spike_count" in analysis:
+            lines.append(f"Frame spikes (>{spike_threshold_ms}ms): {analysis['spike_count']} "
+                         f"({analysis['spike_pct']}% of frames)")
 
         summary = "\n".join(lines) if lines else "Capture parsed but no frame data found."
 
