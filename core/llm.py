@@ -16,7 +16,7 @@ from time import perf_counter
 from typing import Any
 from urllib import error, request
 
-from core.graph_logging import log_llm_prompt_event, log_llm_response_event
+from core.graph_logging import LLMUsage, log_llm_prompt_event, log_llm_response_event
 from core.natural_language_prompts import build_llm_request
 
 
@@ -114,6 +114,7 @@ class ResponsesLLMClient(LLMClient):
         )
         start_time = perf_counter()
         output_text = ""
+        usage: LLMUsage | None = None
         try:
             response = self._request(
                 {
@@ -123,6 +124,7 @@ class ResponsesLLMClient(LLMClient):
                 }
             )
             output_text = self._extract_output_text(response)
+            usage = self._extract_usage(response)
         except Exception as exc:
             log_llm_response_event(
                 client_label=f"responses_api/{self.config.model}",
@@ -132,6 +134,7 @@ class ResponsesLLMClient(LLMClient):
                 elapsed_ms=round((perf_counter() - start_time) * 1000, 2),
                 request_event_id=request_event_id,
                 error=str(exc),
+                usage=usage,
             )
             raise
         log_llm_response_event(
@@ -141,6 +144,7 @@ class ResponsesLLMClient(LLMClient):
             response_text=output_text,
             elapsed_ms=round((perf_counter() - start_time) * 1000, 2),
             request_event_id=request_event_id,
+            usage=usage,
         )
         return output_text
 
@@ -167,6 +171,7 @@ class ResponsesLLMClient(LLMClient):
         )
         start_time = perf_counter()
         output_text = ""
+        usage: LLMUsage | None = None
         try:
             response = self._request(
                 {
@@ -187,6 +192,7 @@ class ResponsesLLMClient(LLMClient):
             if refusal:
                 raise LLMError(f"Model refused the request: {refusal}")
             output_text = self._extract_output_text(response)
+            usage = self._extract_usage(response)
             parsed = _parse_json_object(output_text)
         except Exception as exc:
             log_llm_response_event(
@@ -198,6 +204,7 @@ class ResponsesLLMClient(LLMClient):
                 schema_name=schema_name,
                 request_event_id=request_event_id,
                 error=str(exc),
+                usage=usage,
             )
             raise
         log_llm_response_event(
@@ -208,6 +215,7 @@ class ResponsesLLMClient(LLMClient):
             elapsed_ms=round((perf_counter() - start_time) * 1000, 2),
             schema_name=schema_name,
             request_event_id=request_event_id,
+            usage=usage,
         )
         return parsed
 
@@ -242,6 +250,18 @@ class ResponsesLLMClient(LLMClient):
                 raise LLMError(f"OpenAI API request failed: {exc}") from exc
 
         return _retry_with_backoff(_do_request)
+
+    @staticmethod
+    def _extract_usage(response: dict[str, Any]) -> LLMUsage | None:
+        raw = response.get("usage")
+        if not isinstance(raw, dict):
+            return None
+        inp = raw.get("input_tokens")
+        out = raw.get("output_tokens")
+        total = raw.get("total_tokens")
+        if total is None and (inp is not None or out is not None):
+            total = (inp or 0) + (out or 0)
+        return LLMUsage(input_tokens=inp, output_tokens=out, total_tokens=total)
 
     def _extract_output_text(self, response: dict[str, Any]) -> str:
         top_level = response.get("output_text")
@@ -527,8 +547,9 @@ class ClaudeCodeLLMClient(LLMClient):
         )
         start_time = perf_counter()
         output_text = ""
+        usage: LLMUsage | None = None
         try:
-            output_text = self._run_claude(prompt=prompt, json_schema=None)
+            output_text, usage = self._run_claude(prompt=prompt, json_schema=None)
         except Exception as exc:
             log_llm_response_event(
                 client_label=f"claude_code/{self.config.model}",
@@ -538,6 +559,7 @@ class ClaudeCodeLLMClient(LLMClient):
                 elapsed_ms=round((perf_counter() - start_time) * 1000, 2),
                 request_event_id=request_event_id,
                 error=str(exc),
+                usage=usage,
             )
             raise
         log_llm_response_event(
@@ -547,6 +569,7 @@ class ClaudeCodeLLMClient(LLMClient):
             response_text=output_text,
             elapsed_ms=round((perf_counter() - start_time) * 1000, 2),
             request_event_id=request_event_id,
+            usage=usage,
         )
         return output_text
 
@@ -572,8 +595,9 @@ class ClaudeCodeLLMClient(LLMClient):
         )
         start_time = perf_counter()
         output = ""
+        usage: LLMUsage | None = None
         try:
-            output = self._run_claude(prompt=prompt, json_schema=schema)
+            output, usage = self._run_claude(prompt=prompt, json_schema=schema)
             parsed = _parse_json_object(output)
         except Exception as exc:
             log_llm_response_event(
@@ -585,6 +609,7 @@ class ClaudeCodeLLMClient(LLMClient):
                 schema_name=schema_name,
                 request_event_id=request_event_id,
                 error=str(exc),
+                usage=usage,
             )
             raise
         log_llm_response_event(
@@ -595,6 +620,7 @@ class ClaudeCodeLLMClient(LLMClient):
             elapsed_ms=round((perf_counter() - start_time) * 1000, 2),
             schema_name=schema_name,
             request_event_id=request_event_id,
+            usage=usage,
         )
         return parsed
 
@@ -612,6 +638,10 @@ class ClaudeCodeLLMClient(LLMClient):
             "--verbose",
         ]
         if json_schema is not None:
+            # Disable all Claude Code tools for structured JSON generation.
+            # Without this, the subprocess has access to Agent, Bash, etc.
+            # and the model may hallucinate tool calls instead of returning JSON.
+            command.extend(["--tools", ""])
             schema_hint = (
                 "\n\nYou MUST respond with ONLY a valid JSON object matching this schema "
                 f"(no markdown fences, no explanation):\n{json.dumps(json_schema, indent=2)}"
@@ -673,7 +703,7 @@ class ClaudeCodeLLMClient(LLMClient):
         if not raw_output:
             raise LLMError("Claude Code returned empty output")
 
-        return _extract_claude_result(raw_output)
+        return _extract_claude_result(raw_output), _extract_claude_usage(raw_output)
 
 
 def _kill_llm_process_tree(proc: subprocess.Popen) -> None:
@@ -769,6 +799,40 @@ def _extract_claude_result(raw_output: str) -> str:
     return raw_output
 
 
+def _extract_claude_usage(raw_output: str) -> LLMUsage | None:
+    """Extract cost_usd from Claude Code JSON output."""
+    try:
+        data = json.loads(raw_output)
+    except json.JSONDecodeError:
+        data = None
+
+    if isinstance(data, dict):
+        cost = data.get("cost_usd")
+        if cost is not None:
+            return LLMUsage(cost_usd=float(cost))
+        return None
+
+    events = data if isinstance(data, list) else None
+    if events is None:
+        events = []
+        for line in raw_output.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                events.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+
+    for event in events:
+        if isinstance(event, dict) and event.get("type") == "result":
+            cost = event.get("cost_usd")
+            if cost is not None:
+                return LLMUsage(cost_usd=float(cost))
+
+    return None
+
+
 def _merge_prompt(*, instructions: str, input_text: str, require_json: bool) -> str:
     return build_llm_request(
         instructions=instructions,
@@ -789,11 +853,63 @@ def _serialize_trace_json(value: dict[str, Any] | None) -> str:
 def _parse_json_object(value: str) -> dict[str, Any]:
     try:
         parsed = json.loads(value)
-    except json.JSONDecodeError as exc:
-        raise LLMError(f"Structured response was not valid JSON: {exc}") from exc
+    except json.JSONDecodeError:
+        # Attempt repair: extract the first top-level JSON object from the text.
+        # Models sometimes emit trailing braces, markdown fences, or extra data.
+        repaired = _try_extract_json_object(value)
+        if repaired is None:
+            raise LLMError(f"Structured response was not valid JSON and repair failed: {value[:300]}")
+        parsed = repaired
     if not isinstance(parsed, dict):
         raise LLMError("Structured response must be a JSON object")
     return parsed
+
+
+def _try_extract_json_object(text: str) -> dict[str, Any] | None:
+    """Try to extract a valid JSON object from malformed text.
+
+    Handles common model issues: trailing braces, markdown fences,
+    extra data after the closing brace.
+    """
+    # Strip markdown fences if present
+    stripped = text.strip()
+    if stripped.startswith("```"):
+        lines = stripped.split("\n")
+        lines = [l for l in lines if not l.strip().startswith("```")]
+        stripped = "\n".join(lines).strip()
+
+    # Find the first '{' and try progressively shorter substrings
+    start = stripped.find("{")
+    if start < 0:
+        return None
+
+    # Try parsing from the first '{' with decreasing length to handle trailing garbage
+    candidate = stripped[start:]
+    depth = 0
+    in_string = False
+    escape_next = False
+    for i, ch in enumerate(candidate):
+        if escape_next:
+            escape_next = False
+            continue
+        if ch == "\\":
+            escape_next = True
+            continue
+        if ch == '"' and not escape_next:
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                try:
+                    return json.loads(candidate[: i + 1])
+                except json.JSONDecodeError:
+                    continue
+    return None
 
 
 def _looks_like_auth_error(output: str) -> bool:

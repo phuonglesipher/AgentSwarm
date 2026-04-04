@@ -619,6 +619,123 @@ def _safe_read_text(path: Path, *, limit: int = 700) -> str:
 
 
 
+def _normalize_relative_hits(
+    host_root: Path,
+    raw_hits: list[str],
+    exclude_roots: tuple[str, ...],
+    *,
+    allowed_suffixes: set[str],
+) -> list[str]:
+    """Strip LLM description suffixes, validate existence and extension."""
+    results: list[str] = []
+    for raw in raw_hits:
+        path_part = raw.split(" - ", 1)[0].strip()
+        if not path_part:
+            continue
+        full = host_root / path_part
+        if not full.exists():
+            continue
+        if full.suffix.lower() not in allowed_suffixes:
+            continue
+        if _should_skip(full, host_root, exclude_roots):
+            continue
+        results.append(path_part)
+    return results
+
+
+def _find_local_code_hits(
+    task_prompt: str,
+    scope_root: Path,
+    source_roots: tuple[str, ...],
+    test_roots: tuple[str, ...],
+    exclude_roots: tuple[str, ...],
+) -> tuple[list[str], list[str]]:
+    """Walk source/test roots and find files whose names match keywords from the task prompt."""
+    keywords = {word.lower() for word in task_prompt.split() if len(word) >= 3}
+    if not keywords:
+        return [], []
+
+    source_hits: list[str] = []
+    test_hits: list[str] = []
+
+    test_only_roots = set(test_roots) - set(source_roots)
+    visited: set[str] = set()
+
+    for relative_root in (*source_roots, *test_roots):
+        root = scope_root / relative_root
+        if not root.exists():
+            continue
+        for child in root.rglob("*"):
+            if not child.is_file():
+                continue
+            if child.suffix.lower() not in SOURCE_EXTENSIONS:
+                continue
+            if _should_skip(child, scope_root, exclude_roots):
+                continue
+            name_lower = child.stem.lower()
+            content_lower = ""
+            try:
+                content_lower = child.read_text(encoding="utf-8", errors="ignore")[:500].lower()
+            except OSError:
+                pass
+            if any(kw in name_lower or kw in content_lower for kw in keywords):
+                relative = child.relative_to(scope_root).as_posix()
+                if relative in visited:
+                    continue
+                visited.add(relative)
+                is_test = (
+                    any(relative.startswith(tr.strip("/\\") + "/") for tr in test_only_roots)
+                    or "/tests/" in relative.lower()
+                    or "/test/" in relative.lower()
+                    or child.stem.lower().startswith("test_")
+                    or child.stem.lower().startswith("test")
+                    and child.stem.lower() != child.stem.lower().replace("test", "", 1)
+                )
+                if is_test:
+                    test_hits.append(relative)
+                else:
+                    source_hits.append(relative)
+
+    return source_hits, test_hits
+
+
+def _find_local_hits_by_suffix(
+    task_prompt: str,
+    scope_root: Path,
+    search_roots: tuple[str, ...],
+    exclude_roots: tuple[str, ...],
+    allowed_suffixes: set[str],
+) -> list[str]:
+    """Walk search_roots and find files matching keywords from the task prompt with specific suffixes."""
+    keywords = {word.lower() for word in task_prompt.split() if len(word) >= 3}
+    if not keywords:
+        return []
+    hits: list[str] = []
+    for relative_root in search_roots:
+        root = scope_root / relative_root
+        if not root.exists():
+            continue
+        for child in root.rglob("*"):
+            if not child.is_file():
+                continue
+            if child.suffix.lower() not in allowed_suffixes:
+                continue
+            if _should_skip(child, scope_root, exclude_roots):
+                continue
+            name_lower = child.stem.lower()
+            content_lower = ""
+            try:
+                if child.suffix.lower() != ".uasset":
+                    content_lower = child.read_text(encoding="utf-8", errors="ignore")[:500].lower()
+            except OSError:
+                pass
+            if any(kw in name_lower or kw in content_lower for kw in keywords):
+                relative = child.relative_to(scope_root).as_posix()
+                if relative not in hits:
+                    hits.append(relative)
+    return hits
+
+
 def _filter_hits_to_roots(relative_hits: list[str], allowed_roots: tuple[str, ...]) -> list[str]:
     normalized_roots = [root.strip("/\\") for root in allowed_roots]
     allowed_prefixes = tuple(root + "/" for root in normalized_roots if root)
@@ -2180,6 +2297,52 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
 
         # Extract structured fields from the investigation markdown
         payload = _parse_investigation_results(investigation_doc, project_snapshot)
+
+        # Local fallback: if LLM didn't return file hits, try keyword-based discovery
+        if not payload["source_hits"] and not payload["test_hits"]:
+            fallback_source, fallback_test = _find_local_code_hits(
+                task_prompt=state["task_prompt"],
+                scope_root=scope_root,
+                source_roots=context.config.source_roots,
+                test_roots=context.config.test_roots,
+                exclude_roots=context.config.exclude_roots,
+            )
+            if fallback_source:
+                payload["source_hits"] = fallback_source
+            if fallback_test:
+                payload["test_hits"] = fallback_test
+
+        # Local fallback: discover docs, blueprints, and blueprint text files
+        if not payload["doc_hits"]:
+            payload["doc_hits"] = _find_local_hits_by_suffix(
+                task_prompt=state["task_prompt"],
+                scope_root=scope_root,
+                search_roots=context.config.doc_roots,
+                exclude_roots=context.config.exclude_roots,
+                allowed_suffixes=DOC_EXTENSIONS,
+            )
+        blueprint_search_roots = context.config.source_roots + ("Content", ".blueprints")
+        if not payload["blueprint_hits"]:
+            payload["blueprint_hits"] = _find_local_hits_by_suffix(
+                task_prompt=state["task_prompt"],
+                scope_root=scope_root,
+                search_roots=blueprint_search_roots,
+                exclude_roots=context.config.exclude_roots,
+                allowed_suffixes={BLUEPRINT_ASSET_EXTENSION},
+            )
+        if not payload["blueprint_text_hits"]:
+            payload["blueprint_text_hits"] = _find_local_hits_by_suffix(
+                task_prompt=state["task_prompt"],
+                scope_root=scope_root,
+                search_roots=blueprint_search_roots,
+                exclude_roots=context.config.exclude_roots,
+                allowed_suffixes=BLUEPRINT_TEXT_EXTENSIONS,
+            )
+
+        # If source hits were found but no current_runtime_paths, promote the first source hit
+        if payload["source_hits"] and not payload["current_runtime_paths"]:
+            payload["current_runtime_paths"] = [payload["source_hits"][0]]
+
         implementation_medium, implementation_reason = _choose_implementation_medium(state, payload)
         learning_summary, learning_focus, learning_doc = _build_investigation_learning(state, payload)
 
@@ -2361,6 +2524,11 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
         return {"summary": f"{metadata.name} entered the gameplay reviewer subgraph."}
 
     def capture_review_result(state: EngineerState) -> dict[str, Any]:
+        artifact_dir = _artifact_dir(context, metadata, state)
+        review_round = int(state.get("review_round", 1))
+        review_doc = str(state.get("review_doc", ""))
+        if review_doc.strip():
+            (artifact_dir / f"review_round_{review_round}.md").write_text(review_doc, encoding="utf-8")
         return {
             "review_score": int(state.get("review_score", state.get("score", 0))),
             "review_feedback": str(state.get("review_feedback", state.get("feedback", ""))),

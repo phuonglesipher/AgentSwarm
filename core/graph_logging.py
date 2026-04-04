@@ -8,8 +8,17 @@ import json
 from pathlib import Path
 from threading import Lock, local
 from time import perf_counter
-from typing import Any, Callable
+from typing import Any, Callable, NamedTuple
 import sys
+
+
+class LLMUsage(NamedTuple):
+    """Token usage metadata from a single LLM call."""
+
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    total_tokens: int | None = None
+    cost_usd: float | None = None
 
 
 GRAPH_TRACE_FILE = "graph_traversal.log"
@@ -462,6 +471,7 @@ def log_llm_response_event(
     schema_name: str | None = None,
     request_event_id: int | None = None,
     error: str | None = None,
+    usage: LLMUsage | None = None,
 ) -> int | None:
     active_context = _get_active_trace_context()
     if active_context is None:
@@ -482,6 +492,15 @@ def log_llm_response_event(
         "response_text": clean_response,
         "error": clean_error,
     }
+    if usage is not None:
+        if usage.input_tokens is not None:
+            payload["input_tokens"] = usage.input_tokens
+        if usage.output_tokens is not None:
+            payload["output_tokens"] = usage.output_tokens
+        if usage.total_tokens is not None:
+            payload["total_tokens"] = usage.total_tokens
+        if usage.cost_usd is not None:
+            payload["cost_usd"] = usage.cost_usd
     details = [
         f"client={client_label}",
         f"transport={transport}",
@@ -494,6 +513,13 @@ def log_llm_response_event(
         details.append(f"request={request_event_id}")
     if elapsed_ms is not None:
         details.append(f"elapsed_ms={elapsed_ms}")
+    if usage is not None:
+        if usage.input_tokens is not None:
+            details.append(f"in_tokens={usage.input_tokens}")
+        if usage.output_tokens is not None:
+            details.append(f"out_tokens={usage.output_tokens}")
+        if usage.cost_usd is not None:
+            details.append(f"cost_usd={usage.cost_usd}")
     event_id = _write_debug_trace_record(
         state=None,
         graph_name=active_context.graph_name,
@@ -529,6 +555,15 @@ def log_llm_response_event(
     if elapsed_ms is not None:
         metadata_lines.append(f"Elapsed ms: `{elapsed_ms}`")
     metadata_lines.append(f"Response chars: `{len(clean_response)}`")
+    if usage is not None:
+        if usage.input_tokens is not None:
+            metadata_lines.append(f"Input tokens: `{usage.input_tokens}`")
+        if usage.output_tokens is not None:
+            metadata_lines.append(f"Output tokens: `{usage.output_tokens}`")
+        if usage.total_tokens is not None:
+            metadata_lines.append(f"Total tokens: `{usage.total_tokens}`")
+        if usage.cost_usd is not None:
+            metadata_lines.append(f"Cost USD: `{usage.cost_usd}`")
     sections = [("Model Response", clean_response)]
     if clean_error:
         sections.append(("Error", clean_error))

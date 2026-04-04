@@ -265,8 +265,46 @@ class CodexCliLLMClientTests(unittest.TestCase):
         self.assertIn("`RESPONSE`", timeline_trace)
 
 
+class _MockPopen:
+    """Simulates subprocess.Popen for Claude Code tests."""
+
+    def __init__(self, stdout: str = "", stderr: str = "", returncode: int = 0):
+        self._stdout = stdout
+        self._stderr = stderr
+        self.returncode = returncode
+        self.pid = 12345
+        self.args: list[str] = []
+        self.communicate_input: str | None = None
+
+    def communicate(self, input: str | None = None, timeout: float | None = None) -> tuple[str, str]:
+        self.communicate_input = input
+        return self._stdout, self._stderr
+
+    def wait(self, timeout: float | None = None) -> int:
+        return self.returncode
+
+
+def _make_claude_popen_factory(mock_proc: _MockPopen,
+                               captured_commands: list | None = None,
+                               captured_inputs: list | None = None):
+    """Returns a callable that mimics subprocess.Popen constructor for Claude Code."""
+    def factory(command, **kwargs):
+        mock_proc.args = command
+        if captured_commands is not None:
+            captured_commands.append(command)
+        original_communicate = mock_proc.communicate
+        def patched_communicate(input=None, timeout=None):
+            if captured_inputs is not None and input is not None:
+                captured_inputs.append(input)
+            return original_communicate(input=input, timeout=timeout)
+        mock_proc.communicate = patched_communicate
+        return mock_proc
+    return factory
+
+
 class ClaudeCodeLLMClientTests(unittest.TestCase):
     def test_generate_text_extracts_result_from_json_envelope(self) -> None:
+        import json as _json
         client = ClaudeCodeLLMClient(
             ClaudeCodeConfig(
                 command="claude",
@@ -275,42 +313,39 @@ class ClaudeCodeLLMClientTests(unittest.TestCase):
             )
         )
         resolved_command = r"C:\Users\phuong.le\.claude\local\claude.cmd"
-        captured: list[dict[str, object]] = []
-
-        def fake_run(command: list[str], **kwargs) -> subprocess.CompletedProcess[str]:
-            captured.append({"command": command, "input": kwargs.get("input")})
-            import json
-            return subprocess.CompletedProcess(
-                command,
-                0,
-                stdout=json.dumps({
-                    "type": "result",
-                    "subtype": "success",
-                    "is_error": False,
-                    "result": "The movement bug is caused by a missing state reset.",
-                    "session_id": "test-session",
-                    "cost_usd": 0.001,
-                    "duration_ms": 500,
-                }),
-                stderr="",
-            )
+        captured_commands: list[list[str]] = []
+        captured_inputs: list[str] = []
+        proc = _MockPopen(
+            stdout=_json.dumps({
+                "type": "result",
+                "subtype": "success",
+                "is_error": False,
+                "result": "The movement bug is caused by a missing state reset.",
+                "session_id": "test-session",
+                "cost_usd": 0.001,
+                "duration_ms": 500,
+            }),
+            returncode=0,
+        )
 
         with mock.patch("core.llm.shutil.which", return_value=resolved_command):
-            with mock.patch("core.llm.subprocess.run", side_effect=fake_run):
+            with mock.patch("core.llm.subprocess.Popen",
+                            side_effect=_make_claude_popen_factory(
+                                proc, captured_commands=captured_commands, captured_inputs=captured_inputs)):
                 result = client.generate_text(instructions="Analyze the bug", input_text="Player cannot move")
 
         self.assertEqual(result, "The movement bug is caused by a missing state reset.")
-        command = captured[0]["command"]
-        assert isinstance(command, list)
+        command = captured_commands[0]
         self.assertEqual(command[0], resolved_command)
         self.assertIn("-p", command)
         self.assertIn("--output-format", command)
         self.assertEqual(command[command.index("--output-format") + 1], "json")
         self.assertIn("--model", command)
         self.assertEqual(command[command.index("--model") + 1], "claude-sonnet-4-6")
-        self.assertIn("Player cannot move", str(captured[0]["input"]))
+        self.assertIn("Player cannot move", captured_inputs[0])
 
     def test_generate_json_parses_structured_output(self) -> None:
+        import json as _json
         client = ClaudeCodeLLMClient(
             ClaudeCodeConfig(
                 command="claude",
@@ -319,26 +354,21 @@ class ClaudeCodeLLMClientTests(unittest.TestCase):
             )
         )
         resolved_command = r"C:\Users\phuong.le\.claude\local\claude.cmd"
-        captured: list[dict[str, object]] = []
-
-        def fake_run(command: list[str], **kwargs) -> subprocess.CompletedProcess[str]:
-            captured.append({"command": command, "input": kwargs.get("input")})
-            import json
-            return subprocess.CompletedProcess(
-                command,
-                0,
-                stdout=json.dumps({
-                    "type": "result",
-                    "subtype": "success",
-                    "is_error": False,
-                    "result": '{"task_type": "bugfix", "priority": "high"}',
-                    "session_id": "test-session",
-                }),
-                stderr="",
-            )
+        captured_inputs: list[str] = []
+        proc = _MockPopen(
+            stdout=_json.dumps({
+                "type": "result",
+                "subtype": "success",
+                "is_error": False,
+                "result": '{"task_type": "bugfix", "priority": "high"}',
+                "session_id": "test-session",
+            }),
+            returncode=0,
+        )
 
         with mock.patch("core.llm.shutil.which", return_value=resolved_command):
-            with mock.patch("core.llm.subprocess.run", side_effect=fake_run):
+            with mock.patch("core.llm.subprocess.Popen",
+                            side_effect=_make_claude_popen_factory(proc, captured_inputs=captured_inputs)):
                 result = client.generate_json(
                     instructions="Classify the task",
                     input_text="Fix the dodge cancel",
@@ -352,11 +382,12 @@ class ClaudeCodeLLMClientTests(unittest.TestCase):
                 )
 
         self.assertEqual(result, {"task_type": "bugfix", "priority": "high"})
-        prompt = str(captured[0]["input"])
+        prompt = captured_inputs[0]
         self.assertIn("matching this schema", prompt)
         self.assertIn("task_type", prompt)
 
     def test_generate_text_raises_on_claude_error_response(self) -> None:
+        import json as _json
         client = ClaudeCodeLLMClient(
             ClaudeCodeConfig(
                 command="claude",
@@ -365,28 +396,25 @@ class ClaudeCodeLLMClientTests(unittest.TestCase):
             )
         )
         resolved_command = r"C:\Users\phuong.le\.claude\local\claude.cmd"
-
-        def fake_run(command: list[str], **kwargs) -> subprocess.CompletedProcess[str]:
-            import json
-            return subprocess.CompletedProcess(
-                command,
-                0,
-                stdout=json.dumps({
-                    "type": "result",
-                    "subtype": "error",
-                    "is_error": True,
-                    "result": "Rate limited",
-                }),
-                stderr="",
-            )
+        proc = _MockPopen(
+            stdout=_json.dumps({
+                "type": "result",
+                "subtype": "error",
+                "is_error": True,
+                "result": "Rate limited",
+            }),
+            returncode=0,
+        )
 
         with mock.patch("core.llm.shutil.which", return_value=resolved_command):
-            with mock.patch("core.llm.subprocess.run", side_effect=fake_run):
+            with mock.patch("core.llm.subprocess.Popen",
+                            side_effect=_make_claude_popen_factory(proc)):
                 with self.assertRaises(Exception) as ctx:
                     client.generate_text(instructions="Test", input_text="Hello")
                 self.assertIn("Rate limited", str(ctx.exception))
 
     def test_with_overrides_changes_max_turns(self) -> None:
+        import json as _json
         client = ClaudeCodeLLMClient(
             ClaudeCodeConfig(
                 command="claude",
@@ -396,23 +424,18 @@ class ClaudeCodeLLMClientTests(unittest.TestCase):
             )
         )
         resolved_command = r"C:\Users\phuong.le\.claude\local\claude.cmd"
-        captured: list[list[str]] = []
-
-        def fake_run(command: list[str], **kwargs) -> subprocess.CompletedProcess[str]:
-            captured.append(command)
-            import json
-            return subprocess.CompletedProcess(
-                command,
-                0,
-                stdout=json.dumps({"type": "result", "subtype": "success", "is_error": False, "result": "ok"}),
-                stderr="",
-            )
+        captured_commands: list[list[str]] = []
+        proc = _MockPopen(
+            stdout=_json.dumps({"type": "result", "subtype": "success", "is_error": False, "result": "ok"}),
+            returncode=0,
+        )
 
         with mock.patch("core.llm.shutil.which", return_value=resolved_command):
-            with mock.patch("core.llm.subprocess.run", side_effect=fake_run):
+            with mock.patch("core.llm.subprocess.Popen",
+                            side_effect=_make_claude_popen_factory(proc, captured_commands=captured_commands)):
                 client.with_overrides(max_turns=5).generate_text(instructions="Test", input_text="Hello")
 
-        command = captured[0]
+        command = captured_commands[0]
         self.assertEqual(command[command.index("--max-turns") + 1], "5")
 
 

@@ -18,8 +18,8 @@ import subprocess
 from time import perf_counter
 from typing import Any
 
-from core.graph_logging import log_llm_prompt_event, log_llm_response_event
-from core.llm import LLMError, _extract_claude_result, _retry_with_backoff
+from core.graph_logging import LLMUsage, log_llm_prompt_event, log_llm_response_event
+from core.llm import LLMError, _extract_claude_result, _extract_claude_usage, _retry_with_backoff
 
 
 @dataclass(frozen=True)
@@ -250,6 +250,7 @@ class ClaudeCodeExecutorClient:
                 raise LLMError("Claude Code executor returned empty output")
 
             result_text = _extract_executor_result(raw_output)
+            usage = _extract_claude_usage(raw_output)
             elapsed_ms = round((perf_counter() - start_time) * 1000, 2)
             log_llm_response_event(
                 client_label=client_label,
@@ -258,8 +259,13 @@ class ClaudeCodeExecutorClient:
                 response_text=result_text,
                 elapsed_ms=elapsed_ms,
                 request_event_id=request_event_id,
+                usage=usage,
             )
-            return ExecutionResult(success=True, result_text=result_text)
+            return ExecutionResult(
+                success=True,
+                result_text=result_text,
+                cost_usd=usage.cost_usd if usage else None,
+            )
 
         except (LLMError, Exception) as exc:
             elapsed_ms = round((perf_counter() - start_time) * 1000, 2)
