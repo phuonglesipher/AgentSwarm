@@ -20,7 +20,7 @@ if ! "$PYTHON_BIN" -c 'import sys; raise SystemExit(0 if sys.version_info[0] == 
 fi
 
 "$PYTHON_BIN" -m pip install --upgrade pip
-"$PYTHON_BIN" -m pip install "langgraph>=1.1,<2" "langchain-core>=1.2,<2"
+"$PYTHON_BIN" -m pip install "langgraph>=1.1,<2" "langchain-core>=1.2,<2" "minidump>=0.0.22"
 "$PYTHON_BIN" -m core.host_setup --agent-root "$SCRIPT_DIR"
 
 echo "Installed LangGraph and LangChain Core tool support with $PYTHON_BIN"

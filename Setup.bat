@@ -8,7 +8,7 @@ if errorlevel 1 exit /b 1
 %PYTHON_BIN% -m pip install --upgrade pip
 if errorlevel 1 exit /b 1
 
-%PYTHON_BIN% -m pip install "langgraph>=1.1,<2" "langchain-core>=1.2,<2"
+%PYTHON_BIN% -m pip install "langgraph>=1.1,<2" "langchain-core>=1.2,<2" "minidump>=0.0.22"
 if errorlevel 1 exit /b 1
 
 %PYTHON_BIN% -m core.host_setup --agent-root "%~dp0"
