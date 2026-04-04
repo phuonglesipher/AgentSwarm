@@ -5,6 +5,7 @@ version: 1.0.0
 exposed: true
 tools:
   - crash-analyze-report
+  - minidump-analyze
 capabilities:
   - crash investigation
   - crash dump analysis

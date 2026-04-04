@@ -520,6 +520,7 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
                         "Use Read, Grep, Glob, and Bash (read-only commands) to gather crash evidence.",
                         f"Write a markdown investigation brief with these sections: {sections_str}.",
                         "Check Saved/Crashes/ and Saved/Logs/ for crash dumps and logs.",
+                        "If .dmp minidump files exist in Saved/Crashes/, use the minidump-analyze tool to extract crash data before manual analysis.",
                         "Under Domain Classification, state which domain owns this crash: "
                         "gameplay (GAS, abilities, combat), graphics (GPU, shader, rendering), "
                         "engine (threading, build, plugin, subsystem), platform (PS5/Xbox SDK), "
@@ -543,7 +544,8 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
                         f"- Threading: Search for async operations, GameThread assertions, race conditions, FRunnable\n"
                         f"- GPU: Search for RHI errors, shader compilation failures, device removal, TDR timeout\n"
                         f"- GC: Search for UObject pointers without UPROPERTY(), prevent GC marking issues\n"
-                        f"- Logs: Check Saved/Crashes/ and Saved/Logs/ for crash reports\n\n"
+                        f"- Logs: Check Saved/Crashes/ and Saved/Logs/ for crash reports\n"
+                        f"- Minidump: Use minidump-analyze tool on any .dmp files in Saved/Crashes/ for structured crash data\n\n"
                         f"Suggested docs: {_format_bullets(project_context['docs'], empty_message='None.')}\n"
                         f"Suggested source: {_format_bullets(project_context['source'], empty_message='None.')}\n"
                         f"Suggested tests: {_format_bullets(project_context['tests'], empty_message='None.')}\n\n"
