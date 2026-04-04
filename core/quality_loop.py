@@ -42,6 +42,7 @@ class QualityLoopProgress:
     improvement_actions: tuple[str, ...]
     score_delta: int
     stagnated_rounds: int
+    recurring_blockers: tuple[str, ...]  # blockers appearing in 2+ consecutive rounds
     status: str
     should_continue: bool
     completed: bool
@@ -59,6 +60,7 @@ def evaluate_quality_loop(
     improvement_actions: Iterable[str] = (),
     previous_score: int | None = None,
     prior_stagnated_rounds: int = 0,
+    previous_blocking_issues: Iterable[str] = (),
 ) -> QualityLoopProgress:
     if round_index <= 0:
         raise ValueError("round_index must be positive")
@@ -76,6 +78,13 @@ def evaluate_quality_loop(
     normalized_missing_sections = _dedupe_preserve_order(missing_sections)
     normalized_blocking_issues = _dedupe_preserve_order(blocking_issues)
     normalized_improvement_actions = _dedupe_preserve_order(improvement_actions)
+    normalized_previous_blockers = _dedupe_preserve_order(previous_blocking_issues)
+
+    # Detect blockers that recur across consecutive rounds — a qualitative
+    # signal of being stuck that score delta alone cannot capture.
+    recurring_blockers = tuple(sorted(
+        set(normalized_blocking_issues) & set(normalized_previous_blockers)
+    )) if normalized_previous_blockers else ()
 
     clamped_score = max(0, min(int(score), 100))
     if previous_score is None:
@@ -84,7 +93,11 @@ def evaluate_quality_loop(
     else:
         score_delta = clamped_score - max(0, min(int(previous_score), 100))
         stagnated_rounds = max(0, int(prior_stagnated_rounds))
-        if score_delta < spec.min_score_delta and clamped_score < spec.threshold:
+        # Count as stagnated if either: score barely moved, OR the same
+        # blockers keep appearing (stuck in the same rut).
+        is_score_stagnant = score_delta < spec.min_score_delta and clamped_score < spec.threshold
+        is_blocker_stuck = len(recurring_blockers) > 0 and len(recurring_blockers) == len(normalized_blocking_issues)
+        if is_score_stagnant or is_blocker_stuck:
             stagnated_rounds += 1
         else:
             stagnated_rounds = 0
@@ -150,6 +163,7 @@ def evaluate_quality_loop(
         improvement_actions=normalized_improvement_actions,
         score_delta=score_delta,
         stagnated_rounds=stagnated_rounds,
+        recurring_blockers=recurring_blockers,
         status=status,
         should_continue=should_continue,
         completed=completed,

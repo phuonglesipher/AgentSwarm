@@ -72,6 +72,7 @@ class ReviewEngine:
             review_round=review_round,
             optimization_domain=optimization_domain,
             extra_context_lines=extra_context,
+            review_history=state.get("review_history"),
         )
 
         # Call LLM (JSON first, markdown fallback if supported)
@@ -139,6 +140,7 @@ class ReviewEngine:
         )
         previous_score = int(state.get("review_score", state.get("score", 0))) if review_round > 1 else None
         prior_stagnated = int(state.get("loop_stagnated_rounds", 0)) if review_round > 1 else 0
+        previous_blocking_issues = list(state.get("review_blocking_issues", [])) if review_round > 1 else []
         progress = evaluate_quality_loop(
             loop_spec,
             round_index=review_round,
@@ -149,6 +151,7 @@ class ReviewEngine:
             improvement_actions=score_decision.improvement_actions,
             previous_score=previous_score,
             prior_stagnated_rounds=prior_stagnated,
+            previous_blocking_issues=previous_blocking_issues,
         )
 
         # Compose final review document
@@ -170,6 +173,17 @@ class ReviewEngine:
         # Build summary
         summary = self._build_summary(review_round, progress.score, progress.approved, progress.completed, progress.status)
 
+        # Accumulate review history across rounds so both the reviewer and
+        # executor can see the full progression of feedback, not just the latest.
+        existing_history: list[dict[str, Any]] = list(state.get("review_history", []))
+        existing_history.append({
+            "round": review_round,
+            "score": progress.score,
+            "blocking_issues": list(score_decision.blocking_issues),
+            "improvement_actions": list(score_decision.improvement_actions),
+            "decision": "APPROVE" if progress.approved else "REVISE",
+        })
+
         # Build canonical output
         output: dict[str, Any] = {
             "review_round": review_round,
@@ -182,6 +196,7 @@ class ReviewEngine:
             "review_missing_sections": list(progress.missing_sections),
             "review_criterion_scores": list(review_result["criterion_scores"]),
             "review_approved": progress.approved,
+            "review_history": existing_history,
             "loop_status": progress.status,
             "loop_reason": progress.reason,
             "loop_should_continue": progress.should_continue,

@@ -32,6 +32,7 @@ class MainState(TypedDict):
     host_root: str
     target_scope: str
     prompt: str
+    original_prompt: str  # Undecomposed user intent, preserved for executor context
     run_dir: str
     tasks: list[MainTask]
     results: list[dict[str, Any]]
@@ -116,7 +117,7 @@ def _compact_task_id(index: int, description: str) -> str:
     return f"task-{index}-{slug}-{digest}"
 
 
-_MAX_PRIOR_SUMMARY_CHARS = 500
+_MAX_PRIOR_SUMMARY_CHARS = 2000
 
 
 def _build_chained_prompt(description: str, prior_results: list[dict[str, Any]]) -> str:
@@ -387,6 +388,7 @@ def build_initial_state(
         "host_root": host_root,
         "target_scope": target_scope,
         "prompt": prompt,
+        "original_prompt": prompt,
         "run_dir": run_dir,
         "tasks": [],
         "results": [],
@@ -448,20 +450,24 @@ def build_main_graph(
 
     def plan_tasks(state: MainState) -> dict[str, Any]:
         planning_notes: list[str] = []
-        descriptions = _fallback_plan_tasks(state["prompt"])
-        planner_llm = ensure_traced_llm_client(llm_manager.resolve("planner"))
-        if planner_llm.is_enabled():
-            try:
-                descriptions = _llm_plan_tasks(planner_llm, state["prompt"], workspace_context, registry=registry)
-                planning_notes.append(f"Task planning used {llm_manager.describe('planner')}.")
-            except LLMError as exc:
-                planning_notes.append(f"Planner fallback: {exc}")
-        else:
-            planning_notes.append("Task planning used deterministic fallback.")
 
-        if len(descriptions) > 1 and _prefer_single_task(state["prompt"], registry=registry):
+        # Fast path: skip LLM decomposition entirely when the prompt is
+        # clearly a single task. Saves one LLM call (~2-5 s) and avoids
+        # prompt-rewriting that can strip nuance from the user's intent.
+        if _prefer_single_task(state["prompt"], registry=registry):
             descriptions = [state["prompt"].strip()]
-            planning_notes.append("Collapsed planner output to one task because the prompt describes a single request.")
+            planning_notes.append("Single-task fast path: skipped LLM planner.")
+        else:
+            descriptions = _fallback_plan_tasks(state["prompt"])
+            planner_llm = ensure_traced_llm_client(llm_manager.resolve("planner"))
+            if planner_llm.is_enabled():
+                try:
+                    descriptions = _llm_plan_tasks(planner_llm, state["prompt"], workspace_context, registry=registry)
+                    planning_notes.append(f"Task planning used {llm_manager.describe('planner')}.")
+                except LLMError as exc:
+                    planning_notes.append(f"Planner fallback: {exc}")
+            else:
+                planning_notes.append("Task planning used deterministic fallback.")
 
         tasks: list[MainTask] = []
         for index, description in enumerate(descriptions, start=1):
@@ -474,6 +480,7 @@ def build_main_graph(
                     "status": "planned",
                     "input": {
                         "prompt": state["prompt"],
+                        "original_prompt": state.get("original_prompt", state["prompt"]),
                         "task_prompt": description,
                         "task_id": task_id,
                         "run_dir": state["run_dir"],

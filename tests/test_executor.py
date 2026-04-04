@@ -13,6 +13,7 @@ from core.executor import (
     build_executor_system_prompt,
     build_executor_task_prompt,
     _ANTI_RECURSION_GUARD,
+    _find_recurring_blockers,
 )
 
 
@@ -86,12 +87,12 @@ class BuildExecutorTaskPromptTests(unittest.TestCase):
             description="Fix bug",
             prior_feedback="Score 70/100. Missing root cause proof.",
         )
-        self.assertIn("## Prior Review Feedback", prompt)
+        self.assertIn("## Latest Review Feedback", prompt)
         self.assertIn("Missing root cause proof", prompt)
 
     def test_without_feedback(self) -> None:
         prompt = build_executor_task_prompt(description="Fix bug", prior_feedback=None)
-        self.assertNotIn("Prior Review Feedback", prompt)
+        self.assertNotIn("Latest Review Feedback", prompt)
 
     def test_with_context(self) -> None:
         prompt = build_executor_task_prompt(
@@ -243,6 +244,131 @@ class AntiRecursionGuardTests(unittest.TestCase):
     def test_system_prompt_includes_guard(self) -> None:
         prompt = build_executor_system_prompt()
         self.assertIn(_ANTI_RECURSION_GUARD, prompt)
+
+
+class SessionIdExtractionTests(unittest.TestCase):
+    def test_session_id_populated_from_json_output(self) -> None:
+        client = ClaudeCodeExecutorClient(ClaudeCodeExecutorConfig(
+            command="claude", model="claude-sonnet-4-6", timeout_seconds=60, max_turns=5,
+        ))
+        json_output = json.dumps({
+            "result": "Done.", "is_error": False,
+            "session_id": "abc-123-def", "cost_usd": 0.01,
+        })
+        proc = _MockPopen(stdout=json_output, returncode=0)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch("core.executor.shutil.which", return_value="/usr/bin/claude"):
+                with mock.patch("core.executor.subprocess.Popen", side_effect=_make_popen_factory(proc)):
+                    result = client.execute_task(task_prompt="test", working_directory=tmp)
+
+        self.assertTrue(result.success)
+        self.assertEqual(result.session_id, "abc-123-def")
+
+    def test_session_id_none_when_missing(self) -> None:
+        client = ClaudeCodeExecutorClient(ClaudeCodeExecutorConfig(
+            command="claude", model="claude-sonnet-4-6", timeout_seconds=60, max_turns=5,
+        ))
+        json_output = json.dumps({"result": "Done.", "is_error": False})
+        proc = _MockPopen(stdout=json_output, returncode=0)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch("core.executor.shutil.which", return_value="/usr/bin/claude"):
+                with mock.patch("core.executor.subprocess.Popen", side_effect=_make_popen_factory(proc)):
+                    result = client.execute_task(task_prompt="test", working_directory=tmp)
+
+        self.assertTrue(result.success)
+        self.assertIsNone(result.session_id)
+
+
+class ResumeSessionTests(unittest.TestCase):
+    def test_resume_flag_added_when_session_id_provided(self) -> None:
+        client = ClaudeCodeExecutorClient(ClaudeCodeExecutorConfig(
+            command="claude", model="claude-sonnet-4-6", timeout_seconds=60, max_turns=5,
+        ))
+        captured_commands: list[list[str]] = []
+        proc = _MockPopen(stdout=json.dumps({"result": "ok"}), returncode=0)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch("core.executor.shutil.which", return_value="/usr/bin/claude"):
+                with mock.patch("core.executor.subprocess.Popen",
+                                side_effect=_make_popen_factory(proc, captured_commands=captured_commands)):
+                    client.execute_task(
+                        task_prompt="Continue investigation",
+                        session_id="session-uuid-123",
+                        working_directory=tmp,
+                    )
+
+        command = captured_commands[0]
+        self.assertIn("--resume", command)
+        resume_idx = command.index("--resume")
+        self.assertEqual(command[resume_idx + 1], "session-uuid-123")
+
+    def test_no_resume_flag_when_session_id_none(self) -> None:
+        client = ClaudeCodeExecutorClient(ClaudeCodeExecutorConfig(
+            command="claude", model="claude-sonnet-4-6", timeout_seconds=60, max_turns=5,
+        ))
+        captured_commands: list[list[str]] = []
+        proc = _MockPopen(stdout=json.dumps({"result": "ok"}), returncode=0)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch("core.executor.shutil.which", return_value="/usr/bin/claude"):
+                with mock.patch("core.executor.subprocess.Popen",
+                                side_effect=_make_popen_factory(proc, captured_commands=captured_commands)):
+                    client.execute_task(task_prompt="test", working_directory=tmp)
+
+        command = captured_commands[0]
+        self.assertNotIn("--resume", command)
+
+
+class ReviewHistoryPromptTests(unittest.TestCase):
+    def test_review_history_included_in_prompt(self) -> None:
+        history = [
+            {"round": 1, "score": 65, "blocking_issues": ["Missing X"], "improvement_actions": ["Add X"], "decision": "REVISE"},
+            {"round": 2, "score": 72, "blocking_issues": ["Missing X"], "improvement_actions": ["Fix X"], "decision": "REVISE"},
+        ]
+        prompt = build_executor_task_prompt(
+            description="Fix bug", review_history=history,
+        )
+        self.assertIn("## Review History", prompt)
+        self.assertIn("Round 1 (score 65/100", prompt)
+        self.assertIn("Round 2 (score 72/100", prompt)
+        self.assertIn("Recurring blockers", prompt)
+        self.assertIn("Missing X", prompt)
+
+    def test_no_review_history_section_when_empty(self) -> None:
+        prompt = build_executor_task_prompt(description="Fix bug", review_history=[])
+        self.assertNotIn("Review History", prompt)
+
+    def test_no_recurring_blockers_when_different(self) -> None:
+        history = [
+            {"round": 1, "score": 65, "blocking_issues": ["Issue A"], "improvement_actions": [], "decision": "REVISE"},
+            {"round": 2, "score": 72, "blocking_issues": ["Issue B"], "improvement_actions": [], "decision": "REVISE"},
+        ]
+        prompt = build_executor_task_prompt(description="Fix bug", review_history=history)
+        self.assertNotIn("Recurring blockers", prompt)
+
+
+class FindRecurringBlockersTests(unittest.TestCase):
+    def test_finds_common_blockers(self) -> None:
+        history = [
+            {"blocking_issues": ["A", "B"]},
+            {"blocking_issues": ["B", "C"]},
+        ]
+        self.assertEqual(_find_recurring_blockers(history), ["B"])
+
+    def test_empty_when_no_overlap(self) -> None:
+        history = [
+            {"blocking_issues": ["A"]},
+            {"blocking_issues": ["B"]},
+        ]
+        self.assertEqual(_find_recurring_blockers(history), [])
+
+    def test_empty_for_single_round(self) -> None:
+        self.assertEqual(_find_recurring_blockers([{"blocking_issues": ["A"]}]), [])
+
+    def test_empty_for_no_history(self) -> None:
+        self.assertEqual(_find_recurring_blockers([]), [])
 
 
 if __name__ == "__main__":

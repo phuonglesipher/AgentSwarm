@@ -105,7 +105,7 @@ class StreamingInvestigationState(TypedDict):
     optimization_domain: NotRequired[str]
 
 
-_MAX_PRIOR_CONTEXT_CHARS = 6000
+_MAX_PRIOR_CONTEXT_CHARS = 24000
 
 
 def _truncate_prior_context(text: str, *, max_chars: int = _MAX_PRIOR_CONTEXT_CHARS) -> str:
@@ -565,7 +565,8 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
                 system_prompt = build_executor_system_prompt(
                     working_directory=str(context.host_root),
                     scope_constraints=[
-                        "Investigate only — do not modify files, do not write patches.",
+                        "Primary goal: investigate and document findings. Do not modify source files.",
+                        "You may read ANY file in the project to gather evidence — do not restrict yourself to suggested paths.",
                         "Use Read, Grep, Glob, and Bash (read-only commands) to gather streaming evidence.",
                         f"Write a markdown investigation brief with these sections: {sections_str}.",
                         "Focus on world partition config, streaming volumes, async loading, texture streaming, and hitch sources.",

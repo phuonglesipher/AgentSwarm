@@ -76,7 +76,7 @@ INVESTIGATION_BLOCKING_SECTIONS = {
     "Root Cause Hypothesis",
     "Validation Plan",
 }
-_MAX_PRIOR_CONTEXT_CHARS = 8000
+_MAX_PRIOR_CONTEXT_CHARS = 24000
 _PRIORITY_SECTIONS = (
     "Root Cause Direction",
     "Ownership Summary",
@@ -2234,7 +2234,8 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
                 system_prompt = build_executor_system_prompt(
                     working_directory=str(scope_root),
                     scope_constraints=[
-                        "Investigate only — do not modify files, do not write patches.",
+                        "Primary goal: investigate and document findings. Do not modify source files.",
+                        "You may read ANY file in the project to gather evidence — do not restrict yourself to suggested paths.",
                         "Use Read, Grep, Glob, and Bash (read-only commands) to gather evidence.",
                         "Write a markdown investigation document with these exact sections: "
                         + ", ".join(s.split(" — ")[0] for s in _GAMEPLAY_INVESTIGATION_SECTIONS)
@@ -2598,7 +2599,8 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
                 system_prompt = build_executor_system_prompt(
                     working_directory=str(scope_root),
                     scope_constraints=[
-                        f"Modify only these files: {state['workspace_source_file']}, {state['workspace_test_file']}",
+                        f"Primary files to modify: {state['workspace_source_file']}, {state['workspace_test_file']}. "
+                        "You may also modify closely related files if the fix requires it.",
                         "Keep changes scoped to the grounded owner path.",
                         "Preserve unrelated behavior in adjacent code.",
                         "Run any available tests after making changes.",

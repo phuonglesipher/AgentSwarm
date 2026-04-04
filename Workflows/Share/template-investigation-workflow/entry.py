@@ -181,7 +181,7 @@ def _short_slug(value: str, *, fallback: str, max_length: int = 18) -> str:
     return f"{slug[:keep].rstrip('-') or fallback}-{digest}"
 
 
-_MAX_PRIOR_CONTEXT_CHARS = 8000
+_MAX_PRIOR_CONTEXT_CHARS = 24000
 _PRIORITY_SECTIONS = ("Root Cause Hypothesis", "Consumer & Caller Analysis", "Verification Plan")
 
 
@@ -568,7 +568,8 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
                 system_prompt = build_executor_system_prompt(
                     working_directory=str(context.host_root),
                     scope_constraints=[
-                        "Investigate only — do not modify files, do not write patches.",
+                        "Primary goal: investigate and document findings. Do not modify source files.",
+                        "You may read ANY file in the project to gather evidence — do not restrict yourself to suggested paths.",
                         "Use Read, Grep, Glob, and Bash (read-only commands) to gather evidence.",
                         "Write a markdown investigation brief with these sections: Task Framing, Project Root Findings, "
                         "Candidate Ownership, Consumer & Caller Analysis, Root Cause Hypothesis, Architecture Notes, "

@@ -7,7 +7,7 @@ import unittest
 from unittest import mock
 
 from core.graph_logging import GRAPH_TIMELINE_FILE, LLM_PROMPT_TRACE_FILE, bind_active_trace_context
-from core.llm import ClaudeCodeConfig, ClaudeCodeLLMClient, CodexCLIConfig, CodexCliLLMClient, ensure_traced_llm_client
+from core.llm import ClaudeCodeConfig, ClaudeCodeLLMClient, CodexCLIConfig, CodexCliLLMClient, ensure_traced_llm_client, _extract_session_id
 
 
 class CodexCliLLMClientTests(unittest.TestCase):
@@ -437,6 +437,34 @@ class ClaudeCodeLLMClientTests(unittest.TestCase):
 
         command = captured_commands[0]
         self.assertEqual(command[command.index("--max-turns") + 1], "5")
+
+
+class ExtractSessionIdTests(unittest.TestCase):
+    def test_extracts_from_simple_json(self) -> None:
+        import json as _json
+        raw = _json.dumps({"result": "ok", "session_id": "abc-123", "is_error": False})
+        self.assertEqual(_extract_session_id(raw), "abc-123")
+
+    def test_returns_none_when_missing(self) -> None:
+        import json as _json
+        raw = _json.dumps({"result": "ok", "is_error": False})
+        self.assertIsNone(_extract_session_id(raw))
+
+    def test_extracts_from_jsonl(self) -> None:
+        lines = [
+            '{"type": "system", "session_id": "sess-456"}',
+            '{"type": "result", "result": "done"}',
+        ]
+        raw = "\n".join(lines)
+        self.assertEqual(_extract_session_id(raw), "sess-456")
+
+    def test_returns_none_for_empty_session_id(self) -> None:
+        import json as _json
+        raw = _json.dumps({"result": "ok", "session_id": "", "is_error": False})
+        self.assertIsNone(_extract_session_id(raw))
+
+    def test_returns_none_for_garbage_input(self) -> None:
+        self.assertIsNone(_extract_session_id("not json at all"))
 
 
 if __name__ == "__main__":

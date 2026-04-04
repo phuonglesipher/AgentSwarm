@@ -181,5 +181,83 @@ class QualityLoopTests(unittest.TestCase):
         self.assertTrue(third_round.completed)
 
 
+    def test_recurring_blockers_detected(self) -> None:
+        spec = QualityLoopSpec(
+            loop_id="plan-review",
+            threshold=90,
+            max_rounds=4,
+            min_score_delta=5,
+            stagnation_limit=2,
+        )
+
+        progress = evaluate_quality_loop(
+            spec,
+            round_index=2,
+            score=75,
+            approved=False,
+            previous_score=70,
+            prior_stagnated_rounds=0,
+            blocking_issues=["Missing section X", "No test coverage"],
+            previous_blocking_issues=["Missing section X", "Vague description"],
+        )
+
+        self.assertIn("Missing section X", progress.recurring_blockers)
+        self.assertNotIn("No test coverage", progress.recurring_blockers)
+        self.assertNotIn("Vague description", progress.recurring_blockers)
+
+    def test_no_recurring_blockers_on_first_round(self) -> None:
+        spec = QualityLoopSpec(loop_id="test", threshold=90, max_rounds=3)
+
+        progress = evaluate_quality_loop(
+            spec,
+            round_index=1,
+            score=70,
+            approved=False,
+            blocking_issues=["Missing section X"],
+        )
+
+        self.assertEqual(progress.recurring_blockers, ())
+
+    def test_recurring_blockers_trigger_stagnation(self) -> None:
+        """Same blockers in consecutive rounds should count as stagnation
+        even if the score delta is above min_score_delta."""
+        spec = QualityLoopSpec(
+            loop_id="test",
+            threshold=90,
+            max_rounds=5,
+            min_score_delta=1,
+            stagnation_limit=2,
+        )
+
+        # Round 2: score improved (70→75, delta=5), but same single blocker
+        round2 = evaluate_quality_loop(
+            spec,
+            round_index=2,
+            score=75,
+            approved=False,
+            previous_score=70,
+            prior_stagnated_rounds=0,
+            blocking_issues=["Blocker A"],
+            previous_blocking_issues=["Blocker A"],
+        )
+        # All current blockers are recurring → blocker-stuck → stagnation increments
+        self.assertEqual(round2.stagnated_rounds, 1)
+        self.assertEqual(round2.recurring_blockers, ("Blocker A",))
+
+        # Round 3: still same blocker
+        round3 = evaluate_quality_loop(
+            spec,
+            round_index=3,
+            score=80,
+            approved=False,
+            previous_score=75,
+            prior_stagnated_rounds=round2.stagnated_rounds,
+            blocking_issues=["Blocker A"],
+            previous_blocking_issues=["Blocker A"],
+        )
+        self.assertEqual(round3.stagnated_rounds, 2)
+        self.assertEqual(round3.status, "stagnated")
+
+
 if __name__ == "__main__":
     unittest.main()

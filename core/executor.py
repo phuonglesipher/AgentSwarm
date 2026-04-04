@@ -19,7 +19,7 @@ from time import perf_counter
 from typing import Any
 
 from core.graph_logging import LLMUsage, log_llm_prompt_event, log_llm_response_event
-from core.llm import LLMError, _extract_claude_result, _extract_claude_usage, _retry_with_backoff
+from core.llm import LLMError, _extract_claude_result, _extract_claude_usage, _extract_session_id, _retry_with_backoff
 
 
 @dataclass(frozen=True)
@@ -76,21 +76,94 @@ def build_executor_task_prompt(
     *,
     description: str,
     prior_feedback: str | None = None,
+    review_history: list[dict[str, Any]] | None = None,
     context: str | None = None,
 ) -> str:
-    """Build the task prompt, optionally including reviewer feedback from a prior loop."""
+    """Build the task prompt, optionally including reviewer feedback from a prior loop.
+
+    Args:
+        review_history: Accumulated review round summaries. Each dict has keys
+            ``round``, ``score``, ``blocking_issues``, ``improvement_actions``,
+            ``decision``. When provided, the executor can see the full progression
+            of review feedback — not just the latest round.
+    """
     parts = [f"## Task\n\n{description}"]
 
     if context:
         parts.append(f"## Context\n\n{context}")
 
+    if review_history:
+        history_lines = ["## Review History\n"]
+        for entry in review_history[-5:]:  # cap at last 5 rounds
+            blockers = ", ".join(entry.get("blocking_issues", [])) or "None"
+            actions = ", ".join(entry.get("improvement_actions", [])) or "None"
+            history_lines.append(
+                f"- Round {entry.get('round', '?')} (score {entry.get('score', '?')}/100, "
+                f"{entry.get('decision', 'REVISE')}): Blockers: [{blockers}]. Actions: [{actions}]."
+            )
+        recurring = _find_recurring_blockers(review_history)
+        if recurring:
+            history_lines.append(
+                f"\nRecurring blockers across rounds: {', '.join(recurring)}. "
+                f"Focus on resolving these first."
+            )
+        parts.append("\n".join(history_lines))
+
     if prior_feedback:
         parts.append(
-            f"## Prior Review Feedback\n\n"
-            f"Address the following feedback from the previous review round:\n\n{prior_feedback}"
+            f"## Latest Review Feedback\n\n"
+            f"Address the following feedback from the most recent review round:\n\n{prior_feedback}"
         )
 
     return "\n\n".join(parts)
+
+
+def _find_recurring_blockers(review_history: list[dict[str, Any]]) -> list[str]:
+    """Identify blockers that appeared in 2+ consecutive rounds."""
+    if len(review_history) < 2:
+        return []
+    prev = set(review_history[-2].get("blocking_issues", []))
+    curr = set(review_history[-1].get("blocking_issues", []))
+    return sorted(prev & curr)
+
+
+def pre_gather_tool_context(
+    context: Any,
+    tool_names: list[str],
+    task_description: str,
+    *,
+    max_chars_per_tool: int = 3000,
+) -> str:
+    """Run domain tools before executor invocation and format results as context.
+
+    AgentSwarm registers domain-specific tools (e.g. ``find-gameplay-code``,
+    ``github-issues``) that the Claude Code subprocess cannot access directly.
+    This function runs those tools pre-emptively and returns a formatted string
+    that can be injected into the executor's context section, giving it a head
+    start on codebase exploration.
+
+    Returns an empty string if no tools produce results.
+    """
+    sections: list[str] = []
+    for tool_name in tool_names:
+        try:
+            tool_entry = context.get_tool(tool_name)
+            if tool_entry is None:
+                continue
+            tool = tool_entry.tool
+            result = tool.invoke({"query": task_description})
+            result_text = str(result).strip()
+            if not result_text:
+                continue
+            if len(result_text) > max_chars_per_tool:
+                result_text = result_text[:max_chars_per_tool] + "..."
+            sections.append(f"### {tool_name}\n{result_text}")
+        except Exception:
+            continue
+
+    if not sections:
+        return ""
+    return "## Pre-gathered tool results\n\n" + "\n\n".join(sections)
 
 
 class ClaudeCodeExecutorClient:
@@ -126,6 +199,7 @@ class ClaudeCodeExecutorClient:
         system_prompt: str | None = None,
         working_directory: str | None = None,
         max_turns: int | None = None,
+        session_id: str | None = None,
     ) -> ExecutionResult:
         """Execute a task using Claude Code with full tool access.
 
@@ -135,6 +209,10 @@ class ClaudeCodeExecutorClient:
             max_turns: Override config.max_turns for this call. Useful for reducing
                        turn budget on later investigation rounds where context is
                        already established.
+            session_id: Resume a prior Claude Code session by ID. When provided,
+                        the executor uses ``--resume`` so it retains the full
+                        conversation context (file reads, reasoning, tool calls)
+                        from the previous round instead of starting fresh.
         """
         resolved_command = self._resolve_command_path()
         if not resolved_command or not self.is_enabled():
@@ -159,6 +237,11 @@ class ClaudeCodeExecutorClient:
             "--output-format", "json",
             "--model", self.config.model,
         ]
+
+        # Resume a prior session to preserve conversation context across rounds.
+        # The new prompt is still sent via stdin; --resume loads prior turns first.
+        if session_id:
+            command.extend(["--resume", session_id])
 
         if effective_max_turns is not None:
             command.extend(["--max-turns", str(effective_max_turns)])
@@ -251,6 +334,7 @@ class ClaudeCodeExecutorClient:
 
             result_text = _extract_executor_result(raw_output)
             usage = _extract_claude_usage(raw_output)
+            extracted_session_id = _extract_session_id(raw_output)
             elapsed_ms = round((perf_counter() - start_time) * 1000, 2)
             log_llm_response_event(
                 client_label=client_label,
@@ -264,6 +348,7 @@ class ClaudeCodeExecutorClient:
             return ExecutionResult(
                 success=True,
                 result_text=result_text,
+                session_id=extracted_session_id,
                 cost_usd=usage.cost_usd if usage else None,
             )
 

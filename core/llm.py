@@ -799,6 +799,45 @@ def _extract_claude_result(raw_output: str) -> str:
     return raw_output
 
 
+def _extract_session_id(raw_output: str) -> str | None:
+    """Extract session_id from Claude Code JSON output.
+
+    Claude Code emits ``session_id`` in its JSON output. Capturing it allows
+    subsequent executor rounds to resume the same conversation via ``--resume``,
+    preserving full context (file reads, reasoning, tool calls) across rounds.
+    """
+    try:
+        data = json.loads(raw_output)
+    except json.JSONDecodeError:
+        data = None
+
+    if isinstance(data, dict):
+        sid = data.get("session_id")
+        if isinstance(sid, str) and sid.strip():
+            return sid.strip()
+        return None
+
+    events = data if isinstance(data, list) else None
+    if events is None:
+        events = []
+        for line in raw_output.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                events.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+
+    for event in events:
+        if isinstance(event, dict):
+            sid = event.get("session_id")
+            if isinstance(sid, str) and sid.strip():
+                return sid.strip()
+
+    return None
+
+
 def _extract_claude_usage(raw_output: str) -> LLMUsage | None:
     """Extract cost_usd from Claude Code JSON output."""
     try:

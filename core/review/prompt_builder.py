@@ -76,6 +76,7 @@ def build_review_input(
     review_round: int,
     optimization_domain: str | None = None,
     extra_context_lines: list[str] | None = None,
+    review_history: list[dict] | None = None,
 ) -> str:
     """Assemble the LLM input text from the document and task context."""
     lines = [
@@ -86,6 +87,29 @@ def build_review_input(
         lines.append(f"Optimization domain: {optimization_domain}")
     if extra_context_lines:
         lines.extend(extra_context_lines)
+
+    # Inject review history so the reviewer sees round-over-round progression
+    # and can detect recurring blockers instead of repeating the same feedback.
+    if review_history and len(review_history) > 0:
+        lines.append("")
+        lines.append("Prior review rounds:")
+        for entry in review_history[-5:]:
+            blockers = ", ".join(entry.get("blocking_issues", [])) or "None"
+            lines.append(
+                f"- Round {entry.get('round', '?')}: score {entry.get('score', '?')}/100, "
+                f"{entry.get('decision', 'REVISE')}. Blockers: [{blockers}]."
+            )
+        if len(review_history) >= 2:
+            prev_b = set(review_history[-1].get("blocking_issues", []))
+            prev_prev_b = set(review_history[-2].get("blocking_issues", []))
+            recurring = prev_b & prev_prev_b
+            if recurring:
+                lines.append(
+                    f"RECURRING blockers (appeared in 2+ rounds): {', '.join(sorted(recurring))}. "
+                    f"Pay special attention to whether these have been resolved."
+                )
+        lines.append("")
+
     lines.extend([
         f"Review round: {review_round}/{profile.max_rounds}",
         "",
