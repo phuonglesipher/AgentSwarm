@@ -312,6 +312,91 @@ class TestParseOptFile:
         assert len(capture.scope_blocks[0].events) == 3
 
 
+class TestBatchFolderProcessing:
+    """Tests for directory/folder input mode in entry.py helpers."""
+
+    def _make_opt_file(self, path: Path, frame_times: list[float]) -> None:
+        chunks = [_build_summary_pack(frame_times=frame_times)]
+        path.write_bytes(_build_opt_file(chunks))
+
+    def test_folder_analyzes_all_files(self, tmp_path):
+        """Directory input should analyze all .opt files."""
+        from entry import _analyze_single_file
+
+        self._make_opt_file(tmp_path / "a.opt", [10.0, 15.0])
+        self._make_opt_file(tmp_path / "b.opt", [20.0, 25.0, 30.0])
+        self._make_opt_file(tmp_path / "c.opt", [5.0])
+
+        opt_files = sorted(tmp_path.glob("*.opt"), key=lambda f: f.stat().st_mtime, reverse=True)
+        results = []
+        for f in opt_files:
+            analysis, error = _analyze_single_file(f, 20, None, None, 0, 0.0)
+            assert error is None, f"Unexpected error: {error}"
+            results.append(analysis)
+
+        assert len(results) == 3
+        # Each result should have frame_summary
+        for r in results:
+            assert "frame_summary" in r
+            assert "filename" in r
+
+    def test_folder_max_files_caps(self, tmp_path):
+        """max_files should limit how many files are processed."""
+        from entry import _analyze_single_file
+
+        for i in range(5):
+            self._make_opt_file(tmp_path / f"cap_{i}.opt", [float(i + 10)])
+
+        opt_files = sorted(tmp_path.glob("*.opt"), key=lambda f: f.stat().st_mtime, reverse=True)
+        capped = opt_files[:2]
+        results = []
+        for f in capped:
+            analysis, error = _analyze_single_file(f, 20, None, None, 0, 0.0)
+            assert error is None
+            results.append(analysis)
+
+        assert len(results) == 2
+
+    def test_folder_no_opt_files(self, tmp_path):
+        """Empty directory should produce no files."""
+        opt_files = list(tmp_path.glob("*.opt"))
+        assert len(opt_files) == 0
+
+    def test_folder_skips_non_opt(self, tmp_path):
+        """Non-.opt files in directory should be ignored."""
+        (tmp_path / "readme.txt").write_text("not a capture")
+        (tmp_path / "data.json").write_text("{}")
+        self._make_opt_file(tmp_path / "real.opt", [12.0])
+
+        opt_files = list(tmp_path.glob("*.opt"))
+        assert len(opt_files) == 1
+        assert opt_files[0].name == "real.opt"
+
+    def test_folder_bad_file_returns_error(self, tmp_path):
+        """Corrupt .opt file should return error, not crash."""
+        from entry import _analyze_single_file
+
+        bad = tmp_path / "corrupt.opt"
+        bad.write_bytes(b"\x00" * 100)
+
+        analysis, error = _analyze_single_file(bad, 20, None, None, 0, 0.0)
+        assert analysis is None
+        assert error is not None
+        assert "corrupt.opt" in error
+
+    def test_single_file_still_works(self, tmp_path):
+        """Single file path should still work as before."""
+        from entry import _analyze_single_file
+
+        f = tmp_path / "single.opt"
+        self._make_opt_file(f, [16.0, 18.0, 20.0])
+
+        analysis, error = _analyze_single_file(f, 20, None, None, 0, 0.0)
+        assert error is None
+        assert analysis["frame_summary"]["total_frames"] == 3
+        assert analysis["filename"] == "single.opt"
+
+
 class TestAnalyzeCapture:
     def test_frame_summary(self):
         capture = OptickCapture(frame_times_ms=[10.0, 15.0, 20.0, 25.0, 35.0])
