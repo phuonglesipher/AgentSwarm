@@ -100,7 +100,7 @@ class StreamingInvestigationState(TypedDict):
     loop_stagnated_rounds: int
     final_report: dict[str, Any]
     summary: str
-    optick_analysis: NotRequired[str]
+    profiling_analysis: NotRequired[str]
     review_criteria: NotRequired[list[tuple]]
     optimization_domain: NotRequired[str]
 
@@ -474,14 +474,14 @@ OPTICK_DOMAIN_FOCUS = (
 )
 
 
-def _gather_optick_context(
+def _gather_profiling_context(
     context: WorkflowContext,
     metadata: WorkflowMetadata,
     state: StreamingInvestigationState,
 ) -> str | None:
     # Already attempted in a prior round — return cached result (even if empty).
-    if "optick_analysis" in state:
-        cached = str(state["optick_analysis"]).strip()
+    if "profiling_analysis" in state:
+        cached = str(state["profiling_analysis"]).strip()
         return cached or None
 
     tools: list[Any] = []
@@ -500,7 +500,7 @@ def _gather_optick_context(
     try:
         engine = ToolEngine(
             config=ToolEngineConfig(
-                system_id=f"{metadata.name}-optick-gather",
+                system_id=f"{metadata.name}-profiling-gather",
                 persona=f"You are a performance data analyst. {OPTICK_DOMAIN_FOCUS}",
                 max_turns=2,
                 require_tool_use=False,
@@ -510,8 +510,8 @@ def _gather_optick_context(
         )
         result = engine.gather(
             task=(
-                "Extract any .opt file path from the task prompt below and analyze it using the optick-analyze tool. "
-                "If no .opt file is mentioned, set done=true immediately.\n\n"
+                "Extract any profiling capture file path (.opt or .utrace) from the task prompt below. Use optick-analyze for .opt files, utrace-analyze for .utrace files. "
+                "If no profiling file is mentioned, set done=true immediately.\n\n"
                 f"When calling optick-analyze, use these filters to focus on streaming data:\n"
                 f"  thread_names: \"{OPTICK_THREAD_FILTER}\"\n"
                 f"  scope_keywords: \"{OPTICK_SCOPE_FILTER}\"\n"
@@ -543,7 +543,7 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
         else:
             project_context = _collect_project_context(context, state["task_prompt"], str(state.get("review_feedback", "")))
         investigator_llm, investigation_mode = _select_investigator_llm(context)
-        optick_context = _gather_optick_context(context, metadata, state)
+        optick_context = _gather_profiling_context(context, metadata, state)
         optick_section = f"Optick capture analysis:\n{optick_context}" if optick_context else "No Optick capture data available."
         fallback_doc = _fallback_investigation_doc(
             task_prompt=state["task_prompt"],
@@ -657,7 +657,7 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
             "relevant_source": project_context["source"],
             "relevant_tests": project_context["tests"],
             "investigation_doc": investigation_doc,
-            "optick_analysis": optick_context or "",
+            "profiling_analysis": optick_context or "",
             "review_criteria": [list(c) for c in REVIEW_CRITERIA],
             "optimization_domain": OPTIMIZATION_DOMAIN,
             "summary": f"{metadata.name} completed investigation round {investigation_round} and handed the brief to senior review.",

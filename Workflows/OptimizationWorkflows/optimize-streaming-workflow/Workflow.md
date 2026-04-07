@@ -5,6 +5,7 @@ version: 1.0.0
 exposed: true
 tools:
   - optick-analyze
+  - utrace-analyze
 capabilities:
   - world partition optimization
   - level streaming investigation
