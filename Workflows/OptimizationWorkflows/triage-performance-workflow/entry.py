@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 from pathlib import Path
 from typing import Any
@@ -7,30 +8,16 @@ from typing import Any
 from langgraph.graph import END, START, StateGraph
 from typing_extensions import NotRequired, TypedDict
 
+from core.decision.engine import DecisionEngine
+from core.decision.profile import Branch, DecisionProfile
 from core.models import WorkflowContext, WorkflowMetadata
 from core.tool_engine import ToolEngine, ToolEngineConfig
 
 logger = logging.getLogger(__name__)
 
 # ------------------------------------------------------------------ #
-#  Thread → domain mapping
+#  Child workflow mapping
 # ------------------------------------------------------------------ #
-
-THREAD_DOMAIN_MAP: dict[str, str] = {
-    "gamethread": "gamethread",
-    "renderthread": "rendering",
-    "rhithread": "rendering",
-    "gputhread": "rendering",
-    "asyncloadingthread": "streaming",
-    "streamingthread": "streaming",
-    "pakprecachethread": "streaming",
-}
-
-# A domain is a bottleneck when its total_ms >= this fraction of the heaviest.
-BOTTLENECK_RATIO = 0.60
-
-# Ignore domains with trivially small totals (ms).
-BOTTLENECK_MIN_MS = 50.0
 
 CHILD_WORKFLOWS = {
     "gamethread": "optimize-gamethread-workflow",
@@ -49,8 +36,8 @@ class TriageState(TypedDict):
     task_prompt: str
     task_id: NotRequired[str]
     run_dir: NotRequired[str]
-    optick_analysis: NotRequired[str]
-    optick_analysis_data: NotRequired[dict[str, Any]]
+    profiling_analysis: NotRequired[str]
+    profiling_data: NotRequired[dict[str, Any]]
     classified_domains: NotRequired[list[str]]
     domain_results: NotRequired[list[dict[str, Any]]]
     final_report: NotRequired[dict[str, Any]]
@@ -72,83 +59,70 @@ def _artifact_dir(context: WorkflowContext, metadata: WorkflowMetadata, state: T
     return d
 
 
-def _classify_from_thread_breakdown(analysis_data: dict[str, Any]) -> list[str]:
-    """Classify bottleneck domains from structured optick analysis data.
+def _summarize_profiling_state(state: dict[str, Any]) -> str:
+    """Extract key profiling metrics for DecisionEngine LLM prompt."""
+    data = state.get("profiling_data", {})
+    if not data:
+        return f"No profiling data available.\nTask prompt: {state.get('task_prompt', '')[:500]}"
 
-    Accepts the artifact dict returned by the optick-analyze tool.
-    Reads ``thread_breakdown`` or ``per_thread_scopes`` to determine
-    which domains are hot.
-    """
-    if not analysis_data:
-        return []
+    lines: list[str] = []
 
-    thread_totals: dict[str, float] = {}
+    # Bound analysis (from optick or utrace)
+    ba = data.get("bound_analysis", {})
+    if ba:
+        lines.append(f"Primary bound: {ba.get('primary_bound', 'unknown')}")
+        lines.append(f"Bound by: {ba.get('bound_by', 'unknown')}")
+        lines.append(f"Explanation: {ba.get('explanation', '')}")
+        budget = ba.get("frame_budget", {})
+        if budget:
+            lines.append(f"Frame budget: {json.dumps(budget)}")
 
-    # Prefer thread_breakdown (pre-aggregated by optick_parser).
-    if "thread_breakdown" in analysis_data:
-        for entry in analysis_data["thread_breakdown"]:
-            name = entry.get("name", "").lower().replace(" ", "")
-            total_ms = entry.get("total_ms", 0)
-            if name and total_ms > 0:
-                thread_totals[name] = thread_totals.get(name, 0) + total_ms
+    # Frame summary
+    fs = data.get("frame_summary", {})
+    if fs:
+        lines.append(f"Frames: {fs.get('total_frames', 0)}, "
+                      f"avg={fs.get('avg_ms', 0)}ms, "
+                      f"p99={fs.get('p99_ms', 0)}ms, "
+                      f"miss_60fps={fs.get('frames_above_16ms', 0)}, "
+                      f"miss_30fps={fs.get('frames_above_33ms', 0)}")
 
-    # Fallback: compute from per_thread_scopes.
-    if not thread_totals and "per_thread_scopes" in analysis_data:
-        for thread_name, scopes in analysis_data["per_thread_scopes"].items():
-            total = sum(s.get("total_ms", 0) for s in scopes)
-            if total > 0:
-                thread_totals[thread_name.lower().replace(" ", "")] = total
+    # GPU pipeline (utrace only)
+    gpu_queues = data.get("gpu_queues", [])
+    if gpu_queues:
+        for q in gpu_queues:
+            frames = q.get("frames", 1) or 1
+            work = q.get("work_ms", 0) / frames
+            wait = q.get("wait_ms", 0) / frames
+            if work > 0 or wait > 0:
+                lines.append(f"GPU {q.get('name', '?')}: work={work:.1f}ms/f wait={wait:.1f}ms/f")
 
-    if not thread_totals:
-        return []
+    # Thread breakdown (top 5)
+    tb = data.get("thread_breakdown", [])
+    if tb:
+        lines.append("Thread breakdown (top 5):")
+        for t in tb[:5]:
+            lines.append(f"  {t.get('name', '?')}: {t.get('total_ms', 0):.0f}ms")
 
-    # Map threads to domains and aggregate.
-    domain_totals: dict[str, float] = {}
-    for thread_key, total_ms in thread_totals.items():
-        domain = THREAD_DOMAIN_MAP.get(thread_key)
-        if domain:
-            domain_totals[domain] = domain_totals.get(domain, 0) + total_ms
+    # Bookmarks — streaming events
+    bookmarks = data.get("bookmarks", [])
+    streaming_bms = [b for b in bookmarks if "RequestLevel" in b.get("text", "")]
+    if streaming_bms:
+        lines.append(f"Level streaming events: {len(streaming_bms)}")
+    pso_bms = [b for b in bookmarks if "PSO" in b.get("text", "")]
+    if pso_bms:
+        lines.append(f"PSO compilation events: {len(pso_bms)}")
 
-    if not domain_totals:
-        return []
+    # Bound distribution (optick)
+    bd = ba.get("bound_distribution", [])
+    if bd:
+        lines.append("Bound distribution: " + ", ".join(
+            f"{d['thread']} {d['pct']}%" for d in bd[:4]
+        ))
 
-    max_total = max(domain_totals.values())
-    if max_total <= 0:
-        return []
+    if not lines:
+        lines.append(f"Task prompt: {state.get('task_prompt', '')[:500]}")
 
-    threshold_ms = max_total * BOTTLENECK_RATIO
-
-    logger.debug(
-        "Domain totals: %s (max=%.1fms, threshold=%.1fms)",
-        domain_totals, max_total, threshold_ms,
-    )
-
-    # Always include the top domain; others must exceed both ratio and min_ms.
-    sorted_domains = sorted(domain_totals.items(), key=lambda x: -x[1])
-    bottlenecks = [sorted_domains[0][0]]
-    for domain, total in sorted_domains[1:]:
-        if total >= threshold_ms and total >= BOTTLENECK_MIN_MS:
-            bottlenecks.append(domain)
-
-    return bottlenecks
-
-
-def _llm_classify_prompt(task_prompt: str) -> list[str]:
-    """Keyword-based fallback when no profiling data is available."""
-    text = task_prompt.lower()
-    domains: list[str] = []
-
-    gamethread_keywords = {"gamethread", "game thread", "tick", "gas", "ability", "ai", "physics", "behavior tree"}
-    rendering_keywords = {"render", "draw call", "gpu", "shader", "material", "nanite", "lumen", "shadow", "lod"}
-    streaming_keywords = {"stream", "loading", "hitch", "world partition", "level streaming", "async", "texture streaming"}
-
-    if any(kw in text for kw in gamethread_keywords):
-        domains.append("gamethread")
-    if any(kw in text for kw in rendering_keywords):
-        domains.append("rendering")
-    if any(kw in text for kw in streaming_keywords):
-        domains.append("streaming")
-    return domains
+    return "\n".join(lines)
 
 
 # ------------------------------------------------------------------ #
@@ -159,10 +133,65 @@ def _llm_classify_prompt(task_prompt: str) -> list[str]:
 def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
     graph_name = metadata.name
 
-    # -- Node: triage_analyze -------------------------------------------
+    # -- Decision profile for domain routing ---------------------------
+
+    triage_decision_profile = DecisionProfile(
+        system_id="perf-triage-domain-router",
+        branches=(
+            Branch(
+                name="gamethread",
+                description=(
+                    "Game thread is the primary CPU bottleneck. GameThread has the highest "
+                    "per-frame cost. Focus on tick functions, GAS abilities, AI, physics queries, "
+                    "Blueprint VM overhead. Bound analysis says CPU-bound on GameThread."
+                ),
+                target="dispatch_gamethread",
+            ),
+            Branch(
+                name="rendering",
+                description=(
+                    "Rendering pipeline is the bottleneck. GPU-bound (Graphics queue work exceeds "
+                    "CPU frame time), RenderThread-bound, or RHIThread-bound. Focus on draw calls, "
+                    "materials, shadows, Nanite, Lumen, TSR, post-processing. GPU pipeline shows "
+                    "high work_ms or cross-queue sync issues."
+                ),
+                is_default=True,
+                target="dispatch_rendering",
+            ),
+            Branch(
+                name="streaming",
+                description=(
+                    "Level streaming or asset loading causes hitches. Bookmarks show RequestLevel "
+                    "events, PSO compilation stalls, or AsyncLoadingThread is hot. Frame spikes "
+                    "correlate with streaming events."
+                ),
+                target="dispatch_streaming",
+            ),
+            Branch(
+                name="multi_domain",
+                description=(
+                    "Multiple domains are problematic — e.g., CPU and GPU both over budget, "
+                    "or streaming hitches on top of a rendering bottleneck. Dispatch to all "
+                    "relevant workflows for comprehensive analysis."
+                ),
+                target="dispatch_all",
+            ),
+        ),
+        context_instruction=(
+            "You are a performance triage expert for Unreal Engine 5. "
+            "Given profiling data (bound analysis, thread breakdown, GPU pipeline, "
+            "bookmarks), determine which optimization domain to focus on. "
+            "Choose the domain that will have the most impact on frame time. "
+            "Choose multi_domain only when multiple areas are clearly over budget."
+        ),
+        state_summarizer=_summarize_profiling_state,
+        llm_profile="investigator",
+    )
+
+    # -- Node: triage_analyze ------------------------------------------
 
     def triage_analyze(state: TriageState) -> dict[str, Any]:
-        """Run optick-analyze with no thread filter to get full breakdown."""
+        """Run profiling tool (optick-analyze or utrace-analyze) for full breakdown."""
         tools: list[Any] = []
         for tool_name in metadata.tools:
             try:
@@ -171,13 +200,13 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
                 pass
 
         if not tools:
-            logger.warning("[%s] No tools available for triage analysis", graph_name)
-            return {"optick_analysis": ""}
+            logger.warning("[%s] No profiling tools available", graph_name)
+            return {"profiling_analysis": "", "profiling_data": {}}
 
         llm = context.get_llm("investigator")
         if not llm or not llm.is_enabled():
             logger.warning("[%s] LLM unavailable for triage analysis", graph_name)
-            return {"optick_analysis": ""}
+            return {"profiling_analysis": "", "profiling_data": {}}
 
         try:
             engine = ToolEngine(
@@ -195,46 +224,50 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
             )
             result = engine.gather(
                 task=(
-                    "Extract any .opt file path from the task prompt below and analyze it "
-                    "using the optick-analyze tool. Use broad analysis parameters to see all threads:\n"
-                    "  per_thread_top_n: 10\n"
-                    "  spike_threshold_ms: 16.67\n"
+                    "Extract any profiling capture file path from the task prompt below.\n"
+                    "- If it's a .opt file, use optick-analyze with per_thread_top_n=10 and spike_threshold_ms=16.67\n"
+                    "- If it's a .utrace file, use utrace-analyze with analysis_mode=all and spike_threshold_ms=16.67\n"
                     "Do NOT filter by thread_names or scope_keywords — we need the full picture.\n"
-                    "If no .opt file is mentioned, set done=true immediately.\n\n"
+                    "If no profiling file is mentioned, set done=true immediately.\n\n"
                     f"Task prompt:\n{state['task_prompt']}"
                 ),
             )
             if result.success and result.tool_results_text().strip():
-                artifact = result.first_artifact("optick-analyze") or {}
+                artifact = (
+                    result.first_artifact("utrace-analyze")
+                    or result.first_artifact("optick-analyze")
+                    or {}
+                )
                 return {
-                    "optick_analysis": result.tool_results_text(),
-                    "optick_analysis_data": artifact,
+                    "profiling_analysis": result.tool_results_text(),
+                    "profiling_data": artifact,
                 }
         except Exception:
             logger.exception("[%s] Error during triage analysis", graph_name)
 
-        return {"optick_analysis": "", "optick_analysis_data": {}}
+        return {"profiling_analysis": "", "profiling_data": {}}
 
     # -- Node: triage_classify -----------------------------------------
 
     def triage_classify(state: TriageState) -> dict[str, Any]:
-        """Classify bottleneck domains from profiling data or prompt text."""
-        analysis_data = state.get("optick_analysis_data", {})
-        domains: list[str] = []
+        """Classify bottleneck domains using DecisionEngine."""
+        decision_engine = DecisionEngine(
+            triage_decision_profile, context, metadata,
+        )
+        choice = decision_engine.decide(state)
 
-        if analysis_data:
-            domains = _classify_from_thread_breakdown(analysis_data)
-
-        # Fallback: keyword classification from prompt text.
-        if not domains:
-            domains = _llm_classify_prompt(state["task_prompt"])
-
-        # Last resort: dispatch all domains.
-        if not domains:
-            logger.info("[%s] Cannot determine domain — dispatching all", graph_name)
+        if choice == "dispatch_all":
             domains = list(CHILD_WORKFLOWS.keys())
+        elif choice in ("dispatch_gamethread", "dispatch_rendering", "dispatch_streaming"):
+            domain = choice.replace("dispatch_", "")
+            domains = [domain]
+        else:
+            # Fallback: keyword classification from prompt text
+            domains = _keyword_classify(state["task_prompt"])
+            if not domains:
+                domains = list(CHILD_WORKFLOWS.keys())
 
-        logger.info("[%s] Classified bottleneck domains: %s", graph_name, domains)
+        logger.info("[%s] DecisionEngine classified domains: %s (choice=%s)", graph_name, domains, choice)
         return {"classified_domains": domains}
 
     # -- Node: dispatch_domains ----------------------------------------
@@ -242,14 +275,14 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
     def dispatch_domains(state: TriageState) -> dict[str, Any]:
         """Invoke child optimization workflow(s) for each classified domain."""
         domains = state.get("classified_domains", [])
-        optick_context = str(state.get("optick_analysis", "")).strip()
+        profiling_context = str(state.get("profiling_analysis", "")).strip()
         results: list[dict[str, Any]] = []
 
         triage_preamble = ""
-        if optick_context:
+        if profiling_context:
             triage_preamble = (
                 "## Triage Analysis (pre-parsed profiling data)\n\n"
-                f"{optick_context}\n\n---\n\n"
+                f"{profiling_context}\n\n---\n\n"
             )
 
         for domain in domains:
@@ -291,6 +324,13 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
         sections: list[str] = ["# Performance Triage Report\n"]
         sections.append(f"**Classified domains:** {', '.join(state.get('classified_domains', []))}\n")
 
+        # Include bound analysis summary if available
+        data = state.get("profiling_data", {})
+        ba = data.get("bound_analysis", {})
+        if ba:
+            sections.append(f"**Bound:** {ba.get('primary_bound', '?')} — {ba.get('bound_by', '?')}")
+            sections.append(f"{ba.get('explanation', '')}\n")
+
         for r in results:
             domain = r.get("domain", "unknown")
             sections.append(f"\n## {domain.title()} Domain\n")
@@ -302,7 +342,6 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
 
         report_text = "\n".join(sections)
 
-        # Write artifact.
         report_file = artifact_path / "triage_report.md"
         report_file.write_text(report_text, encoding="utf-8")
 
@@ -345,3 +384,26 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
     g.add_edge("collect_results", END)
 
     return g
+
+
+# ------------------------------------------------------------------ #
+#  Keyword fallback (when LLM unavailable)
+# ------------------------------------------------------------------ #
+
+
+def _keyword_classify(task_prompt: str) -> list[str]:
+    """Keyword-based fallback when DecisionEngine LLM is unavailable."""
+    text = task_prompt.lower()
+    domains: list[str] = []
+
+    gt_keywords = {"gamethread", "game thread", "tick", "gas", "ability", "ai", "physics", "behavior tree"}
+    rt_keywords = {"render", "draw call", "gpu", "shader", "material", "nanite", "lumen", "shadow", "lod"}
+    st_keywords = {"stream", "loading", "hitch", "world partition", "level streaming", "async", "texture streaming"}
+
+    if any(kw in text for kw in gt_keywords):
+        domains.append("gamethread")
+    if any(kw in text for kw in rt_keywords):
+        domains.append("rendering")
+    if any(kw in text for kw in st_keywords):
+        domains.append("streaming")
+    return domains
