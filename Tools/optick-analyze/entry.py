@@ -104,6 +104,24 @@ def _format_single_analysis(
         lines.append(f"Frame spikes (>{spike_threshold_ms}ms): {analysis['spike_count']} "
                      f"({analysis['spike_pct']}% of frames)")
 
+    # Bound analysis
+    ba = analysis.get("bound_analysis")
+    if ba:
+        lines.append(f"Bound: {ba['primary_bound']} — {ba['bound_thread']} "
+                     f"({ba['bound_thread_pct']}% of frames)")
+        lines.append(f"  {ba['explanation']}")
+        dist = ba.get("bound_distribution", [])
+        if len(dist) > 1:
+            lines.append("  Distribution: " + ", ".join(
+                f"{d['thread']} {d['pct']}%" for d in dist[:4]
+            ))
+        budget = ba.get("frame_budget", {})
+        if budget:
+            budget_parts = [f"{k}={v}ms" for k, v in sorted(
+                budget.items(), key=lambda x: x[1], reverse=True
+            )[:4]]
+            lines.append("  Budget: " + ", ".join(budget_parts))
+
     return "\n".join(lines) if lines else "Capture parsed but no frame data found."
 
 

@@ -609,6 +609,101 @@ def analyze_capture(
             thread_breakdown.append({"name": name, "total_ms": round(total_ms, 2)})
         result["thread_breakdown"] = thread_breakdown
 
+    # --- CPU thread bound analysis ---
+    if capture.scope_blocks and capture.threads and capture.cpu_frequency > 0:
+        freq = capture.cpu_frequency
+
+        # Per-frame per-thread cost: board_number = frame index, thread_number = thread
+        per_frame_threads: dict[int, dict[int, float]] = {}
+        for block in capture.scope_blocks:
+            dur_ticks = block.event_finish - block.event_start
+            if dur_ticks > 0:
+                dur_ms = (dur_ticks / freq) * 1000.0
+                frame_threads = per_frame_threads.setdefault(block.board_number, {})
+                # Take max per thread per frame (in case of multiple blocks)
+                frame_threads[block.thread_number] = max(
+                    frame_threads.get(block.thread_number, 0.0), dur_ms
+                )
+
+        # Classify each frame by its bottleneck thread
+        bound_counts: dict[str, int] = {}
+        thread_frame_sums: dict[str, list[float]] = {}
+        total_classified = 0
+
+        for _frame_idx, thread_durations in per_frame_threads.items():
+            if not thread_durations:
+                continue
+            total_classified += 1
+            max_tidx = max(thread_durations, key=thread_durations.get)
+            max_name = (
+                capture.threads[max_tidx].name
+                if 0 <= max_tidx < len(capture.threads)
+                else f"Thread#{max_tidx}"
+            )
+            bound_counts[max_name] = bound_counts.get(max_name, 0) + 1
+
+            # Accumulate per-thread durations for average calculation
+            for tidx, dur in thread_durations.items():
+                tname = (
+                    capture.threads[tidx].name
+                    if 0 <= tidx < len(capture.threads)
+                    else f"Thread#{tidx}"
+                )
+                thread_frame_sums.setdefault(tname, []).append(dur)
+
+        if total_classified > 0:
+            # Sort by bound frequency
+            sorted_bound = sorted(bound_counts.items(), key=lambda x: x[1], reverse=True)
+            top_thread = sorted_bound[0][0]
+            top_pct = round(sorted_bound[0][1] / total_classified * 100, 1)
+
+            # Per-thread average ms/frame
+            frame_budget: dict[str, float] = {}
+            for tname, durations in thread_frame_sums.items():
+                avg = sum(durations) / len(durations) if durations else 0.0
+                # Only include threads that appear in significant number of frames
+                if len(durations) > total_classified * 0.1:
+                    frame_budget[tname] = round(avg, 2)
+
+            # Build distribution
+            distribution = []
+            for tname, count in sorted_bound:
+                if count > 0:
+                    distribution.append({
+                        "thread": tname,
+                        "frames": count,
+                        "pct": round(count / total_classified * 100, 1),
+                    })
+
+            # Find top scope on the bound thread (from per_thread_scopes or hottest_scopes)
+            top_scope_name = ""
+            top_scope_ms = 0.0
+            if "per_thread_scopes" in result:
+                thread_scopes = result["per_thread_scopes"].get(top_thread, [])
+                if thread_scopes:
+                    top_scope_name = thread_scopes[0]["name"]
+                    top_scope_ms = thread_scopes[0]["avg_ms"]
+            elif "hottest_scopes" in result and result["hottest_scopes"]:
+                top_scope_name = result["hottest_scopes"][0]["name"]
+                top_scope_ms = result["hottest_scopes"][0]["avg_ms"]
+
+            top_avg = frame_budget.get(top_thread, 0.0)
+            explanation = (
+                f"{top_thread} is the bottleneck in {top_pct}% of frames "
+                f"(avg {top_avg}ms/frame)."
+            )
+            if top_scope_name:
+                explanation += f" Top scope: {top_scope_name} ({top_scope_ms}ms avg)."
+
+            result["bound_analysis"] = {
+                "primary_bound": "CPU",
+                "bound_thread": top_thread,
+                "bound_thread_pct": top_pct,
+                "frame_budget": frame_budget,
+                "bound_distribution": distribution,
+                "explanation": explanation,
+            }
+
     # --- Frame spike detection ---
     if spike_threshold_ms > 0 and capture.frame_times_ms:
         max_spikes = 50
