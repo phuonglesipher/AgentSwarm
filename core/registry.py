@@ -269,17 +269,31 @@ class WorkflowRegistry:
         runtime = self.get(name)
         return runtime.invoke(payload)
 
-    def list_metadata(self, exposed_only: bool = False, include_shadowed: bool = True) -> list[WorkflowMetadata]:
+    def list_metadata(
+        self,
+        exposed_only: bool = False,
+        include_shadowed: bool = True,
+        active_only: tuple[str, ...] | None = None,
+    ) -> list[WorkflowMetadata]:
         if include_shadowed:
             metadata = [runtime.metadata for runtime in self._workflows.values()]
         else:
             metadata = [self._workflows[qualified_name].metadata for qualified_name in self._aliases.values()]
         if exposed_only:
             metadata = [item for item in metadata if item.exposed]
+        if active_only is not None:
+            active_set = set(active_only)
+            metadata = [
+                item for item in metadata
+                if item.name in active_set or item.qualified_name in active_set
+            ]
         return sorted(metadata, key=lambda item: item.qualified_name)
 
-    def route(self, task_description: str) -> WorkflowMetadata | None:
-        metadata_items = self.list_metadata(exposed_only=True, include_shadowed=False)
+    def list_routable(self, active_workflows: tuple[str, ...] | None = None) -> list[WorkflowMetadata]:
+        return self.list_metadata(exposed_only=True, include_shadowed=False, active_only=active_workflows)
+
+    def route(self, task_description: str, active_workflows: tuple[str, ...] | None = None) -> WorkflowMetadata | None:
+        metadata_items = self.list_routable(active_workflows)
         if not metadata_items:
             return None
 
@@ -330,9 +344,9 @@ class WorkflowRegistry:
             return None
         return best_match
 
-    def matches_multiple_workflows(self, text: str, min_matches: int = 2) -> bool:
+    def matches_multiple_workflows(self, text: str, min_matches: int = 2, active_workflows: tuple[str, ...] | None = None) -> bool:
         """Return True if *text* has significant token overlap with 2+ exposed workflows."""
-        metadata_items = self.list_metadata(exposed_only=True, include_shadowed=False)
+        metadata_items = self.list_routable(active_workflows)
         text_tokens = _routing_tokens(text)
         if not text_tokens:
             return False

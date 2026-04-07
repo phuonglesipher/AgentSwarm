@@ -73,7 +73,7 @@ def _fallback_plan_tasks(prompt: str) -> list[str]:
     return candidates
 
 
-def _prefer_single_task(prompt: str, registry: WorkflowRegistry | None = None) -> bool:
+def _prefer_single_task(prompt: str, registry: WorkflowRegistry | None = None, active_workflows: tuple[str, ...] | None = None) -> bool:
     normalized = " ".join(prompt.split())
     if not normalized:
         return True
@@ -103,7 +103,7 @@ def _prefer_single_task(prompt: str, registry: WorkflowRegistry | None = None) -
     if any(marker in lowered for marker in multi_markers):
         return False
 
-    if registry is not None and registry.matches_multiple_workflows(prompt):
+    if registry is not None and registry.matches_multiple_workflows(prompt, active_workflows=active_workflows):
         return False
 
     return True
@@ -142,12 +142,12 @@ def _build_chained_prompt(description: str, prior_results: list[dict[str, Any]])
     return "\n".join(lines)
 
 
-def _fallback_route_task(registry: WorkflowRegistry, description: str) -> str | None:
-    match = registry.route(description)
+def _fallback_route_task(registry: WorkflowRegistry, description: str, active_workflows: tuple[str, ...] | None = None) -> str | None:
+    match = registry.route(description, active_workflows=active_workflows)
     return match.qualified_name if match else None
 
 
-def _llm_plan_tasks(llm, prompt: str, workspace_context: str = "", registry: WorkflowRegistry | None = None) -> list[str]:
+def _llm_plan_tasks(llm, prompt: str, workspace_context: str = "", registry: WorkflowRegistry | None = None, active_workflows: tuple[str, ...] | None = None) -> list[str]:
     schema = {
         "type": "object",
         "properties": {
@@ -177,7 +177,7 @@ def _llm_plan_tasks(llm, prompt: str, workspace_context: str = "", registry: Wor
     ]
 
     if registry is not None:
-        candidates = registry.list_metadata(exposed_only=True, include_shadowed=False)
+        candidates = registry.list_routable(active_workflows)
         if candidates:
             workflow_catalog = "\n".join(
                 f"- {m.name}: {', '.join(m.capabilities[:3])}"
@@ -211,8 +211,9 @@ def _llm_route_tasks(
     registry: WorkflowRegistry,
     tasks: list[MainTask],
     workspace_context: str = "",
+    active_workflows: tuple[str, ...] | None = None,
 ) -> dict[str, dict[str, Any]]:
-    candidates = registry.list_metadata(exposed_only=True, include_shadowed=False)
+    candidates = registry.list_routable(active_workflows)
     if not candidates:
         return {}
 
@@ -418,6 +419,7 @@ def build_main_graph(
     host_root = str(getattr(runtime_paths, "host_root", "") or "")
     agent_root = str(getattr(runtime_paths, "agent_root", "") or "")
     target_scope = str(getattr(config, "target_scope", "host_project"))
+    active_workflows: tuple[str, ...] | None = getattr(config, "active_workflows", None)
     workspace_context = ""
     if host_root or agent_root:
         workspace_context = (
@@ -436,9 +438,16 @@ def build_main_graph(
     }
 
     def analyze_prompt(state: MainState) -> dict[str, Any]:
+        total_count = len(registry.list_metadata())
+        routable_count = len(registry.list_routable(active_workflows))
+        routable_note = (
+            f"{routable_count} of {total_count} workflows routable (filtered by active_workflows config)"
+            if active_workflows is not None
+            else f"Loaded {total_count} workflows across AgentSwarm and project sources"
+        )
         return {
             "routing_notes": [
-                f"Loaded {len(registry.list_metadata())} workflows across AgentSwarm and project sources",
+                routable_note,
                 f"Default Codex profile is {llm_manager.describe()}",
                 f"Available LLM profiles: {', '.join(llm_manager.available_profiles())}",
                 f"Target scope is {state['target_scope'] or target_scope}",
@@ -454,7 +463,7 @@ def build_main_graph(
         # Fast path: skip LLM decomposition entirely when the prompt is
         # clearly a single task. Saves one LLM call (~2-5 s) and avoids
         # prompt-rewriting that can strip nuance from the user's intent.
-        if _prefer_single_task(state["prompt"], registry=registry):
+        if _prefer_single_task(state["prompt"], registry=registry, active_workflows=active_workflows):
             descriptions = [state["prompt"].strip()]
             planning_notes.append("Single-task fast path: skipped LLM planner.")
         else:
@@ -462,7 +471,7 @@ def build_main_graph(
             planner_llm = ensure_traced_llm_client(llm_manager.resolve("planner"))
             if planner_llm.is_enabled():
                 try:
-                    descriptions = _llm_plan_tasks(planner_llm, state["prompt"], workspace_context, registry=registry)
+                    descriptions = _llm_plan_tasks(planner_llm, state["prompt"], workspace_context, registry=registry, active_workflows=active_workflows)
                     planning_notes.append(f"Task planning used {llm_manager.describe('planner')}.")
                 except LLMError as exc:
                     planning_notes.append(f"Planner fallback: {exc}")
@@ -498,7 +507,7 @@ def build_main_graph(
         router_llm = ensure_traced_llm_client(llm_manager.resolve("router"))
         if router_llm.is_enabled() and state["tasks"]:
             try:
-                llm_assignments = _llm_route_tasks(router_llm, registry, state["tasks"], workspace_context)
+                llm_assignments = _llm_route_tasks(router_llm, registry, state["tasks"], workspace_context, active_workflows=active_workflows)
                 notes.append(f"Task routing used {llm_manager.describe('router')}.")
             except LLMError as exc:
                 notes.append(f"Router fallback: {exc}")
@@ -509,7 +518,7 @@ def build_main_graph(
             workflow_name = (
                 assignment.get("workflow_name")
                 if assignment and assignment.get("supported")
-                else _fallback_route_task(registry, task["description"])
+                else _fallback_route_task(registry, task["description"], active_workflows=active_workflows)
             )
             if workflow_name is None:
                 skip_reason = (

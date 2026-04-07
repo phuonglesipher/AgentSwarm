@@ -20,6 +20,11 @@ class AgentSwarmConfig:
     doc_roots: tuple[str, ...] = ("docs", "design")
     test_roots: tuple[str, ...] = ("tests",)
     exclude_roots: tuple[str, ...] = ("AgentSwarm", ".git", ".agentswarm/runs", ".agentswarm/memory")
+    active_workflows: tuple[str, ...] | None = (
+        "triage-performance-workflow",
+        "gameplay-engineer-workflow",
+        "investigate-crash-workflow",
+    )
     memory_namespaces: tuple[str, ...] = ("shared", "project", "agentswarm")
 
 
@@ -110,6 +115,7 @@ def load_agentswarm_config(paths: RuntimePaths) -> AgentSwarmConfig:
         doc_roots=doc_roots,
         test_roots=test_roots,
         exclude_roots=exclude_roots,
+        active_workflows=_to_tuple_of_strings(data.get("active_workflows"), None),
         memory_namespaces=_to_tuple_of_strings(data.get("memory_namespaces"), defaults.memory_namespaces),
     )
 
