@@ -7,6 +7,7 @@ from typing import Any
 from langgraph.graph import END, START, StateGraph
 from typing_extensions import NotRequired, TypedDict
 
+from core.decision import Branch, DecisionEngine, DecisionProfile
 from core.graph_logging import trace_graph_node, trace_route_decision
 from core.llm import CodexCliLLMClient, LLMError
 from core.executor import (
@@ -745,8 +746,29 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
             "summary": summary,
         }
 
-    def review_gate(state: InvestigationLoopState) -> str:
-        return "investigate" if state["loop_should_continue"] else END
+    _review_gate_profile = DecisionProfile(
+        system_id="review_gate",
+        branches=(
+            Branch("investigate", "Review found gaps — investigation needs another round"),
+            Branch("finish", "Investigation is complete and approved", is_default=True, target=END),
+        ),
+        context_instruction=(
+            "Decide whether the investigation loop should continue. "
+            "If loop_should_continue is True or findings are incomplete, choose 'investigate'. "
+            "If the investigation is thorough and approved, choose 'finish'."
+        ),
+        state_summarizer=lambda s: (
+            f"loop_should_continue={s.get('loop_should_continue')}\n"
+            f"review_score={s.get('review_score')}\n"
+            f"review_round={s.get('review_round')}\n"
+            f"loop_status={s.get('loop_status')}\n"
+            f"loop_reason={s.get('loop_reason')}"
+        ),
+        effort="low",
+    )
+    _review_decision = DecisionEngine(
+        profile=_review_gate_profile, context=context, metadata=metadata,
+    )
 
     graph = StateGraph(InvestigationLoopState)
     graph.add_node("investigate", trace_graph_node(graph_name=graph_name, node_name="investigate", node_fn=investigate))
@@ -763,9 +785,5 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
     graph.add_edge("investigate", "request_review")
     graph.add_edge("request_review", "template-investigation-reviewer-workflow")
     graph.add_edge("template-investigation-reviewer-workflow", "capture_review_result")
-    graph.add_conditional_edges(
-        "capture_review_result",
-        trace_route_decision(graph_name=graph_name, router_name="review_gate", route_fn=review_gate),
-        {"investigate": "investigate", END: END},
-    )
+    _review_decision.wire_edges(graph, "capture_review_result", graph_name=graph_name)
     return graph.compile()

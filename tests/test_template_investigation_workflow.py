@@ -6,6 +6,7 @@ import unittest
 
 from core.config_loader import load_agentswarm_config, load_project_manifest
 from core.host_setup import initialize_host_project
+from core.llm import LLMError
 from core.workflow_loader import load_workflows
 
 
@@ -58,6 +59,16 @@ class LoopingInvestigationLLMClient:
 
     def describe(self) -> str:
         return "looping investigation test client"
+
+    def generate_json(
+        self, *, instructions: str, input_text: str, schema_name: str, schema: dict, effort: str | None = None,
+    ) -> dict:
+        del effort
+        if schema_name.startswith("decision_"):
+            if "loop_should_continue=True" in input_text:
+                return {"choice": "investigate", "reasoning": "loop_should_continue is True"}
+            return {"choice": "finish", "reasoning": "investigation complete"}
+        raise LLMError(f"Unsupported schema: {schema_name}")
 
     def generate_text(self, *, instructions: str, input_text: str, effort: str | None = None) -> str:
         del effort
@@ -234,6 +245,16 @@ class ProcessOnlyReviewLLMClient:
     def describe(self) -> str:
         return "process-only review test client"
 
+    def generate_json(
+        self, *, instructions: str, input_text: str, schema_name: str, schema: dict, effort: str | None = None,
+    ) -> dict:
+        del effort
+        if schema_name.startswith("decision_"):
+            if "loop_should_continue=True" in input_text:
+                return {"choice": "investigate", "reasoning": "loop_should_continue is True"}
+            return {"choice": "finish", "reasoning": "investigation complete"}
+        raise LLMError(f"Unsupported schema: {schema_name}")
+
     def generate_text(self, *, instructions: str, input_text: str, effort: str | None = None) -> str:
         del input_text, effort
         if "Investigate the host project root like a senior engineer" in instructions:
@@ -340,6 +361,16 @@ class NonePrefixedApprovalLLMClient:
 
     def describe(self) -> str:
         return "none-prefixed approval test client"
+
+    def generate_json(
+        self, *, instructions: str, input_text: str, schema_name: str, schema: dict, effort: str | None = None,
+    ) -> dict:
+        del effort
+        if schema_name.startswith("decision_"):
+            if "loop_should_continue=True" in input_text:
+                return {"choice": "investigate", "reasoning": "loop_should_continue is True"}
+            return {"choice": "finish", "reasoning": "investigation complete"}
+        raise LLMError(f"Unsupported schema: {schema_name}")
 
     def generate_text(self, *, instructions: str, input_text: str, effort: str | None = None) -> str:
         del input_text, effort

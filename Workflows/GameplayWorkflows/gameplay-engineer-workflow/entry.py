@@ -14,6 +14,7 @@ from typing import Any
 from langgraph.graph import END, START, StateGraph
 from typing_extensions import NotRequired, TypedDict
 
+from core.decision import Branch, DecisionEngine, DecisionProfile
 from core.graph_logging import trace_graph_node, trace_route_decision
 from core.llm import LLMError
 from core.executor import (
@@ -2906,14 +2907,37 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
             "summary": f"{metadata.name} never reached gameplay plan approval.",
         }
 
-    def evaluate_investigation_route(state: EngineerState) -> str:
-        if state["task_type"] == "non_gameplay":
-            return "prepare_investigation_blocked_delivery"
-        if state["active_loop_should_continue"]:
-            return "request_investigation"
-        if not state["investigation_approved"]:
-            return "prepare_investigation_blocked_delivery"
-        return "build_design_doc" if state["task_type"] in {"feature", "maintenance"} else "build_bug_context_doc"
+    _investigation_route_profile = DecisionProfile(
+        system_id="evaluate_investigation_route",
+        branches=(
+            Branch("request_investigation", "Investigation needs more rounds — findings are incomplete or low confidence"),
+            Branch("build_design_doc", "Investigation approved for a feature or maintenance task — produce design doc"),
+            Branch("build_bug_context_doc", "Investigation approved for a bug fix — produce bug context doc"),
+            Branch("prepare_investigation_blocked_delivery", "Investigation failed, stagnated, or task is out of scope — exit blocked", is_default=True),
+        ),
+        context_instruction=(
+            "Route a gameplay engineering investigation to its next phase. "
+            "If active_loop_should_continue is True, choose 'request_investigation'. "
+            "If investigation_approved is False and loop is done, choose 'prepare_investigation_blocked_delivery'. "
+            "If investigation_approved is True, pick the doc type: feature/maintenance -> build_design_doc, bug -> build_bug_context_doc."
+        ),
+        state_summarizer=lambda s: (
+            f"task_type={s.get('task_type')}\n"
+            f"active_loop_should_continue={s.get('active_loop_should_continue')}\n"
+            f"investigation_approved={s.get('investigation_approved')}\n"
+            f"investigation_score={s.get('investigation_score')}\n"
+            f"investigation_round={s.get('investigation_round')}\n"
+            f"investigation_loop_status={s.get('investigation_loop_status')}\n"
+            f"investigation_loop_reason={s.get('investigation_loop_reason')}\n"
+            f"investigation_root_cause={str(s.get('investigation_root_cause', ''))[:200]}\n"
+            f"investigation_summary={str(s.get('investigation_summary', ''))[:200]}\n"
+            f"investigation_blocking_issues={s.get('investigation_blocking_issues', [])}"
+        ),
+        effort="low",
+    )
+    _investigation_decision = DecisionEngine(
+        profile=_investigation_route_profile, context=context, metadata=metadata,
+    )
 
     def after_design_doc(state: EngineerState) -> str:
         return "plan_work" if state["implementation_requested"] else "prepare_investigation_delivery"
@@ -2921,12 +2945,35 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
     def after_bug_context_doc(state: EngineerState) -> str:
         return "implement_code" if state["implementation_requested"] else "prepare_investigation_delivery"
 
-    def after_review(state: EngineerState) -> str:
-        if state["review_approved"]:
-            return "implement_code"
-        if state["review_loop_should_continue"]:
-            return "revise_plan"
-        return "prepare_review_blocked_delivery"
+    _review_route_profile = DecisionProfile(
+        system_id="after_review",
+        branches=(
+            Branch("implement_code", "Review passed — proceed to code implementation"),
+            Branch("revise_plan", "Review found fixable issues — revise the plan and re-submit"),
+            Branch("prepare_review_blocked_delivery", "Review loop exhausted or stagnated — deliver blocked", is_default=True),
+        ),
+        context_instruction=(
+            "Route after a gameplay plan review. "
+            "If review_approved is True, choose 'implement_code'. "
+            "If review found issues but the loop should continue, choose 'revise_plan'. "
+            "If the review loop is done and review not approved, choose 'prepare_review_blocked_delivery'."
+        ),
+        state_summarizer=lambda s: (
+            f"review_approved={s.get('review_approved')}\n"
+            f"review_score={s.get('review_score')}\n"
+            f"review_round={s.get('review_round')}\n"
+            f"review_loop_should_continue={s.get('review_loop_should_continue')}\n"
+            f"review_loop_status={s.get('review_loop_status')}\n"
+            f"review_loop_reason={s.get('review_loop_reason')}\n"
+            f"review_feedback={str(s.get('review_feedback', ''))[:300]}\n"
+            f"review_blocking_issues={s.get('review_blocking_issues', [])}\n"
+            f"review_improvement_actions={s.get('review_improvement_actions', [])}"
+        ),
+        effort="low",
+    )
+    _review_decision = DecisionEngine(
+        profile=_review_route_profile, context=context, metadata=metadata,
+    )
 
     def after_post_implementation_gate(state: EngineerState) -> str:
         if state["implementation_medium"] == "blueprint":
@@ -2972,23 +3019,14 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
     graph.add_edge("prepare_investigation_strategy", "simulate_engineer_investigation")
     graph.add_edge("simulate_engineer_investigation", "assess_implementation_strategy")
     graph.add_edge("assess_implementation_strategy", "evaluate_investigation")
-    graph.add_conditional_edges(
-        "evaluate_investigation",
-        trace_route_decision(graph_name=graph_name, router_name="evaluate_investigation_route", route_fn=evaluate_investigation_route),
-        {
-            "request_investigation": "request_investigation",
-            "build_design_doc": "build_design_doc",
-            "build_bug_context_doc": "build_bug_context_doc",
-            "prepare_investigation_blocked_delivery": "prepare_investigation_blocked_delivery",
-        },
-    )
+    _investigation_decision.wire_edges(graph, "evaluate_investigation", graph_name=graph_name)
     graph.add_conditional_edges("build_design_doc", after_design_doc, {"plan_work": "plan_work", "prepare_investigation_delivery": "prepare_investigation_delivery"})
     graph.add_conditional_edges("build_bug_context_doc", after_bug_context_doc, {"implement_code": "implement_code", "prepare_investigation_delivery": "prepare_investigation_delivery"})
     graph.add_edge("plan_work", "request_review")
     graph.add_edge("request_review", "enter_review_subgraph")
     graph.add_edge("enter_review_subgraph", "gameplay-reviewer-workflow")
     graph.add_edge("gameplay-reviewer-workflow", "capture_review_result")
-    graph.add_conditional_edges("capture_review_result", after_review, {"implement_code": "implement_code", "revise_plan": "revise_plan", "prepare_review_blocked_delivery": "prepare_review_blocked_delivery"})
+    _review_decision.wire_edges(graph, "capture_review_result", graph_name=graph_name)
     graph.add_edge("revise_plan", "request_review")
     graph.add_edge("implement_code", "post_implementation_gate")
     graph.add_conditional_edges("post_implementation_gate", after_post_implementation_gate, {"prepare_delivery": "prepare_delivery", "request_repair_validation": "request_repair_validation"})

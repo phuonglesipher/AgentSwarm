@@ -12,15 +12,16 @@ Deployable to any UE project as a host — not tied to a specific game.
 
 Main graph (`core/main_graph.py`) decomposes prompts → tasks → workflow dispatch → results.
 
-Three engine abstractions drive all workflow logic:
+Four engine abstractions drive all workflow logic:
 
 | Engine | Files | Role |
 |--------|-------|------|
 | ReviewEngine | `core/review/engine.py`, `profile.py` | LLM-scored review with criteria, hard blockers, process filtering |
 | PlanEngine | `core/plan/engine.py`, `profile.py` | Strategy-driven plan generation with fallback templates |
 | Scoring | `core/scoring/engine.py` | ScorePolicy + MAD confidence, normalizes rubric to 0-100 |
+| DecisionEngine | `core/decision/engine.py`, `profile.py` | LLM-powered graph routing with branch descriptions, fallback to default |
 
-Each engine is configured by a **frozen Profile dataclass** (ReviewProfile, PlanProfile). Never subclass engines; configure via profiles.
+Each engine is configured by a **frozen Profile dataclass** (ReviewProfile, PlanProfile, DecisionProfile). Never subclass engines; configure via profiles.
 
 ## Quality Loop Philosophy
 
