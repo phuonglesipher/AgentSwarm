@@ -8,7 +8,7 @@ if errorlevel 1 exit /b 1
 %PYTHON_BIN% -m pip install --upgrade pip
 if errorlevel 1 exit /b 1
 
-%PYTHON_BIN% -m pip install "langgraph>=1.1,<2" "langchain-core>=1.2,<2" "minidump>=0.0.22"
+%PYTHON_BIN% -m pip install "langgraph>=1.1,<2" "langchain-core>=1.2,<2" "minidump>=0.0.22" "gdown>=5.0" "google-api-python-client>=2.0" "google-auth>=2.0" "lz4>=4.0"
 if errorlevel 1 exit /b 1
 
 %PYTHON_BIN% -m core.host_setup --agent-root "%~dp0"
