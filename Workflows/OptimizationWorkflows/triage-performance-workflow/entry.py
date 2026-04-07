@@ -119,8 +119,8 @@ def _summarize_profiling_state(state: dict[str, Any]) -> str:
             f"{d['thread']} {d['pct']}%" for d in bd[:4]
         ))
 
-    if not lines:
-        lines.append(f"Task prompt: {state.get('task_prompt', '')[:500]}")
+    # Always include task prompt so LLM can judge intent (analyze-only vs optimize)
+    lines.append(f"\nUser task prompt: {state.get('task_prompt', '')[:500]}")
 
     return "\n".join(lines)
 
@@ -176,12 +176,25 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
                 ),
                 target="dispatch_all",
             ),
+            Branch(
+                name="analysis_only",
+                description=(
+                    "The user only wants profiling analysis — they asked to 'analyze', "
+                    "'check performance', 'profile', or 'look at the trace' without requesting "
+                    "optimization suggestions or fixes. Return the profiling results directly "
+                    "without dispatching to any optimization workflow."
+                ),
+                target="report_analysis",
+            ),
         ),
         context_instruction=(
             "You are a performance triage expert for Unreal Engine 5. "
             "Given profiling data (bound analysis, thread breakdown, GPU pipeline, "
-            "bookmarks), determine which optimization domain to focus on. "
-            "Choose the domain that will have the most impact on frame time. "
+            "bookmarks) AND the user's task prompt, decide the next step.\n"
+            "If the user only wants analysis/profiling results (e.g., 'analyze this trace', "
+            "'check FPS', 'profile this capture') → choose analysis_only.\n"
+            "If the user wants optimization/fixes (e.g., 'optimize performance', "
+            "'fix FPS drops', 'improve frame time') → choose the appropriate domain.\n"
             "Choose multi_domain only when multiple areas are clearly over budget."
         ),
         state_summarizer=_summarize_profiling_state,
@@ -256,7 +269,10 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
         )
         choice = decision_engine.decide(state)
 
-        if choice == "dispatch_all":
+        if choice == "report_analysis":
+            # Analysis-only: skip optimization workflows
+            domains = ["__analysis_only__"]
+        elif choice == "dispatch_all":
             domains = list(CHILD_WORKFLOWS.keys())
         elif choice in ("dispatch_gamethread", "dispatch_rendering", "dispatch_streaming"):
             domain = choice.replace("dispatch_", "")
@@ -368,6 +384,54 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
             "summary": summary,
         }
 
+    # -- Node: report_analysis -----------------------------------------
+
+    def report_analysis(state: TriageState) -> dict[str, Any]:
+        """Return profiling analysis directly without dispatching optimization workflows."""
+        artifact_path = _artifact_dir(context, metadata, state)
+        profiling_text = str(state.get("profiling_analysis", "")).strip()
+        data = state.get("profiling_data", {})
+
+        sections: list[str] = ["# Performance Analysis Report\n"]
+
+        ba = data.get("bound_analysis", {})
+        if ba:
+            sections.append(f"**Bound:** {ba.get('primary_bound', '?')} — {ba.get('bound_by', '?')}")
+            sections.append(f"{ba.get('explanation', '')}\n")
+
+        if profiling_text:
+            sections.append("## Profiling Data\n")
+            sections.append(profiling_text)
+
+        report_text = "\n".join(sections)
+        report_file = artifact_path / "analysis_report.md"
+        report_file.write_text(report_text, encoding="utf-8")
+
+        bound_summary = ""
+        if ba:
+            bound_summary = f" {ba.get('primary_bound', '?')}-bound ({ba.get('bound_by', '?')}). "
+
+        summary = (
+            f"Performance analysis completed.{bound_summary}"
+            f"See {report_file.name} for full profiling data."
+        )
+
+        return {
+            "final_report": {
+                "classified_domains": ["analysis_only"],
+                "report_path": str(report_file),
+            },
+            "summary": summary,
+        }
+
+    # -- Routing function for classify → dispatch or report ------------
+
+    def _route_after_classify(state: TriageState) -> str:
+        domains = state.get("classified_domains", [])
+        if domains == ["__analysis_only__"]:
+            return "report_analysis"
+        return "dispatch_domains"
+
     # -- Assemble graph ------------------------------------------------
 
     g = StateGraph(TriageState)
@@ -376,12 +440,17 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
     g.add_node("triage_classify", triage_classify)
     g.add_node("dispatch_domains", dispatch_domains)
     g.add_node("collect_results", collect_results)
+    g.add_node("report_analysis", report_analysis)
 
     g.add_edge(START, "triage_analyze")
     g.add_edge("triage_analyze", "triage_classify")
-    g.add_edge("triage_classify", "dispatch_domains")
+    g.add_conditional_edges("triage_classify", _route_after_classify, {
+        "dispatch_domains": "dispatch_domains",
+        "report_analysis": "report_analysis",
+    })
     g.add_edge("dispatch_domains", "collect_results")
     g.add_edge("collect_results", END)
+    g.add_edge("report_analysis", END)
 
     return g
 
