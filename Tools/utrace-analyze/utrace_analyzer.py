@@ -1,8 +1,10 @@
 """Analysis functions for parsed UTrace captures.
 
 Produces structured dicts with performance metrics from each trace channel:
-CPU scope timing, GPU pass analysis, memory allocation tracking,
-counter values, and frame timing statistics.
+CPU scope timing (ms), frame summary, spike detection, per-thread breakdown,
+and memory/counter/GPU data.
+
+Output structure mirrors optick-analyze for consistency.
 """
 
 from __future__ import annotations
@@ -13,12 +15,18 @@ from collections import defaultdict
 from utrace_parser import UTraceCapture
 
 
+# ---------------------------------------------------------------------------
+# Public entry point
+# ---------------------------------------------------------------------------
+
 def analyze_utrace(
     capture: UTraceCapture,
     *,
     mode: str = "summary",
     top_n: int = 20,
     thread_names: list[str] | None = None,
+    scope_keywords: list[str] | None = None,
+    per_thread_top_n: int = 0,
     spike_threshold_ms: float = 0.0,
 ) -> dict:
     """Analyze a parsed UTrace capture.
@@ -28,12 +36,15 @@ def analyze_utrace(
         mode: Analysis mode — "summary", "cpu", "gpu", "memory", "counters", "all".
         top_n: Number of top items to return per category.
         thread_names: Filter CPU analysis to these thread names.
-        spike_threshold_ms: Report frame spikes above this threshold.
+        scope_keywords: Only include scopes whose name contains any keyword.
+        per_thread_top_n: When >0, group scopes by thread instead of global.
+        spike_threshold_ms: Report frame spikes above this threshold (e.g. 16.67).
 
     Returns:
         Dict with analysis results keyed by channel.
     """
     result: dict = {}
+    freq = capture.cpu_cycle_frequency
 
     # Always include metadata
     result["stream_info"] = {
@@ -53,17 +64,13 @@ def analyze_utrace(
     if capture.parse_errors:
         result["parse_errors"] = capture.parse_errors[:20]
 
-    # Event type catalog
-    result["event_types"] = [
-        {"uid": et.uid, "name": et.full_name, "fields": len(et.fields)}
-        for et in sorted(capture.event_types.values(), key=lambda e: e.uid)
-    ]
+    result["cpu_cycle_frequency"] = freq
 
     is_summary = mode == "summary"
     n = 5 if is_summary else top_n
 
     if mode in ("cpu", "all", "summary"):
-        cpu = _analyze_cpu(capture, n, thread_names)
+        cpu = _analyze_cpu(capture, n, thread_names, scope_keywords, per_thread_top_n)
         if cpu:
             result.update(cpu)
 
@@ -72,15 +79,23 @@ def analyze_utrace(
         if gpu:
             result.update(gpu)
 
-    if mode in ("memory", "all", "summary"):
+    if mode in ("memory", "all"):
         mem = _analyze_memory(capture, n)
         if mem:
             result.update(mem)
 
-    if mode in ("counters", "all", "summary"):
+    if mode in ("counters", "all"):
         counters = _analyze_counters(capture, n)
         if counters:
             result.update(counters)
+
+    if mode in ("bookmarks", "all"):
+        bookmarks = _analyze_bookmarks(capture, n)
+        if bookmarks:
+            result.update(bookmarks)
+
+    if mode == "summary" and capture.bookmarks:
+        result["bookmark_count"] = len(capture.bookmarks)
 
     if mode in ("cpu", "gpu", "all", "summary"):
         frames = _analyze_frames(capture, spike_threshold_ms)
@@ -94,16 +109,6 @@ def analyze_utrace(
             for tid, name in sorted(capture.thread_info.items())
         ]
 
-    # Bookmarks
-    if capture.bookmarks and mode in ("all", "summary"):
-        bm_list = []
-        for bm in capture.bookmarks[:50]:
-            spec_id = bm.get("spec_id", 0)
-            name = capture.bookmark_specs.get(spec_id, f"Bookmark_{spec_id}")
-            bm_list.append({"name": name, "timestamp": bm.get("timestamp", 0)})
-        if bm_list:
-            result["bookmarks"] = bm_list
-
     return result
 
 
@@ -111,13 +116,27 @@ def analyze_utrace(
 # CPU analysis
 # ---------------------------------------------------------------------------
 
+def _ticks_to_ms(ticks: int, freq: int) -> float:
+    if freq <= 0:
+        return 0.0
+    return (ticks / freq) * 1000.0
+
+
 def _analyze_cpu(
     capture: UTraceCapture,
     top_n: int,
     thread_names: list[str] | None,
+    scope_keywords: list[str] | None,
+    per_thread_top_n: int,
 ) -> dict | None:
     if not capture.cpu_scopes:
         return None
+
+    freq = capture.cpu_cycle_frequency
+    if freq <= 0:
+        return None
+
+    kw_lower = [kw.lower() for kw in scope_keywords if kw.strip()] if scope_keywords else []
 
     # Group scopes by thread
     scopes_by_thread: dict[int, list] = defaultdict(list)
@@ -127,68 +146,106 @@ def _analyze_cpu(
     # Build allowed thread IDs from names filter
     allowed_threads: set[int] | None = None
     if thread_names:
-        thread_name_lower = {n.lower().strip() for n in thread_names}
+        thread_name_lower = {n.lower().strip('\x00').strip() for n in thread_names}
         allowed_threads = set()
         for tid, name in capture.thread_info.items():
-            if name.lower().strip() in thread_name_lower:
+            clean = name.lower().strip('\x00').strip()
+            if clean in thread_name_lower:
                 allowed_threads.add(tid)
 
+    # Maximum valid duration: 60 seconds (filters out startup/pre-trace artifacts)
+    max_valid_ticks = 60 * freq
+
     # Calculate scope durations per thread using stack matching
-    scope_stats: dict[int, dict] = defaultdict(lambda: {
-        "total_ticks": 0, "count": 0, "min_ticks": float("inf"), "max_ticks": 0,
-    })
+    # Key: (thread_key, spec_id) where thread_key is tid or None (global)
+    accum: dict[tuple[int | None, int], list] = {}
     per_thread_total: dict[int, int] = defaultdict(int)
 
     for tid, scopes in scopes_by_thread.items():
         if allowed_threads is not None and tid not in allowed_threads:
             continue
 
+        thread_key = tid if per_thread_top_n > 0 else None
         stack: list[tuple[int, int]] = []  # (spec_id, enter_timestamp)
+
         for spec_id, timestamp, is_enter in scopes:
             if is_enter:
                 stack.append((spec_id, timestamp))
             elif stack:
                 enter_spec_id, enter_ts = stack.pop()
                 duration = timestamp - enter_ts
-                if duration > 0:
-                    stats = scope_stats[enter_spec_id]
-                    stats["total_ticks"] += duration
-                    stats["count"] += 1
-                    if duration < stats["min_ticks"]:
-                        stats["min_ticks"] = duration
-                    if duration > stats["max_ticks"]:
-                        stats["max_ticks"] = duration
-                    per_thread_total[tid] += duration
+                if duration <= 0 or duration > max_valid_ticks:
+                    continue
 
-    if not scope_stats:
+                per_thread_total[tid] += duration
+
+                key = (thread_key, enter_spec_id)
+                entry = accum.get(key)
+                if entry is None:
+                    accum[key] = [duration, 1, duration]  # [total, count, max]
+                else:
+                    entry[0] += duration
+                    entry[1] += 1
+                    if duration > entry[2]:
+                        entry[2] = duration
+
+    if not accum:
         return None
 
-    # Sort by total time, take top_n
-    sorted_specs = sorted(scope_stats.items(), key=lambda x: x[1]["total_ticks"], reverse=True)
-
-    hottest = []
-    for spec_id, stats in sorted_specs[:top_n]:
+    def _build_scope_entry(spec_id: int, total_ticks: int, count: int, max_ticks: int) -> dict | None:
         name = capture.cpu_scope_specs.get(spec_id, f"Scope_{spec_id}")
-        count = stats["count"]
-        hottest.append({
+        if kw_lower and not any(kw in name.lower() for kw in kw_lower):
+            return None
+        total_ms = _ticks_to_ms(total_ticks, freq)
+        avg_ms = total_ms / count
+        max_ms = _ticks_to_ms(max_ticks, freq)
+        return {
             "name": name,
             "spec_id": spec_id,
-            "total_ticks": stats["total_ticks"],
-            "count": count,
-            "avg_ticks": stats["total_ticks"] // count if count else 0,
-            "min_ticks": stats["min_ticks"] if stats["min_ticks"] != float("inf") else 0,
-            "max_ticks": stats["max_ticks"],
-        })
+            "total_ms": round(total_ms, 3),
+            "avg_ms": round(avg_ms, 3),
+            "max_ms": round(max_ms, 3),
+            "calls": count,
+        }
 
-    result: dict = {"cpu_hottest_scopes": hottest, "cpu_total_scopes": len(scope_stats)}
+    result: dict = {}
 
-    # Per-thread breakdown
+    if per_thread_top_n > 0:
+        # Group by thread
+        thread_groups: dict[int, list[dict]] = {}
+        for (tidx, spec_id), (total_ticks, count, max_ticks) in accum.items():
+            entry = _build_scope_entry(spec_id, total_ticks, count, max_ticks)
+            if entry is None:
+                continue
+            assert tidx is not None
+            thread_groups.setdefault(tidx, []).append(entry)
+
+        per_thread_scopes: dict[str, list[dict]] = {}
+        for tidx, scopes in thread_groups.items():
+            name = capture.thread_info.get(tidx, f"Thread_{tidx}").strip('\x00')
+            scopes.sort(key=lambda x: x["total_ms"], reverse=True)
+            per_thread_scopes[name] = scopes[:per_thread_top_n]
+        result["per_thread_scopes"] = per_thread_scopes
+    else:
+        # Global hottest scopes
+        hottest = []
+        for (_tidx, spec_id), (total_ticks, count, max_ticks) in accum.items():
+            entry = _build_scope_entry(spec_id, total_ticks, count, max_ticks)
+            if entry is not None:
+                hottest.append(entry)
+        hottest.sort(key=lambda x: x["total_ms"], reverse=True)
+        result["hottest_scopes"] = hottest[:top_n]
+
+    # Per-thread time breakdown
     thread_breakdown = []
     for tid, total in sorted(per_thread_total.items(), key=lambda x: x[1], reverse=True):
-        name = capture.thread_info.get(tid, f"Thread_{tid}")
-        thread_breakdown.append({"name": name, "thread_id": tid, "total_ticks": total})
+        name = capture.thread_info.get(tid, f"Thread_{tid}").strip('\x00')
+        thread_breakdown.append({
+            "name": name,
+            "total_ms": round(_ticks_to_ms(total, freq), 2),
+        })
     if thread_breakdown:
-        result["cpu_per_thread_breakdown"] = thread_breakdown
+        result["thread_breakdown"] = thread_breakdown
 
     result["cpu_scope_spec_count"] = len(capture.cpu_scope_specs)
     result["cpu_scope_event_count"] = len(capture.cpu_scopes)
@@ -203,6 +260,8 @@ def _analyze_cpu(
 def _analyze_gpu(capture: UTraceCapture, top_n: int) -> dict | None:
     if not capture.gpu_events:
         return None
+
+    freq = capture.cpu_cycle_frequency
 
     # Pair begin/end events by queue
     queue_stacks: dict[int, list] = defaultdict(list)
@@ -223,26 +282,47 @@ def _analyze_gpu(capture: UTraceCapture, top_n: int) -> dict | None:
                 pass_durations[begin_spec].append(duration)
 
     if not pass_durations:
-        return {"gpu_event_count": len(capture.gpu_events), "gpu_queues": list(capture.gpu_queue_names.values())}
+        queue_ids = set()
+        for e in capture.gpu_events:
+            qid = e.get("queue_id", 0)
+            if isinstance(qid, int):
+                queue_ids.add(qid)
+        return {
+            "gpu_event_count": len(capture.gpu_events),
+            "gpu_queues": [
+                capture.gpu_queue_names.get(qid, f"Queue_{qid}")
+                for qid in sorted(queue_ids)
+            ],
+        }
 
-    # Aggregate pass timing
     pass_stats = []
-    for spec_id, durations in sorted(pass_durations.items(), key=lambda x: sum(x[1]), reverse=True)[:top_n]:
+    for spec_id, durations in sorted(
+        pass_durations.items(), key=lambda x: sum(x[1]), reverse=True
+    )[:top_n]:
         name = capture.gpu_breadcrumb_specs.get(spec_id, f"GpuPass_{spec_id}")
         total = sum(durations)
         count = len(durations)
         pass_stats.append({
             "name": name,
             "spec_id": spec_id,
-            "total_ticks": total,
+            "total_ms": round(_ticks_to_ms(total, freq), 3) if freq > 0 else 0,
             "count": count,
-            "avg_ticks": total // count if count else 0,
+            "avg_ms": round(_ticks_to_ms(total // count, freq), 3) if freq > 0 and count else 0,
         })
+
+    queue_ids = set()
+    for e in capture.gpu_events:
+        qid = e.get("queue_id", 0)
+        if isinstance(qid, int):
+            queue_ids.add(qid)
 
     return {
         "gpu_pass_timing": pass_stats,
         "gpu_event_count": len(capture.gpu_events),
-        "gpu_queues": list(capture.gpu_queue_names.values()),
+        "gpu_queues": [
+            capture.gpu_queue_names.get(qid, f"Queue_{qid}")
+            for qid in sorted(queue_ids)
+        ],
     }
 
 
@@ -254,14 +334,11 @@ def _analyze_memory(capture: UTraceCapture, top_n: int) -> dict | None:
     if not capture.memory_events:
         return None
 
-    # Walk events, track live allocations
-    live: dict[int, int] = {}  # address -> size
+    live: dict[int, int] = {}
     current_bytes = 0
     peak_bytes = 0
     alloc_count = 0
     free_count = 0
-    heap_usage: dict[int, int] = defaultdict(int)
-    tag_usage: dict[int, int] = defaultdict(int)
 
     for evt in capture.memory_events:
         kind = evt.get("kind", "")
@@ -275,37 +352,19 @@ def _analyze_memory(capture: UTraceCapture, top_n: int) -> dict | None:
                 alloc_count += 1
                 if current_bytes > peak_bytes:
                     peak_bytes = current_bytes
-
         elif kind in ("free", "realloc_free"):
             freed = live.pop(addr, 0)
             current_bytes -= freed
             free_count += 1
 
-    result: dict = {
-        "memory_peak_bytes": peak_bytes,
+    return {
         "memory_peak_mb": round(peak_bytes / (1024 * 1024), 2),
-        "memory_current_bytes": current_bytes,
         "memory_current_mb": round(current_bytes / (1024 * 1024), 2),
         "memory_alloc_count": alloc_count,
         "memory_free_count": free_count,
         "memory_live_allocations": len(live),
-        "memory_events_total": len(capture.memory_events),
         "memory_events_truncated": capture.memory_events_truncated,
     }
-
-    # Heap breakdown
-    if capture.heap_specs:
-        result["memory_heap_specs"] = {
-            str(k): v for k, v in capture.heap_specs.items()
-        }
-
-    # Tag breakdown
-    if capture.tag_specs:
-        result["memory_tag_specs"] = {
-            str(k): v for k, v in capture.tag_specs.items()
-        }
-
-    return result
 
 
 # ---------------------------------------------------------------------------
@@ -316,7 +375,6 @@ def _analyze_counters(capture: UTraceCapture, top_n: int) -> dict | None:
     if not capture.counter_values:
         return None
 
-    # Group by counter ID
     by_counter: dict[int, list] = defaultdict(list)
     for cv in capture.counter_values:
         cid = cv.get("counter_id", 0)
@@ -357,9 +415,14 @@ def _analyze_frames(
     if not capture.frame_boundaries:
         return None
 
-    # Pair begin/end by frame type
-    open_frames: dict[int, int] = {}  # frame_type -> begin_cycle
-    frame_durations: list[int] = []  # in ticks
+    freq = capture.cpu_cycle_frequency
+    if freq <= 0:
+        return None
+
+    # Pair begin/end by frame type, compute durations in ms
+    open_frames: dict[int, int] = {}
+    frame_times_ms: list[float] = []
+    max_valid_ticks = 10 * freq  # 10 seconds max frame (filters corrupt data)
 
     for frame_type, cycle, is_begin in capture.frame_boundaries:
         if is_begin:
@@ -367,45 +430,95 @@ def _analyze_frames(
         elif frame_type in open_frames:
             begin = open_frames.pop(frame_type)
             duration = cycle - begin
-            if duration > 0:
-                frame_durations.append(duration)
+            if 0 < duration < max_valid_ticks:
+                frame_times_ms.append(_ticks_to_ms(duration, freq))
 
-    if not frame_durations:
+    if not frame_times_ms:
         return None
 
-    # Stats in ticks (caller must convert to ms using cycle frequency if available)
-    sorted_durations = sorted(frame_durations)
-    total = len(sorted_durations)
-    p95_idx = int(total * 0.95)
-    p99_idx = int(total * 0.99)
+    sorted_times = sorted(frame_times_ms)
+    total = len(sorted_times)
+    avg = sum(frame_times_ms) / total
+    p95_idx = min(int(total * 0.95), total - 1)
+    p99_idx = min(int(total * 0.99), total - 1)
 
     frame_summary = {
         "total_frames": total,
-        "avg_ticks": sum(sorted_durations) // total,
-        "min_ticks": sorted_durations[0],
-        "max_ticks": sorted_durations[-1],
-        "median_ticks": sorted_durations[total // 2],
-        "p95_ticks": sorted_durations[min(p95_idx, total - 1)],
-        "p99_ticks": sorted_durations[min(p99_idx, total - 1)],
+        "avg_ms": round(avg, 2),
+        "min_ms": round(sorted_times[0], 2),
+        "max_ms": round(sorted_times[-1], 2),
+        "median_ms": round(sorted_times[total // 2], 2),
+        "p95_ms": round(sorted_times[p95_idx], 2),
+        "p99_ms": round(sorted_times[p99_idx], 2),
+        "frames_above_16ms": sum(1 for t in frame_times_ms if t > 16.667),
+        "frames_above_33ms": sum(1 for t in frame_times_ms if t > 33.333),
     }
 
     result: dict = {"frame_summary": frame_summary}
 
-    # Spike detection (in ticks — threshold conversion requires frequency)
-    if spike_threshold_ms > 0 and capture.cpu_cycle_frequency > 0:
-        threshold_ticks = int(spike_threshold_ms * capture.cpu_cycle_frequency / 1000)
+    # Spike detection
+    if spike_threshold_ms > 0:
         spikes = []
-        for i, d in enumerate(frame_durations):
-            if d > threshold_ticks:
-                spikes.append({
-                    "frame_index": i,
-                    "duration_ticks": d,
-                    "duration_ms": round(d * 1000 / capture.cpu_cycle_frequency, 3),
-                })
-        result["frame_spikes"] = spikes[:50]
-        result["frame_spike_count"] = len([d for d in frame_durations if d > threshold_ticks])
-        result["frame_spike_pct"] = round(
-            result["frame_spike_count"] / total * 100, 2
-        ) if total > 0 else 0
+        for i, t in enumerate(frame_times_ms):
+            if t > spike_threshold_ms:
+                spikes.append({"frame_index": i, "duration_ms": round(t, 2)})
+                if len(spikes) >= 50:
+                    break
+        spike_total = sum(1 for t in frame_times_ms if t > spike_threshold_ms)
+        result["frame_spikes"] = spikes
+        result["spike_count"] = spike_total
+        result["spike_pct"] = round(
+            (spike_total / total) * 100, 1
+        ) if total > 0 else 0.0
+
+    # Raw frame times (truncated for large captures)
+    max_raw = 2000
+    result["frame_times_ms"] = [round(t, 2) for t in frame_times_ms[:max_raw]]
+    if len(frame_times_ms) > max_raw:
+        result["frame_times_truncated"] = True
+        result["frame_times_total"] = len(frame_times_ms)
 
     return result
+
+
+# ---------------------------------------------------------------------------
+# Bookmark analysis
+# ---------------------------------------------------------------------------
+
+def _analyze_bookmarks(capture: UTraceCapture, top_n: int) -> dict | None:
+    if not capture.bookmarks:
+        return None
+
+    freq = capture.cpu_cycle_frequency
+
+    by_name: dict[str, list[int]] = defaultdict(list)
+    timeline: list[dict] = []
+
+    for bm in capture.bookmarks:
+        bp = bm.get("bookmark_point", 0)
+        ts = bm.get("timestamp", 0)
+        name = capture.bookmark_specs.get(bp, f"Bookmark_{bp}")
+
+        by_name[name].append(ts)
+        timeline.append({
+            "name": name,
+            "timestamp": ts,
+            "time_ms": round(_ticks_to_ms(ts, freq), 3) if freq > 0 else 0,
+        })
+
+    timeline.sort(key=lambda x: x["timestamp"])
+
+    bookmark_counts = sorted(
+        [{"name": name, "count": len(timestamps)}
+         for name, timestamps in by_name.items()],
+        key=lambda x: x["count"],
+        reverse=True,
+    )[:top_n]
+
+    return {
+        "bookmark_count": len(capture.bookmarks),
+        "bookmark_spec_count": len(capture.bookmark_specs),
+        "bookmark_counts_by_name": bookmark_counts,
+        "bookmark_timeline": timeline[:200],
+        "bookmark_timeline_truncated": len(timeline) > 200,
+    }
