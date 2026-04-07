@@ -273,6 +273,8 @@ class UTraceCapture:
     cpu_scopes: list[tuple[int, int, int, bool]] = field(default_factory=list)
     # (thread_id, spec_id, timestamp, is_enter)
     cpu_cycle_frequency: int = 0
+    # Per-thread running timestamp for EventBatch delta decoding (carries across batches)
+    _thread_cpu_timestamps: dict[int, int] = field(default_factory=dict)
 
     # GPU profiler
     gpu_events: list[dict] = field(default_factory=list)
@@ -476,11 +478,20 @@ def _handle_cpu_event_batch(
             timestamp = value >> 1
 
             if first:
-                # First timestamp is absolute
+                # First timestamp per batch is absolute (QPC cycle count).
                 last_timestamp = timestamp
                 first = False
+
+                # Detect pre-trace batches (timestamp before session start
+                # or backwards from the thread's last known good timestamp).
+                prev_good = capture._thread_cpu_timestamps.get(thread_id, 0)
+                if prev_good > 0 and timestamp < prev_good - 10_000_000:
+                    # Batch timestamp is more than 1 second before the last
+                    # good timestamp — skip entire batch (likely pre-trace
+                    # init events or stale buffer data).
+                    return
             else:
-                # Delta encoding
+                # Delta encoding from previous event
                 timestamp = last_timestamp + timestamp
                 last_timestamp = timestamp
 
@@ -492,6 +503,10 @@ def _handle_cpu_event_batch(
             capture.total_events += 1
     except EOFError:
         pass  # Truncated batch is fine
+
+    # Track last valid timestamp for anomaly detection in subsequent batches
+    if last_timestamp > capture._thread_cpu_timestamps.get(thread_id, 0):
+        capture._thread_cpu_timestamps[thread_id] = last_timestamp
 
 
 def _handle_memory_init(fields: dict, capture: UTraceCapture, **_) -> None:
@@ -570,23 +585,30 @@ def _handle_memory_marker(fields: dict, capture: UTraceCapture, **_) -> None:
 
 def _handle_gpu_queue_spec(fields: dict, capture: UTraceCapture, **_) -> None:
     queue_id = int(fields.get("QueueId", fields.get("Id", 0)))
-    name = str(fields.get("Name", f"Queue_{queue_id}"))
+    name = str(fields.get("TypeString", fields.get("Name", f"Queue_{queue_id}")))
     capture.gpu_queue_names[queue_id] = name
 
 
 def _handle_gpu_breadcrumb_spec(fields: dict, capture: UTraceCapture, **_) -> None:
     spec_id = int(fields.get("SpecId", fields.get("Id", 0)))
-    name = str(fields.get("Name", fields.get("Breadcrumb", "")))
+    name = str(fields.get("StaticName", fields.get("NameFormat", fields.get("Name", ""))))
     capture.gpu_breadcrumb_specs[spec_id] = name
 
 
 def _handle_gpu_event(
     fields: dict, capture: UTraceCapture, event_name: str, **_
 ) -> None:
+    # Begin events use GPUTimestampTOP, End events use GPUTimestampBOP,
+    # EventWait uses StartTime, fences use CPUTimestamp
+    timestamp = fields.get(
+        "GPUTimestampTOP", fields.get(
+        "GPUTimestampBOP", fields.get(
+        "CPUTimestamp", fields.get(
+        "StartTime", 0))))
     capture.gpu_events.append({
         "kind": event_name,
         "queue_id": fields.get("QueueId", 0),
-        "timestamp": fields.get("Timestamp", fields.get("TimestampGPU", 0)),
+        "timestamp": timestamp,
         "spec_id": fields.get("SpecId", None),
     })
 
@@ -628,15 +650,15 @@ def _handle_session(fields: dict, capture: UTraceCapture, **_) -> None:
 
 
 def _handle_bookmark_spec(fields: dict, capture: UTraceCapture, **_) -> None:
-    spec_id = int(fields.get("Id", 0))
-    name = str(fields.get("Name", ""))
-    capture.bookmark_specs[spec_id] = name
+    bookmark_point = fields.get("BookmarkPoint", fields.get("Id", 0))
+    name = str(fields.get("FormatString", fields.get("Name", "")))
+    capture.bookmark_specs[bookmark_point] = name
 
 
 def _handle_bookmark(fields: dict, capture: UTraceCapture, **_) -> None:
     capture.bookmarks.append({
-        "spec_id": fields.get("SpecId", 0),
-        "timestamp": fields.get("Cycle", fields.get("Timestamp", 0)),
+        "bookmark_point": fields.get("BookmarkPoint", fields.get("SpecId", 0)),
+        "timestamp": fields.get("Cycle", 0),
     })
 
 
@@ -650,8 +672,12 @@ def _handle_log(fields: dict, capture: UTraceCapture, **_) -> None:
 
 
 def _handle_new_trace_event(fields: dict, capture: UTraceCapture, **_) -> None:
+    # Only accept the first valid frequency.  Later calls from regular threads
+    # may dispatch here with misaligned data, producing garbage values.
+    if capture.cpu_cycle_frequency > 0:
+        return
     freq = fields.get("CycleFrequency", 0)
-    if isinstance(freq, (int, float)) and freq > 0:
+    if isinstance(freq, (int, float)) and 1_000_000 <= freq <= 100_000_000_000:
         capture.cpu_cycle_frequency = int(freq)
 
 
