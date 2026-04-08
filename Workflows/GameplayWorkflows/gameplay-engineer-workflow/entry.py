@@ -645,6 +645,18 @@ def _normalize_relative_hits(
     return results
 
 
+_KEYWORD_STOP_WORDS = frozenset({
+    "the", "and", "for", "with", "from", "that", "this", "are", "was", "were",
+    "has", "had", "have", "not", "but", "all", "can", "will", "its", "been",
+    "into", "each", "also", "should", "would", "could", "does", "did", "may",
+    "bug", "fix", "issue", "analyze", "investigate", "identify", "create",
+    "detailed", "across", "deliver", "complete", "explanation", "changes",
+    "made", "root", "causes", "layers", "plan", "code",
+})
+
+_MAX_FILE_HITS = 50
+
+
 def _find_local_code_hits(
     task_prompt: str,
     scope_root: Path,
@@ -653,7 +665,7 @@ def _find_local_code_hits(
     exclude_roots: tuple[str, ...],
 ) -> tuple[list[str], list[str]]:
     """Walk source/test roots and find files whose names match keywords from the task prompt."""
-    keywords = {word.lower() for word in task_prompt.split() if len(word) >= 3}
+    keywords = {word.lower() for word in task_prompt.split() if len(word) >= 3} - _KEYWORD_STOP_WORDS
     if not keywords:
         return [], []
 
@@ -697,6 +709,8 @@ def _find_local_code_hits(
                     test_hits.append(relative)
                 else:
                     source_hits.append(relative)
+                if len(source_hits) + len(test_hits) >= _MAX_FILE_HITS:
+                    return source_hits, test_hits
 
     return source_hits, test_hits
 
@@ -709,7 +723,7 @@ def _find_local_hits_by_suffix(
     allowed_suffixes: set[str],
 ) -> list[str]:
     """Walk search_roots and find files matching keywords from the task prompt with specific suffixes."""
-    keywords = {word.lower() for word in task_prompt.split() if len(word) >= 3}
+    keywords = {word.lower() for word in task_prompt.split() if len(word) >= 3} - _KEYWORD_STOP_WORDS
     if not keywords:
         return []
     hits: list[str] = []
@@ -735,6 +749,8 @@ def _find_local_hits_by_suffix(
                 relative = child.relative_to(scope_root).as_posix()
                 if relative not in hits:
                     hits.append(relative)
+                    if len(hits) >= _MAX_FILE_HITS:
+                        return hits
     return hits
 
 
