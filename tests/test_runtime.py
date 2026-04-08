@@ -240,6 +240,8 @@ class AlwaysBadLLMClient:
                 "task_type": "feature",
                 "reason": "Intentionally returning a non-actionable feature classification for review-cap testing.",
             }
+        if schema_name == "decision_work_scope_route":
+            return {"choice": "plan_and_build", "reasoning": "Feature request needs planning and implementation."}
         if schema_name == "gameplay_engineering_context":
             return _investigation_payload(
                 doc_hits=["Workflows/GameplayWorkflows/gameplay-engineer-workflow/Workflow.md"],
@@ -456,6 +458,11 @@ class AlmostApprovedLLMClient:
                     if feature_prompt
                     else "The prompt is clearly about fixing unintended gameplay behavior."
                 ),
+            }
+        if schema_name == "decision_work_scope_route":
+            return {
+                "choice": "plan_and_build" if feature_prompt else "bugfix_and_fix",
+                "reasoning": "Route based on task classification.",
             }
         if schema_name == "gameplay_engineering_context":
             return _investigation_payload(
@@ -742,6 +749,8 @@ class ContextOnlyInvestigationLLMClient:
                 "task_type": "bugfix",
                 "reason": "The prompt fixes unintended gameplay behavior.",
             }
+        if schema_name == "decision_work_scope_route":
+            return {"choice": "bugfix_and_fix", "reasoning": "Bugfix request needs investigation and implementation."}
         if schema_name == "gameplay_engineering_context":
             return _investigation_payload(
                 code_context="Potential ownership is around src/combat_dodge.py and its regression tests.",
@@ -841,6 +850,8 @@ class InvestigationRetryLLMClient:
                 "task_type": "bugfix",
                 "reason": "The request is about fixing unintended movement behavior.",
             }
+        if schema_name == "decision_work_scope_route":
+            return {"choice": "bugfix_and_fix", "reasoning": "Bugfix request needs investigation and implementation."}
         if schema_name == "gameplay_investigation_review":
             self._review_calls += 1
             if self._review_calls == 1:
@@ -965,6 +976,8 @@ class InvestigationLearningCarryForwardLLMClient:
                 "task_type": "bugfix",
                 "reason": "The prompt is a bug investigation and should stay on the bugfix track.",
             }
+        if schema_name == "decision_work_scope_route":
+            return {"choice": "bugfix_and_fix", "reasoning": "Bugfix request needs investigation and implementation."}
         if schema_name == "gameplay_investigation_strategy":
             self._strategy_calls += 1
             self.strategy_inputs.append(input_text)
@@ -1232,6 +1245,8 @@ class StrictLoopingFeatureLLMClient:
                 "task_type": "feature",
                 "reason": "The prompt adds new traversal behavior, so it belongs on the feature track.",
             }
+        if schema_name == "decision_work_scope_route":
+            return {"choice": "plan_and_build", "reasoning": "Feature request needs planning and implementation."}
         if schema_name == "gameplay_investigation_strategy":
             self._strategy_calls += 1
             self.strategy_inputs.append(input_text)
@@ -1694,6 +1709,8 @@ class CodeOnlyMixedNoiseLLMClient:
                 "task_type": "bugfix",
                 "reason": "The prompt fixes unintended spawn movement behavior.",
             }
+        if schema_name == "decision_work_scope_route":
+            return {"choice": "bugfix_and_fix", "reasoning": "Bugfix request needs investigation and implementation."}
         if schema_name == "gameplay_investigation_strategy":
             return {
                 "focus_terms": ["spawn", "movement", "stun", "root"],
@@ -1864,6 +1881,8 @@ class RepairDefaultLLMClient:
                 "task_type": "bugfix",
                 "reason": "The prompt fixes broken gameplay behavior.",
             }
+        if schema_name == "decision_work_scope_route":
+            return {"choice": "bugfix_and_fix", "reasoning": "Bugfix request needs investigation and implementation."}
         if schema_name == "gameplay_engineering_context":
             return _investigation_payload(
                 source_hits=["src/runtime.py"],
@@ -2704,15 +2723,14 @@ class WorkflowDrivenRuntimeTests(unittest.TestCase):
             self.assertTrue(timeline_log.exists())
 
             artifact_dir = self._single_workflow_artifact_dir(run_dir, "gameplay-engineer-workflow")
-            self.assertTrue((artifact_dir / "engineer_investigation.md").exists())
-            self.assertTrue((artifact_dir / "investigation_review_round_1.md").exists())
-            self.assertTrue((artifact_dir / "investigation_abort.md").exists())
+            # LLM-disabled routes to quick_investigate (DecisionEngine default),
+            # producing quick_investigation.md → prepare_investigation_delivery.
+            self.assertTrue((artifact_dir / "quick_investigation.md").exists())
             self.assertTrue((artifact_dir / "final_report.md").exists())
             self.assertFalse((artifact_dir / "plan_doc.md").exists())
             self.assertFalse((artifact_dir / "architecture_plan.md").exists())
             self.assertFalse((artifact_dir / "pull_request.md").exists())
             self.assertFalse((artifact_dir / "self_test.txt").exists())
-            self.assertIn("gameplay investigation never grounded a safe handoff", result["final_response"])
 
             trace_output = trace_log.read_text(encoding="utf-8")
             self.assertIn("[main_graph] [analyze_prompt] ENTER", trace_output)
@@ -2722,8 +2740,8 @@ class WorkflowDrivenRuntimeTests(unittest.TestCase):
             self.assertIn("output_keys=", trace_output)
             self.assertIn(f"details={GRAPH_DEBUG_TRACE_FILE}#", trace_output)
             self.assertIn("next=agentswarm__gameplay-engineer-workflow", trace_output)
-            self.assertIn("[gameplay-engineer-workflow] [evaluate_investigation] ENTER", trace_output)
-            self.assertIn("[gameplay-engineer-workflow] [prepare_investigation_blocked_delivery] ENTER", trace_output)
+            self.assertIn("[gameplay-engineer-workflow] [quick_investigate] ENTER", trace_output)
+            self.assertIn("[gameplay-engineer-workflow] [prepare_investigation_delivery] ENTER", trace_output)
             self.assertIn("[main_graph] [finalize] EXIT", trace_output)
 
             timeline_output = timeline_log.read_text(encoding="utf-8")

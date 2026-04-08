@@ -534,6 +534,7 @@ class EngineerState(TypedDict):
     active_loop_completed: bool
     active_loop_status: str
     executor_failed: bool
+    _work_scope_choice: NotRequired[str]
 
 
 def _dedupe(items: list[str]) -> list[str]:
@@ -2198,6 +2199,98 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
             ),
         }
 
+    def route_work_scope(state: EngineerState) -> dict[str, Any]:
+        engine = DecisionEngine(_work_scope_profile, context, metadata)
+        choice = engine.decide(state)
+        updates: dict[str, Any] = {"_work_scope_choice": choice}
+        if choice == "bugfix_and_fix":
+            updates.update({
+                "task_type": "bugfix",
+                "planning_mode": "bugfix",
+                "execution_track": "bugfix",
+                "implementation_requested": True,
+            })
+        elif choice == "plan_and_build":
+            task_type = state.get("task_type", "feature")
+            if task_type not in {"feature", "maintenance"}:
+                task_type = "feature"
+            planning_mode = _normalize_planning_mode(
+                task_type,
+                state.get("planning_mode", _default_planning_mode(task_type)),
+            )
+            execution_track = task_type if task_type in {"feature", "maintenance"} else "feature"
+            updates.update({
+                "task_type": task_type,
+                "planning_mode": planning_mode,
+                "execution_track": execution_track,
+                "implementation_requested": True,
+            })
+        elif choice == "investigate_full":
+            updates["implementation_requested"] = False
+        else:  # quick_investigate
+            updates["implementation_requested"] = False
+        return updates
+
+    def _after_work_scope(state: EngineerState) -> str:
+        choice = state.get("_work_scope_choice", "quick_investigate")
+        if choice in ("bugfix_and_fix", "plan_and_build", "investigate_full"):
+            return "request_investigation"
+        return "quick_investigate"
+
+    def quick_investigate(state: EngineerState) -> dict[str, Any]:
+        artifact_dir = _artifact_dir(context, metadata, state)
+        scope_root = context.resolve_scope_root("host_project")
+        project_snapshot = _collect_project_snapshot(context, state)
+        fallback_doc = _compose_fallback_investigation_doc(
+            state, project_snapshot, round_index=1,
+        )
+        investigator_llm, investigation_mode = _select_investigator_llm(context)
+        investigation_doc = fallback_doc
+        if investigation_mode == "claude-executor-tools" and isinstance(
+            investigator_llm, ClaudeCodeExecutorClient,
+        ):
+            try:
+                system_prompt = build_executor_system_prompt(
+                    working_directory=str(scope_root),
+                    scope_constraints=[
+                        "Quick investigation: produce a concise, focused answer.",
+                        "Read only the files directly relevant to the question.",
+                        "Do not modify any files.",
+                    ],
+                )
+                task_prompt = build_executor_task_prompt(
+                    description=(
+                        f"Quick gameplay investigation.\n\n"
+                        f"Task: {state['task_prompt']}\n\n"
+                        f"Write a brief markdown document answering the question. "
+                        f"Include file paths and code snippets as evidence."
+                    ),
+                    context=project_snapshot["snapshot"],
+                )
+                result = investigator_llm.execute_task(
+                    task_prompt=task_prompt,
+                    system_prompt=system_prompt,
+                    working_directory=str(scope_root),
+                )
+                if result.success and result.result_text.strip():
+                    investigation_doc = result.result_text
+            except Exception as exc:
+                _log.warning("quick_investigate: executor failed: %s", exc)
+        (artifact_dir / "quick_investigation.md").write_text(
+            investigation_doc, encoding="utf-8",
+        )
+        return {
+            "investigation_round": 1,
+            "investigation_doc": investigation_doc,
+            "investigation_summary": investigation_doc[:500],
+            "investigation_approved": True,
+            "investigation_loop_status": "quick-track",
+            "investigation_loop_reason": "Routed to single-pass quick investigation.",
+            "investigation_score": 80,
+            "implementation_requested": False,
+            "summary": f"{metadata.name} completed quick gameplay investigation.",
+        }
+
     def request_investigation(state: EngineerState) -> dict[str, Any]:
         return {"summary": f"{metadata.name} requested a grounded gameplay investigation pass."}
 
@@ -2939,6 +3032,63 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
         profile=_investigation_route_profile, context=context, metadata=metadata,
     )
 
+    _work_scope_profile = DecisionProfile(
+        system_id="work_scope_route",
+        branches=(
+            Branch(
+                "bugfix_and_fix",
+                "A bug needs fixing. The user reports broken behavior, a regression, "
+                "or something not working as expected. Investigation + direct implementation "
+                "is needed (no plan/review loop). Examples: 'dodge doesn't cancel on hit', "
+                "'combo drops inputs after parry', 'health doesn't regen in zone X'.",
+            ),
+            Branch(
+                "plan_and_build",
+                "A feature needs to be built or an existing system needs refactoring/hardening. "
+                "Requires investigation, a design/plan document, review, then implementation. "
+                "Examples: 'add a new grapple combo finisher', 'refactor hit reaction to use "
+                "state tree', 'improve the dodge cancel window system'.",
+            ),
+            Branch(
+                "investigate_full",
+                "The user wants a thorough multi-round investigation or technical assessment "
+                "without code changes. Needs the full investigation loop (2-3 rounds) to "
+                "converge on ownership and root cause. Examples: 'investigate why combo feels "
+                "sluggish', 'do a full analysis of the parry system', 'research the hit "
+                "reaction architecture before we plan changes'.",
+            ),
+            Branch(
+                "quick_investigate",
+                "Simple factual question or targeted code lookup. One investigation pass "
+                "is enough. No implementation needed. Examples: 'what handles dodge?', "
+                "'where is sprint configured?', 'which component owns the combo system?', "
+                "'find the file that processes hit reactions'.",
+                is_default=True,
+            ),
+        ),
+        context_instruction=(
+            "Route a gameplay engineering request by work type and scope.\n"
+            "Choose bugfix_and_fix for broken behavior that needs a code fix.\n"
+            "Choose plan_and_build for new features, improvements, or refactors that need "
+            "planning + implementation.\n"
+            "Choose investigate_full for thorough analysis or research that needs multiple "
+            "investigation rounds but no implementation.\n"
+            "Choose quick_investigate for simple factual questions, code lookups, or "
+            "'where/what/who' questions.\n"
+            "When in doubt between quick_investigate and investigate_full, prefer quick_investigate — "
+            "the user can always ask for more depth."
+        ),
+        state_summarizer=lambda s: (
+            f"task_prompt={str(s.get('task_prompt', ''))[:500]}\n"
+            f"task_type={s.get('task_type')}\n"
+            f"planning_mode={s.get('planning_mode')}\n"
+            f"implementation_requested={s.get('implementation_requested')}\n"
+            f"gameplay_scope_verdict={s.get('gameplay_scope_verdict')}\n"
+            f"classification_reason={str(s.get('classification_reason', ''))[:200]}"
+        ),
+        effort="low",
+    )
+
     def after_design_doc(state: EngineerState) -> str:
         return "plan_work" if state["implementation_requested"] else "prepare_investigation_delivery"
 
@@ -2989,6 +3139,8 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
 
     graph = StateGraph(EngineerState)
     graph.add_node("classify_request", trace_graph_node(graph_name=graph_name, node_name="classify_request", node_fn=classify_request))
+    graph.add_node("route_work_scope", trace_graph_node(graph_name=graph_name, node_name="route_work_scope", node_fn=route_work_scope))
+    graph.add_node("quick_investigate", trace_graph_node(graph_name=graph_name, node_name="quick_investigate", node_fn=quick_investigate))
     graph.add_node("request_investigation", trace_graph_node(graph_name=graph_name, node_name="request_investigation", node_fn=request_investigation))
     graph.add_node("prepare_investigation_strategy", trace_graph_node(graph_name=graph_name, node_name="prepare_investigation_strategy", node_fn=prepare_investigation_strategy))
     graph.add_node("simulate_engineer_investigation", trace_graph_node(graph_name=graph_name, node_name="simulate_engineer_investigation", node_fn=simulate_engineer_investigation))
@@ -3014,7 +3166,20 @@ def build_graph(context: WorkflowContext, metadata: WorkflowMetadata):
     graph.add_node("prepare_repair_blocked_delivery", trace_graph_node(graph_name=graph_name, node_name="prepare_repair_blocked_delivery", node_fn=prepare_repair_blocked_delivery))
     graph.add_node("prepare_review_blocked_delivery", trace_graph_node(graph_name=graph_name, node_name="prepare_review_blocked_delivery", node_fn=prepare_review_blocked_delivery))
     graph.add_edge(START, "classify_request")
-    graph.add_edge("classify_request", "request_investigation")
+    graph.add_edge("classify_request", "route_work_scope")
+    graph.add_conditional_edges(
+        "route_work_scope",
+        trace_route_decision(
+            graph_name=graph_name,
+            router_name="work_scope_route",
+            route_fn=_after_work_scope,
+        ),
+        {
+            "request_investigation": "request_investigation",
+            "quick_investigate": "quick_investigate",
+        },
+    )
+    graph.add_edge("quick_investigate", "prepare_investigation_delivery")
     graph.add_edge("request_investigation", "prepare_investigation_strategy")
     graph.add_edge("prepare_investigation_strategy", "simulate_engineer_investigation")
     graph.add_edge("simulate_engineer_investigation", "assess_implementation_strategy")
