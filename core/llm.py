@@ -489,7 +489,7 @@ class CodexCliLLMClient(LLMClient):
 class ClaudeCodeConfig:
     command: str
     model: str
-    timeout_seconds: int
+    timeout_seconds: int | None
     working_directory: str | None = None
     max_turns: int = 1
 
@@ -674,7 +674,7 @@ class ClaudeCodeLLMClient(LLMClient):
             try:
                 stdout, stderr = proc.communicate(
                     input=prompt,
-                    timeout=self.config.timeout_seconds,
+                    timeout=self.config.timeout_seconds if self.config.timeout_seconds else None,
                 )
             except subprocess.TimeoutExpired:
                 _kill_llm_process_tree(proc)
@@ -1183,7 +1183,7 @@ def _build_client_for_profile(
                     profile_prefix="CLAUDE_MODEL_",
                     fallback_default="claude-opus-4-6",
                 ),
-                timeout_seconds=int(os.getenv("CLAUDE_TIMEOUT_SECONDS", "300")),
+                timeout_seconds=int(v) if (v := os.getenv("CLAUDE_TIMEOUT_SECONDS")) else None,
                 working_directory=working_directory,
                 max_turns=int(os.getenv("CLAUDE_MAX_TURNS", "1")),
             )
