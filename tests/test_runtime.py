@@ -2362,7 +2362,6 @@ class WorkflowDrivenRuntimeTests(unittest.TestCase):
         self.assertEqual(
             names,
             [
-                "gameplay-engineer-planner",
                 "gameplay-engineer-workflow",
                 "gameplay-reviewer-workflow",
                 "investigate-crash-workflow",
@@ -2380,7 +2379,6 @@ class WorkflowDrivenRuntimeTests(unittest.TestCase):
         self.assertEqual(
             exposed_names,
             [
-                "gameplay-engineer-planner",
                 "gameplay-engineer-workflow",
                 "investigate-crash-workflow",
                 "optimize-gamethread-workflow",
@@ -2395,18 +2393,11 @@ class WorkflowDrivenRuntimeTests(unittest.TestCase):
         self.assertIsNotNone(routed)
         self.assertEqual(routed.name, "gameplay-engineer-workflow")
 
-        planner_routed = self.registry.route(
-            "Research and plan a gameplay solution for wall jump recharge before implementation"
-        )
-        self.assertIsNotNone(planner_routed)
-        self.assertEqual(planner_routed.name, "gameplay-engineer-planner")
-
         unsupported = self.registry.route("Can you review my resume for a product manager role?")
         self.assertIsNone(unsupported)
 
     def test_built_in_workflows_live_under_share_and_gameplay_categories(self) -> None:
         engineer_dir = self.registry.get("gameplay-engineer-workflow").metadata.workflow_dir.relative_to(self.project_root)
-        planner_dir = self.registry.get("gameplay-engineer-planner").metadata.workflow_dir.relative_to(self.project_root)
         reviewer_dir = self.registry.get("gameplay-reviewer-workflow").metadata.workflow_dir.relative_to(self.project_root)
         investigation_dir = self.registry.get("template-investigation-workflow").metadata.workflow_dir.relative_to(
             self.project_root
@@ -2416,7 +2407,6 @@ class WorkflowDrivenRuntimeTests(unittest.TestCase):
         ).metadata.workflow_dir.relative_to(self.project_root)
 
         self.assertEqual(engineer_dir.as_posix(), "Workflows/GameplayWorkflows/gameplay-engineer-workflow")
-        self.assertEqual(planner_dir.as_posix(), "Workflows/GameplayWorkflows/gameplay-engineer-planner")
         self.assertEqual(reviewer_dir.as_posix(), "Workflows/GameplayWorkflows/gameplay-reviewer-workflow")
         self.assertEqual(investigation_dir.as_posix(), "Workflows/Share/template-investigation-workflow")
         self.assertEqual(
@@ -2573,7 +2563,9 @@ class WorkflowDrivenRuntimeTests(unittest.TestCase):
         self.assertIn(result["loop_status"], ("passed", "max-rounds"))
         self.assertIn("The plan is ready for implementation.", result["feedback"])
 
-    def test_planner_workflow_loops_research_and_review_until_solution_plan_is_approved(self) -> None:
+    # gameplay-engineer-planner removed — superseded by gameplay-engineer-workflow
+
+    def _removed_test_planner_workflow(self) -> None:
         with tempfile.TemporaryDirectory(prefix="agentswarm-host-planner-loop-") as temp_dir:
             host_root = Path(temp_dir) / "host-project"
             (host_root / "docs" / "designer").mkdir(parents=True, exist_ok=True)
@@ -4182,7 +4174,6 @@ class WorkflowDrivenRuntimeTests(unittest.TestCase):
         graph = build_main_graph(registry=self.registry, llm_manager=self.llm_manager)
         mermaid = graph.get_graph(xray=1).draw_mermaid()
 
-        self.assertIn("subgraph agentswarm__gameplay-engineer-planner", mermaid)
         self.assertIn("subgraph agentswarm__gameplay-engineer-workflow", mermaid)
         self.assertIn("subgraph agentswarm__gameplay-reviewer-workflow", mermaid)
 

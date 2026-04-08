@@ -115,7 +115,7 @@ def load_agentswarm_config(paths: RuntimePaths) -> AgentSwarmConfig:
         doc_roots=doc_roots,
         test_roots=test_roots,
         exclude_roots=exclude_roots,
-        active_workflows=_to_tuple_of_strings(data.get("active_workflows"), None),
+        active_workflows=_to_tuple_of_strings(data.get("active_workflows"), defaults.active_workflows),
         memory_namespaces=_to_tuple_of_strings(data.get("memory_namespaces"), defaults.memory_namespaces),
     )
 

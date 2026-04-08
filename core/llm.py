@@ -694,6 +694,12 @@ class ClaudeCodeLLMClient(LLMClient):
                 )
                 if _looks_like_claude_auth_error(combined):
                     self._disabled_reason = "claude auth required"
+                    raise LLMError(f"Claude Code failed with exit code {completed.returncode}: {combined}")
+                # Non-zero exit but stdout may contain valid results (e.g. sub-agent
+                # completed work before the outer process exited).  Return the
+                # CompletedProcess so callers can still extract partial output.
+                if completed.stdout and completed.stdout.strip():
+                    return completed
                 raise LLMError(f"Claude Code failed with exit code {completed.returncode}: {combined}")
             return completed
 
