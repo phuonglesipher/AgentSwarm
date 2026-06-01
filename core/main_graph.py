@@ -143,6 +143,9 @@ def _build_chained_prompt(description: str, prior_results: list[dict[str, Any]])
 
 
 def _fallback_route_task(registry: WorkflowRegistry, description: str, active_workflows: tuple[str, ...] | None = None) -> str | None:
+    candidates = registry.list_routable(active_workflows)
+    if len(candidates) == 1:
+        return candidates[0].qualified_name
     match = registry.route(description, active_workflows=active_workflows)
     return match.qualified_name if match else None
 
@@ -504,13 +507,16 @@ def build_main_graph(
         routed_tasks: list[MainTask] = []
         notes = list(state["routing_notes"])
         llm_assignments: dict[str, dict[str, Any]] = {}
+        routable_candidates = registry.list_routable(active_workflows)
         router_llm = ensure_traced_llm_client(llm_manager.resolve("router"))
-        if router_llm.is_enabled() and state["tasks"]:
+        if len(routable_candidates) > 1 and router_llm.is_enabled() and state["tasks"]:
             try:
                 llm_assignments = _llm_route_tasks(router_llm, registry, state["tasks"], workspace_context, active_workflows=active_workflows)
                 notes.append(f"Task routing used {llm_manager.describe('router')}.")
             except LLMError as exc:
                 notes.append(f"Router fallback: {exc}")
+        elif len(routable_candidates) == 1:
+            notes.append(f"Single workflow route: {routable_candidates[0].qualified_name}.")
 
         for task in state["tasks"]:
             task_copy = dict(task)

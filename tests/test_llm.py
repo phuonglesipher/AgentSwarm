@@ -15,7 +15,7 @@ class CodexCliLLMClientTests(unittest.TestCase):
         client = CodexCliLLMClient(
             CodexCLIConfig(
                 command="codex",
-                model="gpt-5.3-codex",
+                model="gpt-5.5",
                 timeout_seconds=30,
             )
         )
@@ -77,6 +77,38 @@ class CodexCliLLMClientTests(unittest.TestCase):
         self.assertIn("Fix the movement bug", str(captured["input"]))
         self.assertEqual(captured["encoding"], "utf-8")
         self.assertEqual(captured["errors"], "replace")
+
+    def test_generate_text_can_use_codex_gateway_profile_and_reasoning_effort(self) -> None:
+        client = CodexCliLLMClient(
+            CodexCLIConfig(
+                command="codex",
+                model="gpt-5.5",
+                timeout_seconds=30,
+                profile="ai-gateway",
+                reasoning_effort="xhigh",
+            )
+        )
+        resolved_command = r"C:\Users\phuong.le\AppData\Roaming\npm\codex.cmd"
+        captured: list[list[str]] = []
+
+        def fake_run(command: list[str], **kwargs) -> subprocess.CompletedProcess[str]:
+            del kwargs
+            captured.append(command)
+            output_path = Path(command[command.index("-o") + 1])
+            output_path.write_text("gateway works", encoding="utf-8")
+            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+        with mock.patch("core.llm.shutil.which", return_value=resolved_command):
+            with mock.patch("core.llm.subprocess.run", side_effect=fake_run):
+                result = client.generate_text(instructions="Test", input_text="Hello")
+
+        self.assertEqual(result, "gateway works")
+        command = captured[0]
+        self.assertLess(command.index("--profile"), command.index("exec"))
+        self.assertLess(command.index("--config"), command.index("exec"))
+        self.assertEqual(command[command.index("--profile") + 1], "ai-gateway")
+        self.assertEqual(command[command.index("--config") + 1], 'model_reasoning_effort="xhigh"')
+        self.assertEqual(command[command.index("-m") + 1], "gpt-5.5")
 
     def test_with_overrides_can_switch_codex_sandbox_mode(self) -> None:
         client = CodexCliLLMClient(
@@ -164,7 +196,7 @@ class CodexCliLLMClientTests(unittest.TestCase):
                 "task_id": "task-1",
                 "active_task": {
                     "id": "task-1",
-                    "workflow_name": "agentswarm::gameplay-engineer-workflow",
+                    "workflow_name": "agentswarm::agent-processing-workflow",
                 },
             }
 

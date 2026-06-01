@@ -290,6 +290,8 @@ class CodexCLIConfig:
     timeout_seconds: int
     working_directory: str | None = None
     sandbox_mode: str = "read-only"
+    profile: str | None = None
+    reasoning_effort: str | None = None
 
 
 class CodexCliLLMClient(LLMClient):
@@ -323,6 +325,8 @@ class CodexCliLLMClient(LLMClient):
         sandbox_mode: str | None = None,
         working_directory: str | None = None,
         timeout_seconds: int | None = None,
+        profile: str | None = None,
+        reasoning_effort: str | None = None,
     ) -> "CodexCliLLMClient":
         return CodexCliLLMClient(
             replace(
@@ -330,6 +334,8 @@ class CodexCliLLMClient(LLMClient):
                 sandbox_mode=sandbox_mode or self.config.sandbox_mode,
                 working_directory=working_directory or self.config.working_directory,
                 timeout_seconds=timeout_seconds or self.config.timeout_seconds,
+                profile=profile or self.config.profile,
+                reasoning_effort=reasoning_effort or self.config.reasoning_effort,
             )
         )
 
@@ -430,6 +436,13 @@ class CodexCliLLMClient(LLMClient):
             output_path = temp_path / "last_message.txt"
             command = [
                 resolved_command,
+            ]
+            if self.config.profile:
+                command.extend(["--profile", self.config.profile])
+            if self.config.reasoning_effort:
+                command.extend(["--config", f'model_reasoning_effort="{self.config.reasoning_effort}"'])
+            command.extend(
+                [
                 "exec",
                 "--skip-git-repo-check",
                 "--ephemeral",
@@ -443,7 +456,8 @@ class CodexCliLLMClient(LLMClient):
                 str(output_path),
                 "--cd",
                 effective_cwd,
-            ]
+                ]
+            )
 
             if schema is not None:
                 schema_path = temp_path / "schema.json"
@@ -1203,13 +1217,15 @@ def _build_client_for_profile(
                     profile=profile,
                     default_env="CODEX_MODEL",
                     profile_prefix="CODEX_MODEL_",
-                    fallback_default="gpt-5.3-codex",
+                    fallback_default="gpt-5.5",
                     legacy_default_env="OPENAI_MODEL",
                     legacy_profile_prefix="OPENAI_MODEL_",
                 ),
                 timeout_seconds=int(os.getenv("CODEX_TIMEOUT_SECONDS", "300")),
                 working_directory=working_directory,
                 sandbox_mode=os.getenv("CODEX_SANDBOX", "read-only"),
+                profile=os.getenv("CODEX_PROFILE", "ai-gateway"),
+                reasoning_effort=os.getenv("CODEX_REASONING_EFFORT", "xhigh"),
             )
         )
 

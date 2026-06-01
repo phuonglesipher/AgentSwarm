@@ -29,6 +29,11 @@ class ToolRegistry:
         qualified_name = self._aliases.get(name, name)
         return self._tools[qualified_name]
 
+    def list_runtimes(self, include_shadowed: bool = False) -> list[ToolRuntime]:
+        if include_shadowed:
+            return list(self._tools.values())
+        return [self._tools[qn] for qn in self._aliases.values()]
+
     def list_metadata(self, include_shadowed: bool = True) -> list[ToolMetadata]:
         if include_shadowed:
             metadata = [runtime.metadata for runtime in self._tools.values()]

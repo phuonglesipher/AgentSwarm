@@ -20,11 +20,7 @@ class AgentSwarmConfig:
     doc_roots: tuple[str, ...] = ("docs", "design")
     test_roots: tuple[str, ...] = ("tests",)
     exclude_roots: tuple[str, ...] = ("AgentSwarm", ".git", ".agentswarm/runs", ".agentswarm/memory")
-    active_workflows: tuple[str, ...] | None = (
-        "triage-performance-workflow",
-        "gameplay-engineer-workflow",
-        "investigate-crash-workflow",
-    )
+    active_workflows: tuple[str, ...] | None = ("agent-processing-workflow",)
     memory_namespaces: tuple[str, ...] = ("shared", "project", "agentswarm")
 
 

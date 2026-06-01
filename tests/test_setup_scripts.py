@@ -39,6 +39,18 @@ class SetupScriptTests(unittest.TestCase):
         self.assertIn('exec "$PYTHON_BIN" "$SCRIPT_DIR/main.py" --prompt "$PROMPT"', script)
         self.assertIn("Python 3 is required to run AgentSwarm.", script)
 
+    def test_run_agent_task_ps1_uses_gateway_defaults(self) -> None:
+        script = self._read("Run-AgentTask.ps1")
+        self.assertIn('[string]$CodexProfile = "ai-gateway"', script)
+        self.assertIn('[string]$CodexModel = "gpt-5.5"', script)
+        self.assertIn('[string]$ReasoningEffort = "xhigh"', script)
+        self.assertIn("AGENT_TASK_CODEX_MODEL", script)
+        self.assertIn("CODEX_REASONING_EFFORT", script)
+        self.assertIn("Import-DotEnvFile", script)
+        self.assertIn(".env.local", script)
+        self.assertIn('"--mode", "agent-task"', script)
+        self.assertIn('"--codex-profile", $CodexProfile', script)
+
 
 if __name__ == "__main__":
     unittest.main()
