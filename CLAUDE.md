@@ -1,6 +1,6 @@
 # AgentSwarm
 
-General-purpose LangGraph workflow orchestration framework for Unreal Engine projects. Python 3.11+.
+AgentTask-oriented LangGraph/Codex orchestration framework for Unreal Engine projects. Python 3.11+.
 
 Deployable to any UE project as a host — not tied to a specific game.
 
@@ -10,7 +10,7 @@ Deployable to any UE project as a host — not tied to a specific game.
 
 ## Architecture
 
-Main graph (`core/main_graph.py`) decomposes prompts → tasks → workflow dispatch → results.
+Main graph (`core/main_graph.py`) now routes prompts to a single minimal workflow: `agent-processing-workflow`.
 
 Four engine abstractions drive all workflow logic:
 
@@ -21,17 +21,16 @@ Four engine abstractions drive all workflow logic:
 | Scoring | `core/scoring/engine.py` | ScorePolicy + MAD confidence, normalizes rubric to 0-100 |
 | DecisionEngine | `core/decision/engine.py`, `profile.py` | LLM-powered graph routing with branch descriptions, fallback to default |
 
-Each engine is configured by a **frozen Profile dataclass** (ReviewProfile, PlanProfile, DecisionProfile). Never subclass engines; configure via profiles.
+Legacy planning/review engines remain as support code for now, but new task execution should go through the AgentTask runner plus `agent-processing-workflow`.
 
-## Quality Loop Philosophy
+## AgentTask Philosophy
 
-Core design principle: **loop to increment quality**.
+Core design principle: keep orchestration outside Codex and keep implementation inside Codex.
 
-- `evaluate_quality_loop()` in `core/quality_loop.py` is the decision gate
-- `QualityLoopSpec` controls: threshold (default 90), min_rounds (2), max_rounds, stagnation_limit
-- A round cannot pass before min_rounds even if score is perfect
-- Stagnation detection stops futile loops (score delta < min_score_delta for N rounds)
-- When writing new workflow nodes: wire the quality loop, do not hand-code pass/fail logic
+- `core/agent_task_runner.py` owns GitHub queue polling, Project status, issue comments, git branch setup, commit/push, and PR creation.
+- `agent-processing-workflow` owns a single Codex execution against the prepared prompt.
+- Codex must not update GitHub status, create commits, push branches, or open PRs; the runner handles those lifecycle steps.
+- Default Codex execution uses the `ai-gateway` profile, model `gpt-5.5`, and reasoning effort `xhigh`.
 
 ## Data Model Conventions
 
@@ -48,7 +47,7 @@ Core design principle: **loop to increment quality**.
 - `entry.py` must expose `build_graph(context, metadata)`
 - Shared reusable → `Workflows/Share/`; domain-specific → `Workflows/{Domain}Workflows/`
 - Reviewer subgraphs: `exposed: false`, wire via `context.get_workflow_graph()`
-- `template-investigation-workflow` is the canonical loop pattern
+- `agent-processing-workflow` is the canonical workflow. Add runner behavior in `core/agent_task_runner.py` instead of creating new domain workflows.
 
 ## LLM Abstraction
 

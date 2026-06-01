@@ -65,6 +65,6 @@ def load_main_graph():
     return build_main_graph(registry=registry, llm_manager=llm_manager).get_graph(xray=1)
 
 
-def load_engineer_graph():
+def load_agent_processing_graph():
     registry, _ = _load_registry()
-    return registry.get("gameplay-engineer-workflow").graph.get_graph(xray=1)
+    return registry.get("agent-processing-workflow").graph.get_graph(xray=1)

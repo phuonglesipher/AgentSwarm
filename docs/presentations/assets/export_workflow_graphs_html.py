@@ -4,14 +4,16 @@ from datetime import datetime, timezone
 from html import escape
 from pathlib import Path
 
-from export_langgraph_helpers import load_engineer_graph, load_main_graph
+from export_langgraph_helpers import load_agent_processing_graph, load_main_graph
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 OUTPUT_PATH = PROJECT_ROOT / "docs" / "presentations" / "workflow-graphs.html"
+MAIN_GRAPH_PATH = PROJECT_ROOT / "docs" / "presentations" / "assets" / "main-graph.mmd"
+AGENT_PROCESSING_GRAPH_PATH = PROJECT_ROOT / "docs" / "presentations" / "assets" / "agent-processing-graph.mmd"
 
 
-def _build_html(main_graph_mermaid: str, engineer_graph_mermaid: str) -> str:
+def _build_html(main_graph_mermaid: str, agent_processing_graph_mermaid: str) -> str:
     exported_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
     return f"""<!doctype html>
 <html lang="en">
@@ -230,11 +232,11 @@ def _build_html(main_graph_mermaid: str, engineer_graph_mermaid: str) -> str:
     <section class="hero">
       <span class="eyebrow">HTML Export</span>
       <h1>AgentSwarm workflow graphs</h1>
-      <p>This page is generated from the current LangGraph runtime structure. Open it in a browser to inspect the latest main graph and the latest <code>gameplay-engineer-workflow</code> graph.</p>
+      <p>This page is generated from the current LangGraph runtime structure. Open it in a browser to inspect the latest main graph and the latest <code>agent-processing-workflow</code> graph.</p>
       <div class="meta">
         <div class="chip">Exported at: {escape(exported_at)}</div>
         <div class="chip">Source: <a href="assets/main-graph.mmd">main-graph.mmd</a></div>
-        <div class="chip">Source: <a href="assets/gameplay-engineer-graph.mmd">gameplay-engineer-graph.mmd</a></div>
+        <div class="chip">Source: <a href="assets/agent-processing-graph.mmd">agent-processing-graph.mmd</a></div>
       </div>
     </section>
 
@@ -259,18 +261,18 @@ def _build_html(main_graph_mermaid: str, engineer_graph_mermaid: str) -> str:
 
       <article class="panel">
         <div class="panel-header">
-          <h2>Gameplay Engineer Workflow</h2>
-          <span class="chip">Gameplay-only delivery</span>
+          <h2>Agent Processing Workflow</h2>
+          <span class="chip">Codex execution</span>
         </div>
         <div class="panel-body">
           <div class="mermaid-shell">
-            <pre class="mermaid">{escape(engineer_graph_mermaid)}</pre>
+            <pre class="mermaid">{escape(agent_processing_graph_mermaid)}</pre>
           </div>
         </div>
         <div class="source">
           <details>
             <summary>Show Mermaid source</summary>
-            <pre>{escape(engineer_graph_mermaid)}</pre>
+            <pre>{escape(agent_processing_graph_mermaid)}</pre>
           </details>
         </div>
       </article>
@@ -283,16 +285,22 @@ def _build_html(main_graph_mermaid: str, engineer_graph_mermaid: str) -> str:
 
 def main() -> None:
     main_graph_mermaid = load_main_graph().draw_mermaid()
-    engineer_graph_mermaid = load_engineer_graph().draw_mermaid()
+    agent_processing_graph_mermaid = load_agent_processing_graph().draw_mermaid()
+
+    MAIN_GRAPH_PATH.parent.mkdir(parents=True, exist_ok=True)
+    MAIN_GRAPH_PATH.write_text(main_graph_mermaid, encoding="utf-8")
+    AGENT_PROCESSING_GRAPH_PATH.write_text(agent_processing_graph_mermaid, encoding="utf-8")
 
     OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
     OUTPUT_PATH.write_text(
         _build_html(
             main_graph_mermaid=main_graph_mermaid,
-            engineer_graph_mermaid=engineer_graph_mermaid,
+            agent_processing_graph_mermaid=agent_processing_graph_mermaid,
         ),
         encoding="utf-8",
     )
+    print(f"Exported main graph to {MAIN_GRAPH_PATH}")
+    print(f"Exported agent-processing graph to {AGENT_PROCESSING_GRAPH_PATH}")
     print(f"Exported HTML graph viewer to {OUTPUT_PATH}")
 
 

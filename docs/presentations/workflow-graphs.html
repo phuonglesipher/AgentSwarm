@@ -215,11 +215,11 @@
     <section class="hero">
       <span class="eyebrow">HTML Export</span>
       <h1>AgentSwarm workflow graphs</h1>
-      <p>This page is generated from the current LangGraph runtime structure. Open it in a browser to inspect the latest main graph and the latest <code>gameplay-engineer-workflow</code> graph.</p>
+      <p>This page is generated from the current LangGraph runtime structure. Open it in a browser to inspect the latest main graph and the latest <code>agent-processing-workflow</code> graph.</p>
       <div class="meta">
-        <div class="chip">Exported at: 2026-03-19 09:45:30 UTC</div>
+        <div class="chip">Exported at: 2026-06-01 05:55:19 UTC</div>
         <div class="chip">Source: <a href="assets/main-graph.mmd">main-graph.mmd</a></div>
-        <div class="chip">Source: <a href="assets/gameplay-engineer-graph.mmd">gameplay-engineer-graph.mmd</a></div>
+        <div class="chip">Source: <a href="assets/agent-processing-graph.mmd">agent-processing-graph.mmd</a></div>
       </div>
     </section>
 
@@ -247,118 +247,18 @@ graph TD;
 	finalize(finalize)
 	__end__([&lt;p&gt;__end__&lt;/p&gt;]):::last
 	__start__ --&gt; analyze_prompt;
-	agentswarm__gameplay-engineer-planner\3afinalize --&gt; collect_task_result;
-	agentswarm__gameplay-engineer-workflow\3a__end__ --&gt; collect_task_result;
-	agentswarm__gameplay-reviewer-workflow\3areview_plan --&gt; collect_task_result;
-	agentswarm__template-investigation-reviewer-workflow\3areview --&gt; collect_task_result;
-	agentswarm__template-investigation-workflow\3a__end__ --&gt; collect_task_result;
+	agentswarm__agent-processing-workflow\3arun_agent_processing --&gt; collect_task_result;
 	analyze_prompt --&gt; plan_tasks;
 	collect_task_result --&gt; select_next_task;
 	mark_task_failed --&gt; collect_task_result;
 	plan_tasks --&gt; route_tasks;
 	route_tasks --&gt; select_next_task;
-	select_next_task -.-&gt; agentswarm__gameplay-engineer-planner\3a__start__;
-	select_next_task -.-&gt; agentswarm__gameplay-engineer-workflow\3aclassify_request;
-	select_next_task -.-&gt; agentswarm__gameplay-reviewer-workflow\3areview_plan;
-	select_next_task -.-&gt; agentswarm__template-investigation-reviewer-workflow\3areview;
-	select_next_task -.-&gt; agentswarm__template-investigation-workflow\3a__start__;
+	select_next_task -.-&gt; agentswarm__agent-processing-workflow\3arun_agent_processing;
 	select_next_task -.-&gt; finalize;
 	select_next_task -.-&gt; mark_task_failed;
 	finalize --&gt; __end__;
-	subgraph agentswarm__gameplay-engineer-planner
-	agentswarm__gameplay-engineer-planner\3a__start__(&lt;p&gt;__start__&lt;/p&gt;)
-	agentswarm__gameplay-engineer-planner\3aresearch_solution(research_solution)
-	agentswarm__gameplay-engineer-planner\3adraft_solution_plan(draft_solution_plan)
-	agentswarm__gameplay-engineer-planner\3areview_solution_plan(review_solution_plan)
-	agentswarm__gameplay-engineer-planner\3afinalize(finalize)
-	agentswarm__gameplay-engineer-planner\3a__start__ --&gt; agentswarm__gameplay-engineer-planner\3aresearch_solution;
-	agentswarm__gameplay-engineer-planner\3adraft_solution_plan --&gt; agentswarm__gameplay-engineer-planner\3areview_solution_plan;
-	agentswarm__gameplay-engineer-planner\3aresearch_solution --&gt; agentswarm__gameplay-engineer-planner\3adraft_solution_plan;
-	agentswarm__gameplay-engineer-planner\3areview_solution_plan -.-&gt; agentswarm__gameplay-engineer-planner\3afinalize;
-	agentswarm__gameplay-engineer-planner\3areview_solution_plan -.-&gt; agentswarm__gameplay-engineer-planner\3aresearch_solution;
-	end
-	subgraph agentswarm__gameplay-engineer-workflow
-	agentswarm__gameplay-engineer-workflow\3aclassify_request(classify_request)
-	agentswarm__gameplay-engineer-workflow\3arequest_investigation(request_investigation)
-	agentswarm__gameplay-engineer-workflow\3aprepare_investigation_strategy(prepare_investigation_strategy)
-	agentswarm__gameplay-engineer-workflow\3asimulate_engineer_investigation(simulate_engineer_investigation)
-	agentswarm__gameplay-engineer-workflow\3aassess_implementation_strategy(assess_implementation_strategy)
-	agentswarm__gameplay-engineer-workflow\3aevaluate_investigation(evaluate_investigation)
-	agentswarm__gameplay-engineer-workflow\3abuild_design_doc(build_design_doc)
-	agentswarm__gameplay-engineer-workflow\3abuild_bug_context_doc(build_bug_context_doc)
-	agentswarm__gameplay-engineer-workflow\3aprepare_investigation_blocked_delivery(prepare_investigation_blocked_delivery)
-	agentswarm__gameplay-engineer-workflow\3aprepare_investigation_delivery(prepare_investigation_delivery)
-	agentswarm__gameplay-engineer-workflow\3aplan_work(plan_work)
-	agentswarm__gameplay-engineer-workflow\3arequest_review(request_review)
-	agentswarm__gameplay-engineer-workflow\3aenter_review_subgraph(enter_review_subgraph)
-	agentswarm__gameplay-engineer-workflow\3agameplay-reviewer-workflow(gameplay-reviewer-workflow)
-	agentswarm__gameplay-engineer-workflow\3acapture_review_result(capture_review_result)
-	agentswarm__gameplay-engineer-workflow\3arevise_plan(revise_plan)
-	agentswarm__gameplay-engineer-workflow\3aimplement_code(implement_code)
-	agentswarm__gameplay-engineer-workflow\3apost_implementation_gate(post_implementation_gate)
-	agentswarm__gameplay-engineer-workflow\3arequest_repair_validation(request_repair_validation)
-	agentswarm__gameplay-engineer-workflow\3aself_test(self_test)
-	agentswarm__gameplay-engineer-workflow\3acapture_repair_validation(capture_repair_validation)
-	agentswarm__gameplay-engineer-workflow\3arepair_code(repair_code)
-	agentswarm__gameplay-engineer-workflow\3aprepare_delivery(prepare_delivery)
-	agentswarm__gameplay-engineer-workflow\3aprepare_repair_blocked_delivery(prepare_repair_blocked_delivery)
-	agentswarm__gameplay-engineer-workflow\3aprepare_review_blocked_delivery(prepare_review_blocked_delivery)
-	agentswarm__gameplay-engineer-workflow\3a__end__(&lt;p&gt;__end__&lt;/p&gt;)
-	agentswarm__gameplay-engineer-workflow\3aassess_implementation_strategy --&gt; agentswarm__gameplay-engineer-workflow\3aevaluate_investigation;
-	agentswarm__gameplay-engineer-workflow\3abuild_bug_context_doc -.-&gt; agentswarm__gameplay-engineer-workflow\3aimplement_code;
-	agentswarm__gameplay-engineer-workflow\3abuild_bug_context_doc -.-&gt; agentswarm__gameplay-engineer-workflow\3aprepare_investigation_delivery;
-	agentswarm__gameplay-engineer-workflow\3abuild_design_doc -.-&gt; agentswarm__gameplay-engineer-workflow\3aplan_work;
-	agentswarm__gameplay-engineer-workflow\3abuild_design_doc -.-&gt; agentswarm__gameplay-engineer-workflow\3aprepare_investigation_delivery;
-	agentswarm__gameplay-engineer-workflow\3acapture_repair_validation -.-&gt; agentswarm__gameplay-engineer-workflow\3aprepare_delivery;
-	agentswarm__gameplay-engineer-workflow\3acapture_repair_validation -.-&gt; agentswarm__gameplay-engineer-workflow\3aprepare_repair_blocked_delivery;
-	agentswarm__gameplay-engineer-workflow\3acapture_repair_validation -.-&gt; agentswarm__gameplay-engineer-workflow\3arepair_code;
-	agentswarm__gameplay-engineer-workflow\3acapture_review_result -.-&gt; agentswarm__gameplay-engineer-workflow\3aimplement_code;
-	agentswarm__gameplay-engineer-workflow\3acapture_review_result -.-&gt; agentswarm__gameplay-engineer-workflow\3aprepare_review_blocked_delivery;
-	agentswarm__gameplay-engineer-workflow\3acapture_review_result -.-&gt; agentswarm__gameplay-engineer-workflow\3arevise_plan;
-	agentswarm__gameplay-engineer-workflow\3aclassify_request --&gt; agentswarm__gameplay-engineer-workflow\3arequest_investigation;
-	agentswarm__gameplay-engineer-workflow\3aenter_review_subgraph --&gt; agentswarm__gameplay-engineer-workflow\3agameplay-reviewer-workflow;
-	agentswarm__gameplay-engineer-workflow\3aevaluate_investigation -.-&gt; agentswarm__gameplay-engineer-workflow\3abuild_bug_context_doc;
-	agentswarm__gameplay-engineer-workflow\3aevaluate_investigation -.-&gt; agentswarm__gameplay-engineer-workflow\3abuild_design_doc;
-	agentswarm__gameplay-engineer-workflow\3aevaluate_investigation -.-&gt; agentswarm__gameplay-engineer-workflow\3aprepare_investigation_blocked_delivery;
-	agentswarm__gameplay-engineer-workflow\3aevaluate_investigation -.-&gt; agentswarm__gameplay-engineer-workflow\3arequest_investigation;
-	agentswarm__gameplay-engineer-workflow\3agameplay-reviewer-workflow --&gt; agentswarm__gameplay-engineer-workflow\3acapture_review_result;
-	agentswarm__gameplay-engineer-workflow\3aimplement_code --&gt; agentswarm__gameplay-engineer-workflow\3apost_implementation_gate;
-	agentswarm__gameplay-engineer-workflow\3aplan_work --&gt; agentswarm__gameplay-engineer-workflow\3arequest_review;
-	agentswarm__gameplay-engineer-workflow\3apost_implementation_gate -.-&gt; agentswarm__gameplay-engineer-workflow\3aprepare_delivery;
-	agentswarm__gameplay-engineer-workflow\3apost_implementation_gate -.-&gt; agentswarm__gameplay-engineer-workflow\3arequest_repair_validation;
-	agentswarm__gameplay-engineer-workflow\3aprepare_investigation_strategy --&gt; agentswarm__gameplay-engineer-workflow\3asimulate_engineer_investigation;
-	agentswarm__gameplay-engineer-workflow\3arepair_code --&gt; agentswarm__gameplay-engineer-workflow\3arequest_repair_validation;
-	agentswarm__gameplay-engineer-workflow\3arequest_investigation --&gt; agentswarm__gameplay-engineer-workflow\3aprepare_investigation_strategy;
-	agentswarm__gameplay-engineer-workflow\3arequest_repair_validation --&gt; agentswarm__gameplay-engineer-workflow\3aself_test;
-	agentswarm__gameplay-engineer-workflow\3arequest_review --&gt; agentswarm__gameplay-engineer-workflow\3aenter_review_subgraph;
-	agentswarm__gameplay-engineer-workflow\3arevise_plan --&gt; agentswarm__gameplay-engineer-workflow\3arequest_review;
-	agentswarm__gameplay-engineer-workflow\3aself_test --&gt; agentswarm__gameplay-engineer-workflow\3acapture_repair_validation;
-	agentswarm__gameplay-engineer-workflow\3asimulate_engineer_investigation --&gt; agentswarm__gameplay-engineer-workflow\3aassess_implementation_strategy;
-	agentswarm__gameplay-engineer-workflow\3aprepare_delivery --&gt; agentswarm__gameplay-engineer-workflow\3a__end__;
-	agentswarm__gameplay-engineer-workflow\3aprepare_investigation_blocked_delivery --&gt; agentswarm__gameplay-engineer-workflow\3a__end__;
-	agentswarm__gameplay-engineer-workflow\3aprepare_investigation_delivery --&gt; agentswarm__gameplay-engineer-workflow\3a__end__;
-	agentswarm__gameplay-engineer-workflow\3aprepare_repair_blocked_delivery --&gt; agentswarm__gameplay-engineer-workflow\3a__end__;
-	agentswarm__gameplay-engineer-workflow\3aprepare_review_blocked_delivery --&gt; agentswarm__gameplay-engineer-workflow\3a__end__;
-	end
-	subgraph agentswarm__template-investigation-workflow
-	agentswarm__template-investigation-workflow\3a__start__(&lt;p&gt;__start__&lt;/p&gt;)
-	agentswarm__template-investigation-workflow\3ainvestigate(investigate)
-	agentswarm__template-investigation-workflow\3arequest_review(request_review)
-	agentswarm__template-investigation-workflow\3atemplate-investigation-reviewer-workflow(template-investigation-reviewer-workflow)
-	agentswarm__template-investigation-workflow\3acapture_review_result(capture_review_result)
-	agentswarm__template-investigation-workflow\3a__end__(&lt;p&gt;__end__&lt;/p&gt;)
-	agentswarm__template-investigation-workflow\3a__start__ --&gt; agentswarm__template-investigation-workflow\3ainvestigate;
-	agentswarm__template-investigation-workflow\3acapture_review_result -.-&gt; agentswarm__template-investigation-workflow\3a__end__;
-	agentswarm__template-investigation-workflow\3acapture_review_result -.-&gt; agentswarm__template-investigation-workflow\3ainvestigate;
-	agentswarm__template-investigation-workflow\3ainvestigate --&gt; agentswarm__template-investigation-workflow\3arequest_review;
-	agentswarm__template-investigation-workflow\3arequest_review --&gt; agentswarm__template-investigation-workflow\3atemplate-investigation-reviewer-workflow;
-	agentswarm__template-investigation-workflow\3atemplate-investigation-reviewer-workflow --&gt; agentswarm__template-investigation-workflow\3acapture_review_result;
-	end
-	subgraph agentswarm__gameplay-reviewer-workflow
-	agentswarm__gameplay-reviewer-workflow\3areview_plan(review_plan)
-	end
-	subgraph agentswarm__template-investigation-reviewer-workflow
-	agentswarm__template-investigation-reviewer-workflow\3areview(review)
+	subgraph agentswarm__agent-processing-workflow
+	agentswarm__agent-processing-workflow\3arun_agent_processing(run_agent_processing)
 	end
 	classDef default fill:#f2f0ff,line-height:1.2
 	classDef first fill-opacity:0
@@ -385,118 +285,18 @@ graph TD;
 	finalize(finalize)
 	__end__([&lt;p&gt;__end__&lt;/p&gt;]):::last
 	__start__ --&gt; analyze_prompt;
-	agentswarm__gameplay-engineer-planner\3afinalize --&gt; collect_task_result;
-	agentswarm__gameplay-engineer-workflow\3a__end__ --&gt; collect_task_result;
-	agentswarm__gameplay-reviewer-workflow\3areview_plan --&gt; collect_task_result;
-	agentswarm__template-investigation-reviewer-workflow\3areview --&gt; collect_task_result;
-	agentswarm__template-investigation-workflow\3a__end__ --&gt; collect_task_result;
+	agentswarm__agent-processing-workflow\3arun_agent_processing --&gt; collect_task_result;
 	analyze_prompt --&gt; plan_tasks;
 	collect_task_result --&gt; select_next_task;
 	mark_task_failed --&gt; collect_task_result;
 	plan_tasks --&gt; route_tasks;
 	route_tasks --&gt; select_next_task;
-	select_next_task -.-&gt; agentswarm__gameplay-engineer-planner\3a__start__;
-	select_next_task -.-&gt; agentswarm__gameplay-engineer-workflow\3aclassify_request;
-	select_next_task -.-&gt; agentswarm__gameplay-reviewer-workflow\3areview_plan;
-	select_next_task -.-&gt; agentswarm__template-investigation-reviewer-workflow\3areview;
-	select_next_task -.-&gt; agentswarm__template-investigation-workflow\3a__start__;
+	select_next_task -.-&gt; agentswarm__agent-processing-workflow\3arun_agent_processing;
 	select_next_task -.-&gt; finalize;
 	select_next_task -.-&gt; mark_task_failed;
 	finalize --&gt; __end__;
-	subgraph agentswarm__gameplay-engineer-planner
-	agentswarm__gameplay-engineer-planner\3a__start__(&lt;p&gt;__start__&lt;/p&gt;)
-	agentswarm__gameplay-engineer-planner\3aresearch_solution(research_solution)
-	agentswarm__gameplay-engineer-planner\3adraft_solution_plan(draft_solution_plan)
-	agentswarm__gameplay-engineer-planner\3areview_solution_plan(review_solution_plan)
-	agentswarm__gameplay-engineer-planner\3afinalize(finalize)
-	agentswarm__gameplay-engineer-planner\3a__start__ --&gt; agentswarm__gameplay-engineer-planner\3aresearch_solution;
-	agentswarm__gameplay-engineer-planner\3adraft_solution_plan --&gt; agentswarm__gameplay-engineer-planner\3areview_solution_plan;
-	agentswarm__gameplay-engineer-planner\3aresearch_solution --&gt; agentswarm__gameplay-engineer-planner\3adraft_solution_plan;
-	agentswarm__gameplay-engineer-planner\3areview_solution_plan -.-&gt; agentswarm__gameplay-engineer-planner\3afinalize;
-	agentswarm__gameplay-engineer-planner\3areview_solution_plan -.-&gt; agentswarm__gameplay-engineer-planner\3aresearch_solution;
-	end
-	subgraph agentswarm__gameplay-engineer-workflow
-	agentswarm__gameplay-engineer-workflow\3aclassify_request(classify_request)
-	agentswarm__gameplay-engineer-workflow\3arequest_investigation(request_investigation)
-	agentswarm__gameplay-engineer-workflow\3aprepare_investigation_strategy(prepare_investigation_strategy)
-	agentswarm__gameplay-engineer-workflow\3asimulate_engineer_investigation(simulate_engineer_investigation)
-	agentswarm__gameplay-engineer-workflow\3aassess_implementation_strategy(assess_implementation_strategy)
-	agentswarm__gameplay-engineer-workflow\3aevaluate_investigation(evaluate_investigation)
-	agentswarm__gameplay-engineer-workflow\3abuild_design_doc(build_design_doc)
-	agentswarm__gameplay-engineer-workflow\3abuild_bug_context_doc(build_bug_context_doc)
-	agentswarm__gameplay-engineer-workflow\3aprepare_investigation_blocked_delivery(prepare_investigation_blocked_delivery)
-	agentswarm__gameplay-engineer-workflow\3aprepare_investigation_delivery(prepare_investigation_delivery)
-	agentswarm__gameplay-engineer-workflow\3aplan_work(plan_work)
-	agentswarm__gameplay-engineer-workflow\3arequest_review(request_review)
-	agentswarm__gameplay-engineer-workflow\3aenter_review_subgraph(enter_review_subgraph)
-	agentswarm__gameplay-engineer-workflow\3agameplay-reviewer-workflow(gameplay-reviewer-workflow)
-	agentswarm__gameplay-engineer-workflow\3acapture_review_result(capture_review_result)
-	agentswarm__gameplay-engineer-workflow\3arevise_plan(revise_plan)
-	agentswarm__gameplay-engineer-workflow\3aimplement_code(implement_code)
-	agentswarm__gameplay-engineer-workflow\3apost_implementation_gate(post_implementation_gate)
-	agentswarm__gameplay-engineer-workflow\3arequest_repair_validation(request_repair_validation)
-	agentswarm__gameplay-engineer-workflow\3aself_test(self_test)
-	agentswarm__gameplay-engineer-workflow\3acapture_repair_validation(capture_repair_validation)
-	agentswarm__gameplay-engineer-workflow\3arepair_code(repair_code)
-	agentswarm__gameplay-engineer-workflow\3aprepare_delivery(prepare_delivery)
-	agentswarm__gameplay-engineer-workflow\3aprepare_repair_blocked_delivery(prepare_repair_blocked_delivery)
-	agentswarm__gameplay-engineer-workflow\3aprepare_review_blocked_delivery(prepare_review_blocked_delivery)
-	agentswarm__gameplay-engineer-workflow\3a__end__(&lt;p&gt;__end__&lt;/p&gt;)
-	agentswarm__gameplay-engineer-workflow\3aassess_implementation_strategy --&gt; agentswarm__gameplay-engineer-workflow\3aevaluate_investigation;
-	agentswarm__gameplay-engineer-workflow\3abuild_bug_context_doc -.-&gt; agentswarm__gameplay-engineer-workflow\3aimplement_code;
-	agentswarm__gameplay-engineer-workflow\3abuild_bug_context_doc -.-&gt; agentswarm__gameplay-engineer-workflow\3aprepare_investigation_delivery;
-	agentswarm__gameplay-engineer-workflow\3abuild_design_doc -.-&gt; agentswarm__gameplay-engineer-workflow\3aplan_work;
-	agentswarm__gameplay-engineer-workflow\3abuild_design_doc -.-&gt; agentswarm__gameplay-engineer-workflow\3aprepare_investigation_delivery;
-	agentswarm__gameplay-engineer-workflow\3acapture_repair_validation -.-&gt; agentswarm__gameplay-engineer-workflow\3aprepare_delivery;
-	agentswarm__gameplay-engineer-workflow\3acapture_repair_validation -.-&gt; agentswarm__gameplay-engineer-workflow\3aprepare_repair_blocked_delivery;
-	agentswarm__gameplay-engineer-workflow\3acapture_repair_validation -.-&gt; agentswarm__gameplay-engineer-workflow\3arepair_code;
-	agentswarm__gameplay-engineer-workflow\3acapture_review_result -.-&gt; agentswarm__gameplay-engineer-workflow\3aimplement_code;
-	agentswarm__gameplay-engineer-workflow\3acapture_review_result -.-&gt; agentswarm__gameplay-engineer-workflow\3aprepare_review_blocked_delivery;
-	agentswarm__gameplay-engineer-workflow\3acapture_review_result -.-&gt; agentswarm__gameplay-engineer-workflow\3arevise_plan;
-	agentswarm__gameplay-engineer-workflow\3aclassify_request --&gt; agentswarm__gameplay-engineer-workflow\3arequest_investigation;
-	agentswarm__gameplay-engineer-workflow\3aenter_review_subgraph --&gt; agentswarm__gameplay-engineer-workflow\3agameplay-reviewer-workflow;
-	agentswarm__gameplay-engineer-workflow\3aevaluate_investigation -.-&gt; agentswarm__gameplay-engineer-workflow\3abuild_bug_context_doc;
-	agentswarm__gameplay-engineer-workflow\3aevaluate_investigation -.-&gt; agentswarm__gameplay-engineer-workflow\3abuild_design_doc;
-	agentswarm__gameplay-engineer-workflow\3aevaluate_investigation -.-&gt; agentswarm__gameplay-engineer-workflow\3aprepare_investigation_blocked_delivery;
-	agentswarm__gameplay-engineer-workflow\3aevaluate_investigation -.-&gt; agentswarm__gameplay-engineer-workflow\3arequest_investigation;
-	agentswarm__gameplay-engineer-workflow\3agameplay-reviewer-workflow --&gt; agentswarm__gameplay-engineer-workflow\3acapture_review_result;
-	agentswarm__gameplay-engineer-workflow\3aimplement_code --&gt; agentswarm__gameplay-engineer-workflow\3apost_implementation_gate;
-	agentswarm__gameplay-engineer-workflow\3aplan_work --&gt; agentswarm__gameplay-engineer-workflow\3arequest_review;
-	agentswarm__gameplay-engineer-workflow\3apost_implementation_gate -.-&gt; agentswarm__gameplay-engineer-workflow\3aprepare_delivery;
-	agentswarm__gameplay-engineer-workflow\3apost_implementation_gate -.-&gt; agentswarm__gameplay-engineer-workflow\3arequest_repair_validation;
-	agentswarm__gameplay-engineer-workflow\3aprepare_investigation_strategy --&gt; agentswarm__gameplay-engineer-workflow\3asimulate_engineer_investigation;
-	agentswarm__gameplay-engineer-workflow\3arepair_code --&gt; agentswarm__gameplay-engineer-workflow\3arequest_repair_validation;
-	agentswarm__gameplay-engineer-workflow\3arequest_investigation --&gt; agentswarm__gameplay-engineer-workflow\3aprepare_investigation_strategy;
-	agentswarm__gameplay-engineer-workflow\3arequest_repair_validation --&gt; agentswarm__gameplay-engineer-workflow\3aself_test;
-	agentswarm__gameplay-engineer-workflow\3arequest_review --&gt; agentswarm__gameplay-engineer-workflow\3aenter_review_subgraph;
-	agentswarm__gameplay-engineer-workflow\3arevise_plan --&gt; agentswarm__gameplay-engineer-workflow\3arequest_review;
-	agentswarm__gameplay-engineer-workflow\3aself_test --&gt; agentswarm__gameplay-engineer-workflow\3acapture_repair_validation;
-	agentswarm__gameplay-engineer-workflow\3asimulate_engineer_investigation --&gt; agentswarm__gameplay-engineer-workflow\3aassess_implementation_strategy;
-	agentswarm__gameplay-engineer-workflow\3aprepare_delivery --&gt; agentswarm__gameplay-engineer-workflow\3a__end__;
-	agentswarm__gameplay-engineer-workflow\3aprepare_investigation_blocked_delivery --&gt; agentswarm__gameplay-engineer-workflow\3a__end__;
-	agentswarm__gameplay-engineer-workflow\3aprepare_investigation_delivery --&gt; agentswarm__gameplay-engineer-workflow\3a__end__;
-	agentswarm__gameplay-engineer-workflow\3aprepare_repair_blocked_delivery --&gt; agentswarm__gameplay-engineer-workflow\3a__end__;
-	agentswarm__gameplay-engineer-workflow\3aprepare_review_blocked_delivery --&gt; agentswarm__gameplay-engineer-workflow\3a__end__;
-	end
-	subgraph agentswarm__template-investigation-workflow
-	agentswarm__template-investigation-workflow\3a__start__(&lt;p&gt;__start__&lt;/p&gt;)
-	agentswarm__template-investigation-workflow\3ainvestigate(investigate)
-	agentswarm__template-investigation-workflow\3arequest_review(request_review)
-	agentswarm__template-investigation-workflow\3atemplate-investigation-reviewer-workflow(template-investigation-reviewer-workflow)
-	agentswarm__template-investigation-workflow\3acapture_review_result(capture_review_result)
-	agentswarm__template-investigation-workflow\3a__end__(&lt;p&gt;__end__&lt;/p&gt;)
-	agentswarm__template-investigation-workflow\3a__start__ --&gt; agentswarm__template-investigation-workflow\3ainvestigate;
-	agentswarm__template-investigation-workflow\3acapture_review_result -.-&gt; agentswarm__template-investigation-workflow\3a__end__;
-	agentswarm__template-investigation-workflow\3acapture_review_result -.-&gt; agentswarm__template-investigation-workflow\3ainvestigate;
-	agentswarm__template-investigation-workflow\3ainvestigate --&gt; agentswarm__template-investigation-workflow\3arequest_review;
-	agentswarm__template-investigation-workflow\3arequest_review --&gt; agentswarm__template-investigation-workflow\3atemplate-investigation-reviewer-workflow;
-	agentswarm__template-investigation-workflow\3atemplate-investigation-reviewer-workflow --&gt; agentswarm__template-investigation-workflow\3acapture_review_result;
-	end
-	subgraph agentswarm__gameplay-reviewer-workflow
-	agentswarm__gameplay-reviewer-workflow\3areview_plan(review_plan)
-	end
-	subgraph agentswarm__template-investigation-reviewer-workflow
-	agentswarm__template-investigation-reviewer-workflow\3areview(review)
+	subgraph agentswarm__agent-processing-workflow
+	agentswarm__agent-processing-workflow\3arun_agent_processing(run_agent_processing)
 	end
 	classDef default fill:#f2f0ff,line-height:1.2
 	classDef first fill-opacity:0
@@ -508,8 +308,8 @@ graph TD;
 
       <article class="panel">
         <div class="panel-header">
-          <h2>Gameplay Engineer Workflow</h2>
-          <span class="chip">Feature + bugfix split</span>
+          <h2>Agent Processing Workflow</h2>
+          <span class="chip">Codex execution</span>
         </div>
         <div class="panel-body">
           <div class="mermaid-shell">
@@ -520,70 +320,10 @@ config:
 ---
 graph TD;
 	__start__([&lt;p&gt;__start__&lt;/p&gt;]):::first
-	classify_request(classify_request)
-	request_investigation(request_investigation)
-	prepare_investigation_strategy(prepare_investigation_strategy)
-	simulate_engineer_investigation(simulate_engineer_investigation)
-	assess_implementation_strategy(assess_implementation_strategy)
-	evaluate_investigation(evaluate_investigation)
-	build_design_doc(build_design_doc)
-	build_bug_context_doc(build_bug_context_doc)
-	prepare_investigation_blocked_delivery(prepare_investigation_blocked_delivery)
-	prepare_investigation_delivery(prepare_investigation_delivery)
-	plan_work(plan_work)
-	request_review(request_review)
-	enter_review_subgraph(enter_review_subgraph)
-	capture_review_result(capture_review_result)
-	revise_plan(revise_plan)
-	implement_code(implement_code)
-	post_implementation_gate(post_implementation_gate)
-	request_repair_validation(request_repair_validation)
-	self_test(self_test)
-	capture_repair_validation(capture_repair_validation)
-	repair_code(repair_code)
-	prepare_delivery(prepare_delivery)
-	prepare_repair_blocked_delivery(prepare_repair_blocked_delivery)
-	prepare_review_blocked_delivery(prepare_review_blocked_delivery)
+	run_agent_processing(run_agent_processing)
 	__end__([&lt;p&gt;__end__&lt;/p&gt;]):::last
-	__start__ --&gt; classify_request;
-	assess_implementation_strategy --&gt; evaluate_investigation;
-	build_bug_context_doc -.-&gt; implement_code;
-	build_bug_context_doc -.-&gt; prepare_investigation_delivery;
-	build_design_doc -.-&gt; plan_work;
-	build_design_doc -.-&gt; prepare_investigation_delivery;
-	capture_repair_validation -.-&gt; prepare_delivery;
-	capture_repair_validation -.-&gt; prepare_repair_blocked_delivery;
-	capture_repair_validation -.-&gt; repair_code;
-	capture_review_result -.-&gt; implement_code;
-	capture_review_result -.-&gt; prepare_review_blocked_delivery;
-	capture_review_result -.-&gt; revise_plan;
-	classify_request --&gt; request_investigation;
-	enter_review_subgraph --&gt; gameplay-reviewer-workflow\3areview_plan;
-	evaluate_investigation -.-&gt; build_bug_context_doc;
-	evaluate_investigation -.-&gt; build_design_doc;
-	evaluate_investigation -.-&gt; prepare_investigation_blocked_delivery;
-	evaluate_investigation -.-&gt; request_investigation;
-	gameplay-reviewer-workflow\3areview_plan --&gt; capture_review_result;
-	implement_code --&gt; post_implementation_gate;
-	plan_work --&gt; request_review;
-	post_implementation_gate -.-&gt; prepare_delivery;
-	post_implementation_gate -.-&gt; request_repair_validation;
-	prepare_investigation_strategy --&gt; simulate_engineer_investigation;
-	repair_code --&gt; request_repair_validation;
-	request_investigation --&gt; prepare_investigation_strategy;
-	request_repair_validation --&gt; self_test;
-	request_review --&gt; enter_review_subgraph;
-	revise_plan --&gt; request_review;
-	self_test --&gt; capture_repair_validation;
-	simulate_engineer_investigation --&gt; assess_implementation_strategy;
-	prepare_delivery --&gt; __end__;
-	prepare_investigation_blocked_delivery --&gt; __end__;
-	prepare_investigation_delivery --&gt; __end__;
-	prepare_repair_blocked_delivery --&gt; __end__;
-	prepare_review_blocked_delivery --&gt; __end__;
-	subgraph gameplay-reviewer-workflow
-	gameplay-reviewer-workflow\3areview_plan(review_plan)
-	end
+	__start__ --&gt; run_agent_processing;
+	run_agent_processing --&gt; __end__;
 	classDef default fill:#f2f0ff,line-height:1.2
 	classDef first fill-opacity:0
 	classDef last fill:#bfb6fc
@@ -600,70 +340,10 @@ config:
 ---
 graph TD;
 	__start__([&lt;p&gt;__start__&lt;/p&gt;]):::first
-	classify_request(classify_request)
-	request_investigation(request_investigation)
-	prepare_investigation_strategy(prepare_investigation_strategy)
-	simulate_engineer_investigation(simulate_engineer_investigation)
-	assess_implementation_strategy(assess_implementation_strategy)
-	evaluate_investigation(evaluate_investigation)
-	build_design_doc(build_design_doc)
-	build_bug_context_doc(build_bug_context_doc)
-	prepare_investigation_blocked_delivery(prepare_investigation_blocked_delivery)
-	prepare_investigation_delivery(prepare_investigation_delivery)
-	plan_work(plan_work)
-	request_review(request_review)
-	enter_review_subgraph(enter_review_subgraph)
-	capture_review_result(capture_review_result)
-	revise_plan(revise_plan)
-	implement_code(implement_code)
-	post_implementation_gate(post_implementation_gate)
-	request_repair_validation(request_repair_validation)
-	self_test(self_test)
-	capture_repair_validation(capture_repair_validation)
-	repair_code(repair_code)
-	prepare_delivery(prepare_delivery)
-	prepare_repair_blocked_delivery(prepare_repair_blocked_delivery)
-	prepare_review_blocked_delivery(prepare_review_blocked_delivery)
+	run_agent_processing(run_agent_processing)
 	__end__([&lt;p&gt;__end__&lt;/p&gt;]):::last
-	__start__ --&gt; classify_request;
-	assess_implementation_strategy --&gt; evaluate_investigation;
-	build_bug_context_doc -.-&gt; implement_code;
-	build_bug_context_doc -.-&gt; prepare_investigation_delivery;
-	build_design_doc -.-&gt; plan_work;
-	build_design_doc -.-&gt; prepare_investigation_delivery;
-	capture_repair_validation -.-&gt; prepare_delivery;
-	capture_repair_validation -.-&gt; prepare_repair_blocked_delivery;
-	capture_repair_validation -.-&gt; repair_code;
-	capture_review_result -.-&gt; implement_code;
-	capture_review_result -.-&gt; prepare_review_blocked_delivery;
-	capture_review_result -.-&gt; revise_plan;
-	classify_request --&gt; request_investigation;
-	enter_review_subgraph --&gt; gameplay-reviewer-workflow\3areview_plan;
-	evaluate_investigation -.-&gt; build_bug_context_doc;
-	evaluate_investigation -.-&gt; build_design_doc;
-	evaluate_investigation -.-&gt; prepare_investigation_blocked_delivery;
-	evaluate_investigation -.-&gt; request_investigation;
-	gameplay-reviewer-workflow\3areview_plan --&gt; capture_review_result;
-	implement_code --&gt; post_implementation_gate;
-	plan_work --&gt; request_review;
-	post_implementation_gate -.-&gt; prepare_delivery;
-	post_implementation_gate -.-&gt; request_repair_validation;
-	prepare_investigation_strategy --&gt; simulate_engineer_investigation;
-	repair_code --&gt; request_repair_validation;
-	request_investigation --&gt; prepare_investigation_strategy;
-	request_repair_validation --&gt; self_test;
-	request_review --&gt; enter_review_subgraph;
-	revise_plan --&gt; request_review;
-	self_test --&gt; capture_repair_validation;
-	simulate_engineer_investigation --&gt; assess_implementation_strategy;
-	prepare_delivery --&gt; __end__;
-	prepare_investigation_blocked_delivery --&gt; __end__;
-	prepare_investigation_delivery --&gt; __end__;
-	prepare_repair_blocked_delivery --&gt; __end__;
-	prepare_review_blocked_delivery --&gt; __end__;
-	subgraph gameplay-reviewer-workflow
-	gameplay-reviewer-workflow\3areview_plan(review_plan)
-	end
+	__start__ --&gt; run_agent_processing;
+	run_agent_processing --&gt; __end__;
 	classDef default fill:#f2f0ff,line-height:1.2
 	classDef first fill-opacity:0
 	classDef last fill:#bfb6fc

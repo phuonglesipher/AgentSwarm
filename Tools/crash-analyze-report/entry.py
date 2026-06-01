@@ -34,11 +34,11 @@ REPORT_TEMPLATE = """\
 """
 
 DOMAIN_TO_WORKFLOW = {
-    "gameplay": "gameplay-engineer-workflow",
-    "graphics": "graphics-engineer-workflow",
-    "engine": "engine-engineer-workflow",
-    "platform": "engine-engineer-workflow",
-    "memory": "engine-engineer-workflow",
+    "gameplay": "agent-processing-workflow",
+    "graphics": "agent-processing-workflow",
+    "engine": "agent-processing-workflow",
+    "platform": "agent-processing-workflow",
+    "memory": "agent-processing-workflow",
 }
 
 
@@ -69,7 +69,7 @@ def build_tool(context: ToolContext, metadata: ToolMetadata):
             verification: How to verify the fix works.
         """
         domain_lower = domain.strip().lower()
-        recommended = DOMAIN_TO_WORKFLOW.get(domain_lower, "template-investigation-workflow")
+        recommended = DOMAIN_TO_WORKFLOW.get(domain_lower, "agent-processing-workflow")
 
         report = REPORT_TEMPLATE.format(
             crash_summary=crash_summary.strip(),
